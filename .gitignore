@@ -31,3 +31,5 @@
 *.pyc
 
 build/
+
+expts/
