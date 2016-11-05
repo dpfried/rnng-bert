@@ -33,3 +33,9 @@
 build/
 
 expts/
+
+# from runs
+*.params
+evalbout.txt
+evaluable.txt
+latest_model

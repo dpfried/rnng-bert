@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <fstream>
+#include <string>
 
 #include "cnn/dict.h"
 #include "nt-parser/compressed-fstream.h"
@@ -104,6 +105,8 @@ void TopDownOracle::load_oracle(const string& file, bool is_training) {
     actions.push_back(cur_acts);
     if (termc != sents.back().size()) {
       cerr << "Mismatched number of tokens and SHIFTs in oracle before line " << lc << endl;
+      cerr << "num tokens: " << sents.back().size() << endl;
+      cerr << "num shifts: " << termc << endl;
       abort();
     }
   }
@@ -164,6 +167,8 @@ void TopDownOracleGen::load_oracle(const string& file) {
     actions.push_back(cur_acts);
     if (termc != sents.back().size()) {
       cerr << "Mismatched number of tokens and SHIFTs in oracle before line " << lc << endl;
+      cerr << "num tokens: " << sents.back().size() << endl;
+      cerr << "num shifts: " << termc << endl;
       abort();
     }
   }
