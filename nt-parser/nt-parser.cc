@@ -52,6 +52,7 @@ float DROPOUT = 0.0f;
 unsigned POS_SIZE = 0;
 std::map<int,int> action2NTindex;  // pass in index of action NT(X), return index of X
 bool USE_POS = false;  // in discriminative parser, incorporate POS information in token embedding
+bool USE_PRETRAINED = false;  // in discriminative parser, use pretrained word embeddings (not updated)
 
 using namespace cnn::expr;
 using namespace cnn;
@@ -137,10 +138,10 @@ struct ParserBuilder {
       action_lstm(LAYERS, ACTION_DIM, HIDDEN_DIM, model),
       const_lstm_fwd(LAYERS, LSTM_INPUT_DIM, LSTM_INPUT_DIM, model), // used to compose children of a node into a representation of the node
       const_lstm_rev(LAYERS, LSTM_INPUT_DIM, LSTM_INPUT_DIM, model), // used to compose children of a node into a representation of the node
-      p_w(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})),
-      p_t(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})),
-      p_nt(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})),
-      p_ntup(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})),
+      p_w(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})), // word embeddings
+      p_t(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})), // pretrained word embeddings (not updated)
+      p_nt(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})), // nonterminal embeddings
+      p_ntup(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})), // nonterminal embeddings when used in a composed representation
       p_a(model->add_lookup_parameters(ACTION_SIZE, {ACTION_DIM})),
       p_pbias(model->add_parameters({HIDDEN_DIM})),
       p_A(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
@@ -878,6 +879,8 @@ int main(int argc, char** argv) {
   ACTION_DIM = conf["action_dim"].as<unsigned>();
   LSTM_INPUT_DIM = conf["lstm_input_dim"].as<unsigned>();
   POS_DIM = conf["pos_dim"].as<unsigned>();
+  USE_PRETRAINED = conf.count("words");
+
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
     return 1;
@@ -894,6 +897,7 @@ int main(int argc, char** argv) {
   ostringstream os;
   os << "ntparse"
      << (USE_POS ? "_pos" : "")
+     << (USE_PRETRAINED ? "_pretrained" : "")
      << '_' << IMPLICIT_REDUCE_AFTER_SHIFT
      << '_' << LAYERS
      << '_' << INPUT_DIM
