@@ -23,7 +23,7 @@ if __name__ == "__main__":
     for line in fileinput.input():
         if first_line:
             first_line = False
-            N_dims = int(line.strip().split()[0])
+            N_dims = int(line.strip().split()[1])
 
         word = line[:line.index(' ')]
         if word in vocab:
