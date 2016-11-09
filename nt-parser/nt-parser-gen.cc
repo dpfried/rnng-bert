@@ -333,6 +333,27 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           }
           foundValidAction = true;
         }
+        if (!foundValidAction) {
+          cerr << "sentence:" << endl;
+          for (unsigned i = 0; i < sent.raw.size(); i++) {
+            cerr << sent.raw[i];
+          }
+          cerr << "termc: " << termc << endl;
+          cerr << "sent.size(): " << sent.size() << endl;
+          cerr << "possible actions:" << endl;
+          for (unsigned i = 0; i < current_valid_actions.size(); i++) {
+            auto action = results[i];
+            const string& actionString=adict.Convert(action);
+            cerr << actionString << end;
+          }
+          cerr << "actions so far:" << endl;
+          for (unsigned i = 0; i < results.size(); i++) {
+            auto action = results[i];
+            const string& actionString=adict.Convert(action);
+            cerr << actionString << endl;
+          }
+
+        }
         assert(foundValidAction);
       }
 
