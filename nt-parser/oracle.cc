@@ -141,8 +141,10 @@ void TopDownOracleGen::load_oracle(const string& file) {
     auto& cur_sent = sents.back();
     getline(in, line);
     ReadSentenceView(line, d, &cur_sent.raw);
-    cur_sent.pos = cur_sent.unk = cur_sent.lc = cur_sent.raw;
-    lc += 1;
+    getline(in, line);
+    ReadSentenceView(line, d, &cur_sent.unk);
+    cur_sent.pos = cur_sent.lc = cur_sent.raw;
+    lc += 2;
     if (!cur_sent.SizesMatch()) {
       cerr << "Mismatched lengths of input strings in oracle before line " << lc << endl;
       abort();
