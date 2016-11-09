@@ -117,6 +117,10 @@ void TopDownOracle::load_oracle(const string& file, bool is_training) {
   cerr << "    cumulative         pos vocab size: " << pd->size() << endl;
 }
 
+void TopDownOracleGen::load_bdata(const string& file) {
+  devdata=file;
+}
+
 void TopDownOracleGen::load_oracle(const string& file) {
   cerr << "Loading top-down generative oracle from " << file << endl;
   cnn::compressed_ifstream in(file.c_str());

@@ -1147,7 +1147,7 @@ int main(int argc, char** argv) {
            dwords += sentence.size();
            for (unsigned z = 0; z < N_SAMPLES; ++z) {
              ComputationGraph hg;
-             vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,actions,&right,sample,true);
+             vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,actions,&right,sample,true); // TODO:  order of sample and true should be swapped, but doesn't seem to matter b/c we only go down this branch if sample == true
              double lp = as_scalar(hg.incremental_forward());
              cout << sii << " ||| " << -lp << " |||";
              int ti = 0;
@@ -1180,11 +1180,13 @@ int main(int argc, char** argv) {
            const vector<int>& actions=test_corpus.actions[sii];
            dwords += sentence.size();
            {  ComputationGraph hg;
+             // get log likelihood of gold
               parser.log_prob_parser(&hg,sentence,actions,&right,true);
               double lp = as_scalar(hg.incremental_forward());
               llh += lp;
            }
            ComputationGraph hg;
+          // greedy predict
            vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,vector<int>(),&right,true);
            int ti = 0;
            for (auto a : pred) {

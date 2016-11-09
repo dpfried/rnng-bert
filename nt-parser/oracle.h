@@ -58,6 +58,7 @@ class TopDownOracleGen : public Oracle {
  public:
   TopDownOracleGen(cnn::Dict* termdict, cnn::Dict* adict, cnn::Dict* pdict, cnn::Dict* nontermdict) :
       Oracle(termdict, adict, pdict), nd(nontermdict) {}
+  void load_bdata(const std::string& file);
   void load_oracle(const std::string& file);
   cnn::Dict* nd; // dictionary of nonterminal types
 };
