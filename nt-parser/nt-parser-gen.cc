@@ -80,7 +80,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("lstm_input_dim", po::value<unsigned>()->default_value(60), "LSTM input dimension")
         ("train,t", "Should training be run?")
         ("words,w", po::value<string>(), "Pretrained word embeddings")
-        ("greedy_decode_in_test,g", "greedy decode")
+        ("greedy_decode_dev,g", "greedy decode")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -695,10 +695,9 @@ int main(int argc, char** argv) {
       }
     }
   } // should do training?
-  if (test_corpus.size() > 0) {
-    if (conf.count("greedy_decode_in_test")) { // do test evaluation
+  if (conf.count("greedy_decode_dev")) { // do test evaluation
       bool sample = conf.count("samples") > 0;
-      unsigned test_size = test_corpus.size();
+      unsigned dev_size = dev_corpus.size();
       double llh = 0;
       double trs = 0;
       double right = 0;
@@ -706,8 +705,8 @@ int main(int argc, char** argv) {
       auto t_start = chrono::high_resolution_clock::now();
       const vector<int> actions;
       /*
-      for (unsigned sii = 0; sii < test_size; ++sii) {
-        const auto &sentence = test_corpus.sents[sii];
+      for (unsigned sii = 0; sii < dev_size; ++sii) {
+        const auto &sentence = dev_corpus.sents[sii];
         dwords += sentence.size();
         for (unsigned z = 0; z < N_SAMPLES; ++z) {
           ComputationGraph hg;
@@ -737,13 +736,13 @@ int main(int argc, char** argv) {
       }
        */
       ostringstream os;
-      os << "/tmp/parser_test_eval." << getpid() << ".txt";
+      os << "/tmp/parser_dev_eval." << getpid() << ".txt";
       const string pfx = os.str();
       ofstream out(pfx.c_str());
       t_start = chrono::high_resolution_clock::now();
-      for (unsigned sii = 0; sii < test_size; ++sii) {
-        const auto &sentence = test_corpus.sents[sii];
-        const vector<int> &actions = test_corpus.actions[sii];
+      for (unsigned sii = 0; sii < dev_size; ++sii) {
+        const auto &sentence = dev_corpus.sents[sii];
+        const vector<int> &actions = dev_corpus.actions[sii];
         dwords += sentence.size();
         {
           ComputationGraph hg;
@@ -808,28 +807,28 @@ int main(int argc, char** argv) {
 
       cerr << "F1score: " << newfmeasure << "\n";
 
-    } else { // not greedy decode
-      // if rescoring, we may have many repeats, cache them
-      unordered_map<vector<int>, unordered_map<vector<int>, double, boost::hash<vector<int>>>, boost::hash<vector<int>>> s2a2p;
-      unsigned test_size = test_corpus.size();
-      double llh = 0;
-      double right = 0;
-      double dwords = 0;
-      for (unsigned sii = 0; sii < test_size; ++sii) {
-        const auto &sentence = test_corpus.sents[sii];
-        const vector<int> &actions = test_corpus.actions[sii];
-        dwords += sentence.size();
-        double &lp = s2a2p[sentence.raw][actions];
-        if (!lp) {
-          ComputationGraph hg;
-          parser.log_prob_parser(&hg, sentence, actions, &right, true);
-          lp = as_scalar(hg.incremental_forward());
-        }
-        cout << sentence.size() << '\t' << lp << endl;
-        llh += lp;
-      }
-      cerr << "test     total -llh=" << llh << endl;
-      cerr << "test ppl (per word)=" << exp(llh / dwords) << endl;
     }
+  if (test_corpus.size() > 0) {
+    // if rescoring, we may have many repeats, cache them
+    unordered_map<vector<int>, unordered_map<vector<int>, double, boost::hash<vector<int>>>, boost::hash<vector<int>>> s2a2p;
+    unsigned test_size = test_corpus.size();
+    double llh = 0;
+    double right = 0;
+    double dwords = 0;
+    for (unsigned sii = 0; sii < test_size; ++sii) {
+      const auto &sentence = test_corpus.sents[sii];
+      const vector<int> &actions = test_corpus.actions[sii];
+      dwords += sentence.size();
+      double &lp = s2a2p[sentence.raw][actions];
+      if (!lp) {
+        ComputationGraph hg;
+        parser.log_prob_parser(&hg, sentence, actions, &right, true);
+        lp = as_scalar(hg.incremental_forward());
+      }
+      cout << sentence.size() << '\t' << lp << endl;
+      llh += lp;
+    }
+    cerr << "test     total -llh=" << llh << endl;
+    cerr << "test ppl (per word)=" << exp(llh / dwords) << endl;
   }
 }
