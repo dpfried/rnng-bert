@@ -316,19 +316,24 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       } else { // max
         double best_score = -INFINITY;
         assert(!current_valid_actions.empty());
+        bool foundValidAction = false;
         for (unsigned i = 0; i < current_valid_actions.size(); i++) {
           unsigned possible_action = current_valid_actions[i];
           double score = dist[possible_action];
           const string& possibleActionString=adict.Convert(possible_action);
           if (possibleActionString[0] == 'S' && possibleActionString[1] == 'H') {
-            assert(termc < sent.size());
+            if (termc >= sent.size())
+              continue; // possible actions always includes shift!
+            //assert(termc < sent.size());
             score -= as_scalar(cfsm->neg_log_softmax(nlp_t, sent.raw[termc]).value());
           }
           if (score > best_score) {
             best_score = score;
             model_action = possible_action;
           }
+          foundValidAction = true;
         }
+        assert(foundValidAction);
       }
 
       unsigned action = model_action;
