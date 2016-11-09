@@ -321,10 +321,53 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           unsigned possible_action = current_valid_actions[i];
           double score = dist[possible_action];
           const string& possibleActionString=adict.Convert(possible_action);
+
+          unsigned ssize = stack.size();
+          //assert(sent.size() + 1 >= termc );
+          unsigned bsize = sent.size() + 1 - termc; // pretend we have a buffer guard
+          bool is_shift = (possibleActionString[0] == 'S' && possibleActionString[1]=='H');
+          bool is_reduce = (possibleActionString[0] == 'R' && possibleActionString[1]=='E');
+          bool is_nt = (possibleActionString[0] == 'N');
+          assert(is_shift || is_reduce || is_nt);
+          static const unsigned MAX_OPEN_NTS = 100;
+          if (is_nt && nopen_parens > MAX_OPEN_NTS) continue;
+          bool skipRest = false;
+          if (ssize == 1) {
+              if (!is_nt) continue;
+              skipRest = true;
+          }
+
+          if (!skipRest) {
+              if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+                  // if a SHIFT has an implicit REDUCE, then only shift after an NT:
+                  if (is_shift && prev_a != 'N') continue;
+              }
+
+              // be careful with top-level parens- you can only close them if you
+              // have fully processed the buffer
+              if (nopen_parens == 1 && bsize > 1) {
+                  if (IMPLICIT_REDUCE_AFTER_SHIFT && is_shift) continue;
+                  if (is_reduce) continue;
+              }
+
+              // you can't reduce after an NT action
+              if (is_reduce && prev_a == 'N') continue;
+              if (is_nt && bsize == 1) continue;
+              if (is_shift && bsize == 1) continue;
+              if (is_reduce && ssize < 3) continue;
+          }
           if (possibleActionString[0] == 'S' && possibleActionString[1] == 'H') {
-            if (termc >= sent.size())
-              continue; // possible actions always includes shift!
             //assert(termc < sent.size());
+            if (sent.raw[termc] == 0) {
+                cerr << "sent.size(): " << sent.size() << endl;
+                cerr << "sent.raw[termc] == 0" << endl;
+                cerr << "termc: " << termc << endl;
+                cerr << "sent.raw[termc]: " << termdict.Convert(sent.raw[termc]) << endl;
+                for (unsigned i = 0; i < sent.raw.size(); i++) {
+                    cerr << termdict.Convert(sent.raw[i]) << " ";
+                }
+                cerr << endl;
+            }
             score -= as_scalar(cfsm->neg_log_softmax(nlp_t, sent.raw[termc]).value());
           }
           if (score > best_score) {
@@ -335,16 +378,22 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         }
         if (!foundValidAction) {
           cerr << "sentence:" << endl;
-          for (unsigned i = 0; i < sent.raw.size(); i++) {
-            cerr << sent.raw[i];
+          for (unsigned i = 0; i < sent.unk.size(); i++) {
+            cerr << termdict.Convert(sent.unk[i]) << " ";
           }
+          cerr << endl;
           cerr << "termc: " << termc << endl;
           cerr << "sent.size(): " << sent.size() << endl;
+          cerr << "previous action: " << prev_a << endl;
+          cerr << "terms.size(): " << terms.size() << endl;
+          cerr << "stack.size(): " << stack.size() << endl;
+          cerr << "nopen_parens: " <<  nopen_parens << endl;
+          cerr << endl;
           cerr << "possible actions:" << endl;
           for (unsigned i = 0; i < current_valid_actions.size(); i++) {
-            auto action = results[i];
+            auto action = current_valid_actions[i];
             const string& actionString=adict.Convert(action);
-            cerr << actionString << end;
+            cerr << actionString << endl;
           }
           cerr << "actions so far:" << endl;
           for (unsigned i = 0; i < results.size(); i++) {
@@ -401,6 +450,15 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         } else {
           assert(termc < sent.size());
           wordid = sent.raw[termc];
+        }
+        if (wordid == 0) {
+            cerr << "wordid == 0" << endl;
+            cerr << "termc: " << termc << endl;
+            cerr << "sent.raw[termc]: " << termdict.Convert(sent.raw[termc]) << endl;
+            for (unsigned i = 0; i < sent.raw.size(); i++) {
+                cerr << termdict.Convert(sent.raw[i]) << " ";
+            }
+            cerr << endl;
         }
         log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
         assert (wordid != 0);
@@ -487,10 +545,35 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         //cerr << curr_word << endl;
         is_open_paren.push_back(-1); // we just closed a paren at this position
       }
+      /*
+      if (!sampleTreeAndSentence && !sampleTree && !build_training_graph && termc == sent.size())
+          break;
+          */
     }
     if (build_training_graph && action_count != correct_actions.size()) {
       cerr << "Unexecuted actions remain but final state reached!\n";
       abort();
+    }
+    if (stack.size() != 2) {
+        cerr << "sentence:" << endl;
+        for (unsigned i = 0; i < sent.unk.size(); i++) {
+            cerr << termdict.Convert(sent.unk[i]) << " ";
+        }
+        cerr << endl;
+        cerr << "termc: " << termc << endl;
+        cerr << "sent.size(): " << sent.size() << endl;
+        cerr << "previous action: " << prev_a << endl;
+        cerr << "terms.size(): " << terms.size() << endl;
+        cerr << "stack.size(): " << stack.size() << endl;
+        cerr << "nopen_parens: " <<  nopen_parens << endl;
+        cerr << endl;
+        cerr << "actions so far:" << endl;
+        for (unsigned i = 0; i < results.size(); i++) {
+            auto action = results[i];
+            const string& actionString=adict.Convert(action);
+            cerr << actionString << endl;
+        }
+
     }
     assert(stack.size() == 2); // guard symbol, root
     if (!sampleTreeAndSentence && !sampleTree) {

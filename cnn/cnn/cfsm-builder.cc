@@ -78,6 +78,8 @@ void ClassFactoredSoftmaxBuilder::new_graph(ComputationGraph& cg) {
 Expression ClassFactoredSoftmaxBuilder::neg_log_softmax(const Expression& rep, unsigned wordidx) {
   // TODO assert that new_graph has been called
   int clusteridx = widx2cidx[wordidx];
+  if (clusteridx < 0)
+    cerr << "bad word idx " << wordidx << endl;
   assert(clusteridx >= 0);  // if this fails, wordid is missing from clusters
   Expression cscores = affine_transform({cbias, r2c, rep});
   Expression cnlp = pickneglogsoftmax(cscores, clusteridx);
