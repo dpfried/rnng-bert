@@ -53,6 +53,7 @@ unsigned POS_SIZE = 0;
 std::map<int,int> action2NTindex;  // pass in index of action NT(X), return index of X
 bool USE_POS = false;  // in discriminative parser, incorporate POS information in token embedding
 bool USE_PRETRAINED = false;  // in discriminative parser, use pretrained word embeddings (not updated)
+bool NO_STACK = false;  // in discriminative parser, use pretrained word embeddings (not updated)
 
 using namespace cnn::expr;
 using namespace cnn;
@@ -88,6 +89,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("train,t", "Should training be run?")
         ("words,w", po::value<string>(), "Pretrained word embeddings")
         ("beam_size,b", po::value<unsigned>()->default_value(1), "beam size")
+        ("no_stack,S", "Don't encode the stack")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -229,22 +231,22 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     vector<unsigned> results;
     const bool build_training_graph = correct_actions.size() > 0;
     bool apply_dropout = (DROPOUT && !is_evaluation);
-    stack_lstm.new_graph(*hg);
+    if (!NO_STACK) stack_lstm.new_graph(*hg);
     action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
-    stack_lstm.start_new_sequence();
+    if (!NO_STACK) stack_lstm.start_new_sequence();
     buffer_lstm->new_graph(*hg);
     buffer_lstm->start_new_sequence();
     action_lstm.start_new_sequence();
     if (apply_dropout) {
-      stack_lstm.set_dropout(DROPOUT);
+      if (!NO_STACK) stack_lstm.set_dropout(DROPOUT);
       action_lstm.set_dropout(DROPOUT);
       buffer_lstm->set_dropout(DROPOUT);
       const_lstm_fwd.set_dropout(DROPOUT);
       const_lstm_rev.set_dropout(DROPOUT);
     } else {
-      stack_lstm.disable_dropout();
+      if (!NO_STACK) stack_lstm.disable_dropout();
       action_lstm.disable_dropout();
       buffer_lstm->disable_dropout();
       const_lstm_fwd.disable_dropout();
@@ -313,7 +315,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     stack.push_back(parameter(*hg, p_stack_guard));
     stacki.push_back(-999); // not used for anything
     // drive dummy symbol on stack through LSTM
-    stack_lstm.add_input(stack.back());
+    if (!NO_STACK) stack_lstm.add_input(stack.back());
     vector<int> is_open_paren; // -1 if no nonterminal has a parenthesis open, otherwise index of NT
     is_open_paren.push_back(-1); // corresponds to dummy symbol
     vector<Expression> log_probs;
@@ -334,15 +336,17 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       //cerr << "valid actions = " << current_valid_actions.size() << endl;
 
       // p_t = pbias + S * slstm + B * blstm + A * almst
-      Expression stack_summary = stack_lstm.back();
+      Expression stack_summary = NO_STACK ? Expression() : stack_lstm.back();
       Expression action_summary = action_lstm.back();
       Expression buffer_summary = buffer_lstm->back();
       if (apply_dropout) {
-        stack_summary = dropout(stack_summary, DROPOUT);
+        if (!NO_STACK) stack_summary = dropout(stack_summary, DROPOUT);
         action_summary = dropout(action_summary, DROPOUT);
         buffer_summary = dropout(buffer_summary, DROPOUT);
       }
-      Expression p_t = affine_transform({pbias, S, stack_summary, B, buffer_summary, A, action_summary});
+      Expression p_t = NO_STACK ?
+                       affine_transform({pbias, B, buffer_summary, A, action_summary}) :
+                       affine_transform({pbias, S, stack_summary, B, buffer_summary, A, action_summary});
       Expression nlp_t = rectify(p_t);
       //if (build_training_graph) nlp_t = dropout(nlp_t, 0.4);
       // r_t = abias + p2a * nlp
@@ -411,18 +415,18 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           Expression pt = rectify(affine_transform({ptbias, ptW, c}));
           stack.pop_back();
           stacki.pop_back();
-          stack_lstm.rewind_one_step();
+          if (!NO_STACK) stack_lstm.rewind_one_step();
           buffer.pop_back();
           bufferi.pop_back();
           buffer_lstm->rewind_one_step();
           is_open_paren.pop_back();
-          stack_lstm.add_input(pt);
+          if (!NO_STACK) stack_lstm.add_input(pt);
           stack.push_back(pt);
           stacki.push_back(999);
           is_open_paren.push_back(-1);
         } else {
           stack.push_back(buffer.back());
-          stack_lstm.add_input(buffer.back());
+          if (!NO_STACK) stack_lstm.add_input(buffer.back());
           stacki.push_back(bufferi.back());
           buffer.pop_back();
           buffer_lstm->rewind_one_step();
@@ -438,7 +442,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         nt_count++;
         Expression nt_embedding = lookup(*hg, p_nt, nt_index);
         stack.push_back(nt_embedding);
-        stack_lstm.add_input(nt_embedding);
+        if (!NO_STACK) stack_lstm.add_input(nt_embedding);
         stacki.push_back(-1);
         is_open_paren.push_back(nt_index);
       } else { // REDUCE
@@ -462,32 +466,36 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           assert (stacki.back() != -1);
           stacki.pop_back();
           stack.pop_back();
-          stack_lstm.rewind_one_step();
+          if (!NO_STACK) stack_lstm.rewind_one_step();
           is_open_paren.pop_back();
         }
         is_open_paren.pop_back(); // nt symbol
         assert (stacki.back() == -1);
         stacki.pop_back(); // nonterminal dummy
         stack.pop_back(); // nonterminal dummy
-        stack_lstm.rewind_one_step(); // nt symbol
+        if (NO_STACK) {
+          stack.push_back(Expression()); // placeholder since we check size
+        } else {
+          stack_lstm.rewind_one_step(); // nt symbol
 
-        // BUILD TREE EMBEDDING USING BIDIR LSTM
-        const_lstm_fwd.add_input(nonterminal);
-        const_lstm_rev.add_input(nonterminal);
-        for (i = 0; i < nchildren; ++i) {
-          const_lstm_fwd.add_input(children[i]);
-          const_lstm_rev.add_input(children[nchildren - i - 1]);
+          // BUILD TREE EMBEDDING USING BIDIR LSTM
+          const_lstm_fwd.add_input(nonterminal);
+          const_lstm_rev.add_input(nonterminal);
+          for (i = 0; i < nchildren; ++i) {
+            const_lstm_fwd.add_input(children[i]);
+            const_lstm_rev.add_input(children[nchildren - i - 1]);
+          }
+          Expression cfwd = const_lstm_fwd.back();
+          Expression crev = const_lstm_rev.back();
+          if (apply_dropout) {
+            cfwd = dropout(cfwd, DROPOUT);
+            crev = dropout(crev, DROPOUT);
+          }
+          Expression c = concatenate({cfwd, crev});
+          Expression composed = rectify(affine_transform({cbias, cW, c}));
+          stack_lstm.add_input(composed);
+          stack.push_back(composed);
         }
-        Expression cfwd = const_lstm_fwd.back();
-        Expression crev = const_lstm_rev.back();
-        if (apply_dropout) {
-          cfwd = dropout(cfwd, DROPOUT);
-          crev = dropout(crev, DROPOUT);
-        }
-        Expression c = concatenate({cfwd, crev});
-        Expression composed = rectify(affine_transform({cbias, cW, c}));
-        stack_lstm.add_input(composed);
-        stack.push_back(composed);
         stacki.push_back(999); // who knows, should get rid of this
         is_open_paren.push_back(-1); // we just closed a paren at this position
       }
@@ -882,6 +890,7 @@ int main(int argc, char** argv) {
   LSTM_INPUT_DIM = conf["lstm_input_dim"].as<unsigned>();
   POS_DIM = conf["pos_dim"].as<unsigned>();
   USE_PRETRAINED = conf.count("words");
+  NO_STACK = conf.count("no_stack");
 
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
@@ -906,6 +915,7 @@ int main(int argc, char** argv) {
      << '_' << HIDDEN_DIM
      << '_' << ACTION_DIM
      << '_' << LSTM_INPUT_DIM
+          << (NO_STACK ? "_no-stack" : "")
      << "-pid" << getpid() << ".params";
   const string fname = os.str();
   cerr << "PARAMETER FILE: " << fname << endl;
