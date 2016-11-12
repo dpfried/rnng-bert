@@ -457,17 +457,19 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
         // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
         // TO BE COMPOSED INTO A TREE EMBEDDING
-        is_open_paren.pop_back(); // nt symbol
-        stacki.pop_back(); // nonterminal dummy
-        stack.pop_back(); // nonterminal dummy
-        stack_lstm.rewind_one_step(); // nt symbol
         for (i = 0; i < nchildren; ++i) {
           children[i] = stack.back();
+          assert (stacki.back() != -1);
           stacki.pop_back();
           stack.pop_back();
           stack_lstm.rewind_one_step();
           is_open_paren.pop_back();
         }
+        is_open_paren.pop_back(); // nt symbol
+        assert (stacki.back() == -1);
+        stacki.pop_back(); // nonterminal dummy
+        stack.pop_back(); // nonterminal dummy
+        stack_lstm.rewind_one_step(); // nt symbol
 
         // BUILD TREE EMBEDDING USING BIDIR LSTM
         const_lstm_fwd.add_input(nonterminal);
