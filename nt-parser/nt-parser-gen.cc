@@ -50,6 +50,8 @@ unsigned NT_SIZE = 0;
 float DROPOUT = 0.0f;
 std::map<int,int> action2NTindex;  // pass in index of action NT(X), return index of X
 
+bool IGNORE_WORD_IN_GREEDY = false;
+
 using namespace cnn::expr;
 using namespace cnn;
 using namespace std;
@@ -81,6 +83,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("train,t", "Should training be run?")
         ("words,w", po::value<string>(), "Pretrained word embeddings")
         ("greedy_decode_dev,g", "greedy decode")
+        ("ignore_word_in_greedy,i", "greedy decode")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -368,7 +371,9 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
                 }
                 cerr << endl;
             }
-            score -= as_scalar(cfsm->neg_log_softmax(nlp_t, sent.raw[termc]).value());
+            if (!IGNORE_WORD_IN_GREEDY) {
+              score -= as_scalar(cfsm->neg_log_softmax(nlp_t, sent.raw[termc]).value());
+            }
           }
           if (score > best_score) {
             best_score = score;
@@ -620,6 +625,9 @@ int main(int argc, char** argv) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
     return 1;
   }
+
+  IGNORE_WORD_IN_GREEDY = conf.count("ignore_word_in_greedy");
+
   ostringstream os;
   os << "ntparse_gen"
      << "_D" << DROPOUT
