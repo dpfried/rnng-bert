@@ -69,6 +69,8 @@ struct RNNBuilder {
     cur = head[cur];
   }
 
+  RNNPointer head_of(RNNPointer child) { return head[child]; }
+
   // returns node (index) of most recent output
   virtual Expression back() const = 0;
   // access the final output of each hidden layer
