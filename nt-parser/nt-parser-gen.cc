@@ -134,7 +134,7 @@ struct BeamStateCompare {
 };
 
 static void prune(vector<BeamState>& pq, unsigned k) {
-  if (pq.size() == 1) return;
+  if (pq.size() <= 1) return;
   if (k > pq.size()) k = pq.size();
   // sort descending
   partial_sort(pq.begin(), pq.begin() + k, pq.end(), BeamStateCompare());
@@ -562,6 +562,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     vector<BeamState> beam;
     beam.push_back(initial_state);
 
+
     while(completed.size() < beam_size && !beam.empty()) {
       vector<BeamState> successors;
 
@@ -777,6 +778,8 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
               break;
               */
 
+          successors.push_back(successor);
+
           foundValidAction = true;
         }
         if (!foundValidAction) {
@@ -809,6 +812,9 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         assert(foundValidAction);
       }
 
+      if (successors.size() == 0) {
+          cerr << "warning: successors empty" << endl;
+      }
       // check if any of the successors are complete; add others back to the beam
       for (unsigned i = 0; i < successors.size(); i++) {
         BeamState successor = successors[i];
@@ -835,16 +841,32 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
   }
 };
 
-void signal_callback_handler(int /* signum */) {
-  if (requested_stop) {
-    cerr << "\nReceived SIGINT again, quitting.\n";
-    _exit(1);
+void signal_callback_handler(int signum) {
+  if (signum == SIGINT) {
+    if (requested_stop) {
+        cerr << "\nReceived SIGINT again, quitting.\n";
+        _exit(1);
+    }
+    cerr << "\nReceived SIGINT terminating optimization early...\n";
+    requested_stop = true;
+  } else if (signum == SIGSEGV) {
+    fprintf(stderr, "Error: signal %d:\n", signum);
+    void *array[255];
+    size_t size;
+
+    // get void*'s for all entries on the stack
+    size = backtrace(array, sizeof(array) / sizeof(void *));
+
+    // print out all the frames to stderr
+    fprintf(stderr, "stacktrace:\n", signum);
+    backtrace_symbols_fd(array, size, STDERR_FILENO);
+    exit(1);
+
   }
-  cerr << "\nReceived SIGINT terminating optimization early...\n";
-  requested_stop = true;
 }
 
 int main(int argc, char** argv) {
+  signal(SIGSEGV, signal_callback_handler);
   cnn::Initialize(argc, argv);
 
   cerr << "COMMAND LINE:"; 
@@ -1100,6 +1122,7 @@ int main(int argc, char** argv) {
       ostringstream os;
       os << "/tmp/parser_dev_eval." << getpid() << ".txt";
       const string pfx = os.str();
+      cerr << "writing to " << pfx << endl;
       ofstream out(pfx.c_str());
       t_start = chrono::high_resolution_clock::now();
       for (unsigned sii = 0; sii < dev_size; ++sii) {
@@ -1115,7 +1138,7 @@ int main(int argc, char** argv) {
         }
         ComputationGraph hg;
         // greedy predict
-        vector<unsigned> pred = parser.log_prob_parser_beam(&hg, sentence, conf["beam_size"].as<unsigned>());
+        vector<unsigned> pred = parser.log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
         int ti = 0;
         for (auto a : pred) {
           if (adict.Convert(a)[0] == 'N') {

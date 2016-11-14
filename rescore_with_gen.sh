@@ -17,5 +17,5 @@ utils/is-estimate-marginal-llh.pl 2416 100 $samples $likelihoods > $log_likeliho
 
 utils/add-fake-preterms-for-eval.pl $rescored > $rescored_preterm
 utils/replace-unks-in-trees.pl corpora/test.oracle $rescored_preterm > $hyp
-utils/remove_dev_unk.py corpora/test.stripped $hyp > $hyp_final
-EVALB/evalb -p COLLINS.prm corpora/test.stripped $hyp_final > $parsing_result
+python utils/remove_dev_unk.py corpora/test.stripped $hyp > $hyp_final
+EVALB/evalb -p EVALB/COLLINS.prm corpora/test.stripped $hyp_final | tee $parsing_result
