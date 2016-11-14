@@ -124,6 +124,9 @@ struct BeamState {
   char prev_a;
 
   unsigned termc;
+
+  unsigned action;
+
 };
 
 struct BeamStateCompare {
@@ -599,13 +602,13 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         for (unsigned i = 0; i < current_valid_actions.size(); i++) {
           unsigned possible_action = current_valid_actions[i];
           double score = dist[possible_action];
-          const string& possibleActionString=adict.Convert(possible_action);
+          const string &possibleActionString = adict.Convert(possible_action);
 
           unsigned ssize = current.stack.size();
           //assert(sent.size() + 1 >= termc );
           unsigned bsize = sent.size() + 1 - current.termc; // pretend we have a buffer guard
-          bool is_shift = (possibleActionString[0] == 'S' && possibleActionString[1]=='H');
-          bool is_reduce = (possibleActionString[0] == 'R' && possibleActionString[1]=='E');
+          bool is_shift = (possibleActionString[0] == 'S' && possibleActionString[1] == 'H');
+          bool is_reduce = (possibleActionString[0] == 'R' && possibleActionString[1] == 'E');
           bool is_nt = (possibleActionString[0] == 'N');
           assert(is_shift || is_reduce || is_nt);
           static const unsigned MAX_OPEN_NTS = 100;
@@ -635,6 +638,16 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
             if (is_shift && bsize == 1) continue;
             if (is_reduce && ssize < 3) continue;
           }
+
+          // update only score, log_prob, and action for now
+          // other state vars will be updated after pruning beam for efficiency
+          BeamState successor = current;
+          successor.log_probs.push_back(pick(adiste, possible_action));
+
+          successor.results.push_back(possible_action);
+          successor.action = possible_action;
+
+          // update scores and log probs to account for generating the next word in the sent
           if (possibleActionString[0] == 'S' && possibleActionString[1] == 'H') {
             //assert(termc < sent.size());
             if (sent.raw[current.termc] == 0) {
@@ -647,136 +660,18 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
               }
               cerr << endl;
             }
+
+            Expression word_log_prob = -cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]);
+
             if (!IGNORE_WORD_IN_GREEDY) {
-              score -= as_scalar(cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]).value());
+              score += as_scalar(word_log_prob.value());
+              //score -= as_scalar(cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]).value());
             }
+            successor.log_probs.push_back(word_log_prob);
           }
 
-          BeamState successor = current;
           successor.score += score;
           ++successor.action_count;
-          successor.log_probs.push_back(pick(adiste, possible_action));
-          successor.results.push_back(possible_action);
-
-          // add current action to action LSTM
-          Expression actione = lookup(*hg, p_a, possible_action);
-          action_lstm.add_input(actione);
-
-          // do action
-          const string& actionString=adict.Convert(possible_action);
-          //cerr << "ACT: " << actionString << endl;
-          const char ac = actionString[0];
-          const char ac2 = actionString[1];
-          successor.prev_a = ac;
-
-          if (ac =='S' && ac2=='H') {  // SHIFT
-            unsigned wordid = 0;
-            assert(successor.termc < sent.size());
-            wordid = sent.raw[successor.termc];
-
-            if (wordid == 0) {
-              cerr << "wordid == 0" << endl;
-              cerr << "termc: " << successor.termc << endl;
-              cerr << "sent.raw[termc]: " << termdict.Convert(sent.raw[successor.termc]) << endl;
-              for (unsigned i = 0; i < sent.raw.size(); i++) {
-                cerr << termdict.Convert(sent.raw[i]) << " ";
-              }
-              cerr << endl;
-            }
-            successor.log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
-            assert (wordid != 0);
-            // stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
-            ++successor.termc;
-            Expression word = lookup(*hg, p_w, wordid);
-            successor.terms.push_back(word);
-            term_lstm.add_input(successor.term_position, word);
-            successor.term_position = term_lstm.state();
-
-            successor.stack.push_back(word);
-            stack_lstm.add_input(successor.stack_position, word);
-            successor.stack_position = stack_lstm.state();
-
-            successor.is_open_paren.push_back(-1);
-          } else if (ac == 'N') { // NT
-            ++successor.nopen_parens;
-            auto it = action2NTindex.find(possible_action);
-            assert(it != action2NTindex.end());
-            int nt_index = it->second;
-            successor.nt_count++;
-            // stack_content.push_back(ntermdict.Convert(nt_index));
-            Expression nt_embedding = lookup(*hg, p_nt, nt_index);
-            successor.stack.push_back(nt_embedding);
-            stack_lstm.add_input(successor.stack_position,nt_embedding);
-            successor.stack_position = stack_lstm.state();
-            successor.is_open_paren.push_back(nt_index);
-          } else { // REDUCE
-            --successor.nopen_parens;
-            assert(successor.stack.size() > 2); // dummy symbol means > 2 (not >= 2)
-            // assert(stack_content.size() > 2 && stack.size() == stack_content.size());
-            // find what paren we are closing
-            int i = successor.is_open_paren.size() - 1; //get the last thing on the stack
-            while(successor.is_open_paren[i] < 0) { --i; assert(i >= 0); } //iteratively decide whether or not it's a non-terminal
-            Expression nonterminal = lookup(*hg, p_ntup, successor.is_open_paren[i]);
-            int nchildren = successor.is_open_paren.size() - i - 1;
-            assert(nchildren > 0);
-            //cerr << "  number of children to reduce: " << nchildren << endl;
-            vector<Expression> children(nchildren);
-            const_lstm_fwd.start_new_sequence();
-            const_lstm_rev.start_new_sequence();
-
-            // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
-            // TO BE COMPOSED INTO A TREE EMBEDDING
-            string curr_word;
-            //cerr << "--------------------------------" << endl;
-            //cerr << "Now printing the children" << endl;
-            //cerr << "--------------------------------" << endl;
-            for (i = 0; i < nchildren; ++i) {
-              // assert (stack_content.size() == stack.size());
-              children[i] = successor.stack.back();
-              successor.stack.pop_back();
-              // stack_lstm.rewind_one_step();
-              successor.stack_position = stack_lstm.head_of(successor.stack_position);
-              successor.is_open_paren.pop_back();
-              // curr_word = stack_content.back();
-              //cerr << "At the back of the stack (supposed to be one of the children): " << curr_word << endl;
-              // stack_content.pop_back();
-            }
-            // assert (stack_content.size() == stack.size());
-            //cerr << "Doing REDUCE operation" << endl;
-            successor.is_open_paren.pop_back(); // nt symbol
-            successor.stack.pop_back(); // nonterminal dummy
-            // stack_lstm.rewind_one_step(); // nt symbol
-            successor.stack_position = stack_lstm.head_of(successor.stack_position); // nt symbol
-            // curr_word = stack_content.back();
-            //cerr << "--------------------------------" << endl;
-            //cerr << "At the back of the stack (supposed to be the non-terminal symbol) : " << curr_word << endl;
-            // stack_content.pop_back();
-            // assert (stack.size() == stack_content.size());
-            //cerr << "Done reducing" << endl;
-
-            // BUILD TREE EMBEDDING USING BIDIR LSTM
-            const_lstm_fwd.add_input(nonterminal);
-            const_lstm_rev.add_input(nonterminal);
-            for (i = 0; i < nchildren; ++i) {
-              const_lstm_fwd.add_input(children[i]);
-              const_lstm_rev.add_input(children[nchildren - i - 1]);
-            }
-            Expression cfwd = const_lstm_fwd.back();
-            Expression crev = const_lstm_rev.back();
-            Expression c = concatenate({cfwd, crev});
-            Expression composed = rectify(affine_transform({cbias, cW, c}));
-            stack_lstm.add_input(successor.stack_position, composed);
-            successor.stack_position = stack_lstm.state();
-
-            successor.stack.push_back(composed);
-            // stack_content.push_back(curr_word);
-            //cerr << curr_word << endl;
-            successor.is_open_paren.push_back(-1); // we just closed a paren at this position
-          }
-          /*
-          if (!sampleTreeAndSentence && !sampleTree && !build_training_graph && termc == sent.size())
-              break;
-              */
 
           successors.push_back(successor);
 
@@ -812,31 +707,152 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         assert(foundValidAction);
       }
 
+      // cut down to beam size
+      prune(successors, beam_size);
+
       if (successors.size() == 0) {
-          cerr << "warning: successors empty" << endl;
+        cerr << "warning: successors empty" << endl;
       }
+
+      // update state variables for top K
       // check if any of the successors are complete; add others back to the beam
       for (unsigned i = 0; i < successors.size(); i++) {
         BeamState successor = successors[i];
+        unsigned action = successor.action;
+
+        // add current action to action LSTM
+        Expression actione = lookup(*hg, p_a, action);
+        action_lstm.add_input(actione);
+
+        // do action
+        const string& actionString=adict.Convert(action);
+        //cerr << "ACT: " << actionString << endl;
+        const char ac = actionString[0];
+        const char ac2 = actionString[1];
+        successor.prev_a = ac;
+
+        if (ac =='S' && ac2=='H') {  // SHIFT
+          unsigned wordid = 0;
+          assert(successor.termc < sent.size());
+          wordid = sent.raw[successor.termc];
+
+          if (wordid == 0) {
+            cerr << "wordid == 0" << endl;
+            cerr << "termc: " << successor.termc << endl;
+            cerr << "sent.raw[termc]: " << termdict.Convert(sent.raw[successor.termc]) << endl;
+            for (unsigned i = 0; i < sent.raw.size(); i++) {
+              cerr << termdict.Convert(sent.raw[i]) << " ";
+            }
+            cerr << endl;
+          }
+          //successor.log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
+          assert (wordid != 0);
+          // stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
+          ++successor.termc;
+          Expression word = lookup(*hg, p_w, wordid);
+          successor.terms.push_back(word);
+          term_lstm.add_input(successor.term_position, word);
+          successor.term_position = term_lstm.state();
+
+          successor.stack.push_back(word);
+          stack_lstm.add_input(successor.stack_position, word);
+          successor.stack_position = stack_lstm.state();
+
+          successor.is_open_paren.push_back(-1);
+        } else if (ac == 'N') { // NT
+          ++successor.nopen_parens;
+          auto it = action2NTindex.find(action);
+          assert(it != action2NTindex.end());
+          int nt_index = it->second;
+          successor.nt_count++;
+          // stack_content.push_back(ntermdict.Convert(nt_index));
+          Expression nt_embedding = lookup(*hg, p_nt, nt_index);
+          successor.stack.push_back(nt_embedding);
+          stack_lstm.add_input(successor.stack_position,nt_embedding);
+          successor.stack_position = stack_lstm.state();
+          successor.is_open_paren.push_back(nt_index);
+        } else { // REDUCE
+          --successor.nopen_parens;
+          assert(successor.stack.size() > 2); // dummy symbol means > 2 (not >= 2)
+          // assert(stack_content.size() > 2 && stack.size() == stack_content.size());
+          // find what paren we are closing
+          int i = successor.is_open_paren.size() - 1; //get the last thing on the stack
+          while(successor.is_open_paren[i] < 0) { --i; assert(i >= 0); } //iteratively decide whether or not it's a non-terminal
+          Expression nonterminal = lookup(*hg, p_ntup, successor.is_open_paren[i]);
+          int nchildren = successor.is_open_paren.size() - i - 1;
+          assert(nchildren > 0);
+          //cerr << "  number of children to reduce: " << nchildren << endl;
+          vector<Expression> children(nchildren);
+          const_lstm_fwd.start_new_sequence();
+          const_lstm_rev.start_new_sequence();
+
+          // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
+          // TO BE COMPOSED INTO A TREE EMBEDDING
+          string curr_word;
+          //cerr << "--------------------------------" << endl;
+          //cerr << "Now printing the children" << endl;
+          //cerr << "--------------------------------" << endl;
+          for (i = 0; i < nchildren; ++i) {
+            // assert (stack_content.size() == stack.size());
+            children[i] = successor.stack.back();
+            successor.stack.pop_back();
+            // stack_lstm.rewind_one_step();
+            successor.stack_position = stack_lstm.head_of(successor.stack_position);
+            successor.is_open_paren.pop_back();
+            // curr_word = stack_content.back();
+            //cerr << "At the back of the stack (supposed to be one of the children): " << curr_word << endl;
+            // stack_content.pop_back();
+          }
+          // assert (stack_content.size() == stack.size());
+          //cerr << "Doing REDUCE operation" << endl;
+          successor.is_open_paren.pop_back(); // nt symbol
+          successor.stack.pop_back(); // nonterminal dummy
+          // stack_lstm.rewind_one_step(); // nt symbol
+          successor.stack_position = stack_lstm.head_of(successor.stack_position); // nt symbol
+          // curr_word = stack_content.back();
+          //cerr << "--------------------------------" << endl;
+          //cerr << "At the back of the stack (supposed to be the non-terminal symbol) : " << curr_word << endl;
+          // stack_content.pop_back();
+          // assert (stack.size() == stack_content.size());
+          //cerr << "Done reducing" << endl;
+
+          // BUILD TREE EMBEDDING USING BIDIR LSTM
+          const_lstm_fwd.add_input(nonterminal);
+          const_lstm_rev.add_input(nonterminal);
+          for (i = 0; i < nchildren; ++i) {
+            const_lstm_fwd.add_input(children[i]);
+            const_lstm_rev.add_input(children[nchildren - i - 1]);
+          }
+          Expression cfwd = const_lstm_fwd.back();
+          Expression crev = const_lstm_rev.back();
+          Expression c = concatenate({cfwd, crev});
+          Expression composed = rectify(affine_transform({cbias, cW, c}));
+          stack_lstm.add_input(successor.stack_position, composed);
+          successor.stack_position = stack_lstm.state();
+
+          successor.stack.push_back(composed);
+          // stack_content.push_back(curr_word);
+          //cerr << curr_word << endl;
+          successor.is_open_paren.push_back(-1); // we just closed a paren at this position
+        }
+
         if (successor.stack.size() <= 2 && successor.termc != 0) {
           completed.push_back(successor);
         } else {
           beam.push_back(successor);
         }
       }
-
-      // cut down to size
-      prune(beam, beam_size);
     }
 
     sort(completed.begin(), completed.end(), BeamStateCompare());
 
     BeamState best = completed[0];
-    // the first item on the
 
     assert(best.stack.size() == 2); // guard symbol, root
+    /*
     Expression tot_neglogprob = -sum(best.log_probs);
     assert(tot_neglogprob.pg != nullptr);
+     */
     return best.results;
   }
 };
