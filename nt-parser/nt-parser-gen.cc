@@ -400,6 +400,11 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           wordid = sent.raw[termc];
           log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
         }
+        if (termc == 0) {
+            Expression e_cum_neglogprob = -sum(log_probs);
+            double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
+            cerr << "gold nlp at word 0: \t" << cum_neglogprob << "\t";
+        }
         assert (wordid != 0);
         stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
         ++termc;
@@ -759,6 +764,12 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           successor.stack_position = stack_lstm.state();
 
           successor.is_open_paren.push_back(-1);
+
+          if (successor.termc == 1) {
+              Expression e_cum_neglogprob = -sum(successor.log_probs);
+              double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
+              cerr << "pred nlp at word 0: \t" << cum_neglogprob << "\t";
+          }
         } else if (ac == 'N') { // NT
           ++successor.nopen_parens;
           auto it = action2NTindex.find(action);
@@ -849,10 +860,8 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     BeamState best = completed[0];
 
     assert(best.stack.size() == 2); // guard symbol, root
-    /*
     Expression tot_neglogprob = -sum(best.log_probs);
     assert(tot_neglogprob.pg != nullptr);
-     */
     return best.results;
   }
 };
@@ -1145,16 +1154,20 @@ int main(int argc, char** argv) {
         const auto &sentence = dev_corpus.sents[sii];
         const vector<int> &actions = dev_corpus.actions[sii];
         dwords += sentence.size();
+        cerr << sii << ":\t";
         {
           ComputationGraph hg;
           // get log likelihood of gold
           parser.log_prob_parser(&hg, sentence, actions, &right, true);
           double lp = as_scalar(hg.incremental_forward());
           llh += lp;
+          cerr << "gold nlp: " << lp << "\t";
         }
         ComputationGraph hg;
         // greedy predict
         vector<unsigned> pred = parser.log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
+        double pred_lp = as_scalar(hg.incremental_forward());
+        cerr << "pred nlp: " << pred_lp << endl;
         int ti = 0;
         for (auto a : pred) {
           if (adict.Convert(a)[0] == 'N') {
