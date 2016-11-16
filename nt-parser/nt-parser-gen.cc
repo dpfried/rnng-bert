@@ -377,7 +377,6 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       //cerr << "ACT: " << actionString << endl;
       const char ac = actionString[0];
       const char ac2 = actionString[1];
-      prev_a = ac;
 
       if (ac =='S' && ac2=='H') {  // SHIFT
         unsigned wordid = 0;
@@ -395,11 +394,6 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           wordid = sent.raw[termc];
           log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
         }
-        if (termc == 0) {
-            Expression e_cum_neglogprob = -sum(log_probs);
-            double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
-            cerr << "gold nlp at word 0: \t" << cum_neglogprob << "\t";
-        }
         assert (wordid != 0);
         stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
         ++termc;
@@ -409,6 +403,11 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         stack.push_back(word);
         stack_lstm.add_input(word);
         is_open_paren.push_back(-1);
+        if (prev_a == 'S' || prev_a == 'R') {
+          Expression e_cum_neglogprob = -sum(log_probs);
+          double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
+          cerr << "gold nlp after " << termc << ": \t" << cum_neglogprob << endl;
+        }
       } else if (ac == 'N') { // NT
         ++nopen_parens;
         auto it = action2NTindex.find(action);
@@ -420,6 +419,11 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         stack.push_back(nt_embedding);
         stack_lstm.add_input(nt_embedding);
         is_open_paren.push_back(nt_index);
+        if (prev_a == 'S' || prev_a == 'R') {
+          Expression e_cum_neglogprob = -sum(log_probs);
+          double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
+          cerr << "gold nlp after " << termc << ": \t" << cum_neglogprob << endl;
+        }
       } else { // REDUCE
         --nopen_parens;
         assert(stack.size() > 2); // dummy symbol means > 2 (not >= 2)
@@ -483,7 +487,14 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         stack_content.push_back(curr_word);
         //cerr << curr_word << endl;
         is_open_paren.push_back(-1); // we just closed a paren at this position
+        if (stack.size() <= 2) {
+          Expression e_cum_neglogprob = -sum(log_probs);
+          double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
+          cerr << "gold nlp after " << termc << ": \t" << cum_neglogprob << endl;
+        }
       }
+      prev_a = ac;
+
     }
     if (action_count != correct_actions.size()) {
       cerr << "Unexecuted actions remain but final state reached!\n";
@@ -759,11 +770,13 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
           successor.is_open_paren.push_back(-1);
 
+          /*
           if (successor.termc == 1) {
               Expression e_cum_neglogprob = -sum(successor.log_probs);
               double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
-              cerr << "pred nlp at word 0: \t" << cum_neglogprob << "\t";
+              cerr << "pred nlp after " << successor.termc << ": \t" << cum_neglogprob << endl;
           }
+          */
         } else if (ac == 'N') { // NT
           ++successor.nopen_parens;
           auto it = action2NTindex.find(action);
@@ -1124,11 +1137,13 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
             successor.is_open_paren.push_back(-1);
 
+            /*
             if (successor.termc == 1) {
               Expression e_cum_neglogprob = -sum(successor.log_probs);
               double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
               cerr << "pred nlp at word 0: \t" << cum_neglogprob << "\t";
             }
+            */
           } else if (ac == 'N') { // NT
             ++successor.nopen_parens;
             auto it = action2NTindex.find(action);
@@ -1212,8 +1227,15 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           bool termc_completed = false;
 
           if (current_termc == sent.size() - 1) {
-            termc_completed = successor.stack.size() <= 2; // guard symbol, root
-            if (termc_completed) assert(successor.termc == sent.size());
+            termc_completed = (successor.stack.size() <= 2) && (successor.termc > current_termc); // guard symbol, root
+            if (termc_completed) {
+              if (successor.termc != sent.size()) {
+                  cerr << "current_termc: " << current_termc << endl;
+                  cerr << "termc: " << successor.termc << endl;
+                  cerr << "stack.size: " << successor.stack.size() << endl;
+              }
+              assert(successor.termc == sent.size());
+            }
           } else {
             if (ac == 'S' && ac2 == 'H') {  // SHIFT
               // this termc is completed if the current action shifted the next word
@@ -1236,6 +1258,11 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       } // end build completed for current_termc
 
       prune(completed, beam_size);
+
+      BeamState best_completed = completed[0];
+      Expression e_cum_neglogprob = -sum(best_completed.log_probs);
+      double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
+      cerr << "best nlp after " << best_completed.termc << ": \t" << cum_neglogprob << endl;
 
       // replace beam with completed, for next termc
       beam.clear();
@@ -1547,14 +1574,14 @@ int main(int argc, char** argv) {
         const auto &sentence = dev_corpus.sents[sii];
         const vector<int> &actions = dev_corpus.actions[sii];
         dwords += sentence.size();
-        cerr << sii << ":\t";
+        cerr << endl << "sent " << sii << endl;
         {
           ComputationGraph hg;
           // get log likelihood of gold
           parser.log_prob_parser(&hg, sentence, actions, &right, true);
           double lp = as_scalar(hg.incremental_forward());
           llh += lp;
-          cerr << "gold nlp: " << lp << "\t";
+          cerr << "gold nlp: " << lp << endl;
         }
         ComputationGraph hg;
         // greedy predict
