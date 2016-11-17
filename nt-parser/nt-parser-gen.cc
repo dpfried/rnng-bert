@@ -230,6 +230,24 @@ static bool IsActionForbidden_Generative(const string& a, char prev_a, unsigned 
   return false;
 }
 
+void print_parse(const vector<unsigned>& actions, const parser::Sentence& sent) {
+  unsigned termc = 0;
+  for (unsigned action : actions) {
+    const string& a = adict.Convert(action);
+    if (a[0] == 'R') {
+      cerr << ") ";
+    } else if (a[0] == 'N') {
+      int nt = action2NTindex[action];
+      cerr << " (" << ntermdict.Convert(nt) << " ";
+    } else if (a[0] =='S') {
+      string word = termdict.Convert(sent.raw[termc]);
+      cerr << word << " ";
+      termc++;
+    }
+  }
+  cerr << endl;
+}
+
 // returns parse actions for input sentence (in training just returns the reference)
 // this lets us use pretrained embeddings, when available, for words that were OOV in the
 // parser training data
@@ -406,7 +424,15 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         if (prev_a == 'S' || prev_a == 'R') {
           Expression e_cum_neglogprob = -sum(log_probs);
           double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
-          cerr << "gold nlp after " << termc << ": \t" << cum_neglogprob << endl;
+          cerr << "gold nlp after " << (termc - 1) << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
+          /*
+          if (termc - 1 == 1) {
+              for (unsigned i = 0; i < log_probs.size(); i++) {
+                  cerr << as_scalar(log_probs[i].value()) << " ";
+              }
+          }
+          */
+          print_parse(results, sent);
         }
       } else if (ac == 'N') { // NT
         ++nopen_parens;
@@ -422,7 +448,16 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         if (prev_a == 'S' || prev_a == 'R') {
           Expression e_cum_neglogprob = -sum(log_probs);
           double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
-          cerr << "gold nlp after " << termc << ": \t" << cum_neglogprob << endl;
+          cerr << "gold nlp after " << termc << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
+          /*
+          if (termc == 1) {
+              for (unsigned i = 0; i < log_probs.size(); i++) {
+                  cerr << as_scalar(log_probs[i].value()) << " ";
+              }
+          }
+          cerr << endl;
+          */
+          print_parse(results, sent);
         }
       } else { // REDUCE
         --nopen_parens;
@@ -732,7 +767,8 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
         // add current action to action LSTM
         Expression actione = lookup(*hg, p_a, action);
-        action_lstm.add_input(actione);
+        action_lstm.add_input(successor.action_position, actione);
+        successor.action_position = action_lstm.state();
 
         // do action
         const string& actionString=adict.Convert(action);
@@ -1099,7 +1135,8 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
           // add current action to action LSTM
           Expression actione = lookup(*hg, p_a, action);
-          action_lstm.add_input(actione);
+          action_lstm.add_input(successor.action_position, actione);
+          successor.action_position = action_lstm.state();
 
           // do action
           const string &actionString = adict.Convert(action);
@@ -1262,7 +1299,19 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       BeamState best_completed = completed[0];
       Expression e_cum_neglogprob = -sum(best_completed.log_probs);
       double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
-      cerr << "best nlp after " << best_completed.termc << ": \t" << cum_neglogprob << endl;
+      unsigned last_termc;
+      if (best_completed.prev_a == 'S')
+          last_termc = best_completed.termc - 1;
+      else 
+          last_termc = best_completed.termc;
+      cerr << "best nlp after " << last_termc << "[" << best_completed.log_probs.size() << "]: \t" << cum_neglogprob << endl;
+      if (last_termc == 1) {
+          for (unsigned i = 0; i < best_completed.log_probs.size(); i++) {
+              cerr << as_scalar(best_completed.log_probs[i].value()) << " ";
+          }
+          cerr << endl;
+      }
+      print_parse(best_completed.results, sent);
 
       // replace beam with completed, for next termc
       beam.clear();
