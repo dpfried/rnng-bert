@@ -85,6 +85,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("train,t", "Should training be run?")
         ("words,w", po::value<string>(), "Pretrained word embeddings")
         ("greedy_decode_dev,g", "greedy decode")
+        ("dev_output_file,O", po::value<string>(), "write decoded parse trees to this file")
         ("beam_within_word", "greedy decode within word")
         ("ignore_word_in_greedy,i", "greedy decode")
         ("word_completion_is_shift,s", "consider a word completed when it's shifted for beaming and print purposes")
@@ -1626,7 +1627,11 @@ int main(int argc, char** argv) {
       }
        */
       ostringstream os;
-      os << "/tmp/parser_dev_eval." << getpid() << ".txt";
+      if (conf.count("dev_output_file")) {
+        os << conf["dev_output_file"].as<string>();
+      } else {
+        os << "/tmp/parser_dev_eval." << getpid() << ".txt";
+      }
       const string pfx = os.str();
       cerr << "writing to " << pfx << endl;
       ofstream out(pfx.c_str());
