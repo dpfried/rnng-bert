@@ -425,13 +425,10 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           Expression e_cum_neglogprob = -sum(log_probs);
           double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
           cerr << "gold nlp after " << (termc - 1) << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
-          /*
-          if (termc - 1 == 1) {
-              for (unsigned i = 0; i < log_probs.size(); i++) {
-                  cerr << as_scalar(log_probs[i].value()) << " ";
-              }
+          for (unsigned i = 0; i < log_probs.size(); i++) {
+              cerr << as_scalar(log_probs[i].value()) << " ";
           }
-          */
+          cerr << endl;
           print_parse(results, sent);
         }
       } else if (ac == 'N') { // NT
@@ -449,14 +446,10 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           Expression e_cum_neglogprob = -sum(log_probs);
           double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
           cerr << "gold nlp after " << termc << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
-          /*
-          if (termc == 1) {
-              for (unsigned i = 0; i < log_probs.size(); i++) {
-                  cerr << as_scalar(log_probs[i].value()) << " ";
-              }
+          for (unsigned i = 0; i < log_probs.size(); i++) {
+              cerr << as_scalar(log_probs[i].value()) << " ";
           }
           cerr << endl;
-          */
           print_parse(results, sent);
         }
       } else { // REDUCE
@@ -1305,12 +1298,10 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       else 
           last_termc = best_completed.termc;
       cerr << "best nlp after " << last_termc << "[" << best_completed.log_probs.size() << "]: \t" << cum_neglogprob << endl;
-      if (last_termc == 1) {
-          for (unsigned i = 0; i < best_completed.log_probs.size(); i++) {
-              cerr << as_scalar(best_completed.log_probs[i].value()) << " ";
-          }
-          cerr << endl;
+      for (unsigned i = 0; i < best_completed.log_probs.size(); i++) {
+        cerr << as_scalar(best_completed.log_probs[i].value()) << " ";
       }
+      cerr << endl;
       print_parse(best_completed.results, sent);
 
       // replace beam with completed, for next termc
