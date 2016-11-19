@@ -52,6 +52,8 @@ std::map<int,int> action2NTindex;  // pass in index of action NT(X), return inde
 
 bool IGNORE_WORD_IN_GREEDY = false;
 
+bool WORD_COMPLETION_IS_SHIFT = false;
+
 using namespace cnn::expr;
 using namespace cnn;
 using namespace std;
@@ -85,6 +87,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("greedy_decode_dev,g", "greedy decode")
         ("beam_within_word", "greedy decode within word")
         ("ignore_word_in_greedy,i", "greedy decode")
+        ("word_completion_is_shift,s", "consider a word completed when it's shifted for beaming and print purposes")
         ("decode_beam_size,b", po::value<unsigned>()->default_value(1), "size of beam to use in decode")
         ("help,h", "Help");
   po::options_description dcmdline_options;
@@ -396,6 +399,9 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       const char ac = actionString[0];
       const char ac2 = actionString[1];
 
+      bool was_word_completed = false;
+      unsigned word_completed = 0;
+
       if (ac =='S' && ac2=='H') {  // SHIFT
         unsigned wordid = 0;
         //tworep
@@ -421,15 +427,12 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         stack.push_back(word);
         stack_lstm.add_input(word);
         is_open_paren.push_back(-1);
-        if (prev_a == 'S' || prev_a == 'R') {
-          Expression e_cum_neglogprob = -sum(log_probs);
-          double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
-          cerr << "gold nlp after " << (termc - 1) << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
-          for (unsigned i = 0; i < log_probs.size(); i++) {
-              cerr << as_scalar(log_probs[i].value()) << " ";
-          }
-          cerr << endl;
-          print_parse(results, sent);
+        if (WORD_COMPLETION_IS_SHIFT) {
+          was_word_completed = (termc < sent.size());
+          word_completed = termc;
+        } else if (prev_a == 'S' || prev_a == 'R') {
+          was_word_completed = true;
+          word_completed = termc - 1;
         }
       } else if (ac == 'N') { // NT
         ++nopen_parens;
@@ -442,15 +445,9 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         stack.push_back(nt_embedding);
         stack_lstm.add_input(nt_embedding);
         is_open_paren.push_back(nt_index);
-        if (prev_a == 'S' || prev_a == 'R') {
-          Expression e_cum_neglogprob = -sum(log_probs);
-          double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
-          cerr << "gold nlp after " << termc << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
-          for (unsigned i = 0; i < log_probs.size(); i++) {
-              cerr << as_scalar(log_probs[i].value()) << " ";
-          }
-          cerr << endl;
-          print_parse(results, sent);
+        if (!WORD_COMPLETION_IS_SHIFT && (prev_a == 'S' || prev_a == 'R')) {
+          was_word_completed = true;
+          word_completed = termc;
         }
       } else { // REDUCE
         --nopen_parens;
@@ -516,12 +513,24 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         //cerr << curr_word << endl;
         is_open_paren.push_back(-1); // we just closed a paren at this position
         if (stack.size() <= 2) {
-          Expression e_cum_neglogprob = -sum(log_probs);
-          double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
-          cerr << "gold nlp after " << termc << ": \t" << cum_neglogprob << endl;
+          was_word_completed = true;
+          word_completed = termc;
         }
       }
+
       prev_a = ac;
+
+      if (was_word_completed) {
+        Expression e_cum_neglogprob = -sum(log_probs);
+        double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
+        cerr << "gold nlp after " << word_completed << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
+        for (unsigned i = 0; i < log_probs.size(); i++) {
+          cerr << as_scalar(log_probs[i].value()) << " ";
+        }
+        cerr << endl;
+        print_parse(results, sent);
+      }
+
 
     }
     if (action_count != correct_actions.size()) {
@@ -1256,27 +1265,37 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
           bool termc_completed = false;
 
-          if (current_termc == sent.size() - 1) {
-            termc_completed = (successor.stack.size() <= 2) && (successor.termc > current_termc); // guard symbol, root
-            if (termc_completed) {
-              if (successor.termc != sent.size()) {
+          if (WORD_COMPLETION_IS_SHIFT) {
+            // handle special case, we're only totally done with the last word if we close all parens
+            if (current_termc == sent.size() - 1)
+              // TODO: possibly simpler if we check # of open parens?
+              termc_completed = successor.stack.size() <= 2 && successor.termc > current_termc;
+            else
+              termc_completed = (ac == 'S');
+          } else {
+            // word is completed when we've decided to finish reducing, either by shifting next word or opening NT (or closing all open parens if we're at the end)
+            if (current_termc == sent.size() - 1) { // at the end
+              termc_completed = (successor.stack.size() <= 2) && (successor.termc > current_termc); // guard symbol, root
+              if (termc_completed) {
+                if (successor.termc != sent.size()) {
                   cerr << "current_termc: " << current_termc << endl;
                   cerr << "termc: " << successor.termc << endl;
                   cerr << "stack.size: " << successor.stack.size() << endl;
+                }
+                assert(successor.termc == sent.size());
               }
-              assert(successor.termc == sent.size());
+            } else { // not at the end, check for shift or NT
+              if (ac == 'S' && ac2 == 'H') {  // SHIFT
+                // this termc is completed if the current action shifted the next word
+                termc_completed = (successor.termc > current_termc + 1);
+                if (termc_completed) assert(successor.termc == current_termc + 2);
+              } else if (ac == 'N') {
+                // this termc is completed if the current action
+                termc_completed = (successor.termc > current_termc);
+                if (termc_completed) assert(successor.termc == current_termc + 1);
+              }
+              // reduce never completes the current word
             }
-          } else {
-            if (ac == 'S' && ac2 == 'H') {  // SHIFT
-              // this termc is completed if the current action shifted the next word
-              termc_completed = (successor.termc > current_termc + 1);
-              if (termc_completed) assert(successor.termc == current_termc + 2);
-            } else if (ac == 'N') {
-              // this termc is completed if the current action
-              termc_completed = (successor.termc > current_termc);
-              if (termc_completed) assert(successor.termc == current_termc + 1);
-            }
-            // reduce never completes the current word
           }
 
           if (termc_completed) {
@@ -1293,7 +1312,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       Expression e_cum_neglogprob = -sum(best_completed.log_probs);
       double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
       unsigned last_termc;
-      if (best_completed.prev_a == 'S')
+      if (!WORD_COMPLETION_IS_SHIFT && best_completed.prev_a == 'S')
           last_termc = best_completed.termc - 1;
       else 
           last_termc = best_completed.termc;
@@ -1379,6 +1398,8 @@ int main(int argc, char** argv) {
   }
 
   IGNORE_WORD_IN_GREEDY = conf.count("ignore_word_in_greedy");
+
+  WORD_COMPLETION_IS_SHIFT = conf.count("word_completion_is_shift");
 
   ostringstream os;
   os << "ntparse_gen"
