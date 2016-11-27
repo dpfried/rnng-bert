@@ -44,6 +44,8 @@ unsigned ACTION_DIM = 36;
 unsigned PRETRAINED_DIM = 50;
 unsigned LSTM_INPUT_DIM = 60;
 
+unsigned MAX_CONS_NT = 8;
+
 unsigned ACTION_SIZE = 0;
 unsigned VOCAB_SIZE = 0;
 unsigned NT_SIZE = 0;
@@ -90,6 +92,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("ignore_word_in_greedy,i", "greedy decode")
         ("word_completion_is_shift,s", "consider a word completed when it's shifted for beaming and print purposes")
         ("decode_beam_size,b", po::value<unsigned>()->default_value(1), "size of beam to use in decode")
+        ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -120,6 +123,8 @@ struct BeamState {
 
   unsigned action_count;
   unsigned nt_count;
+
+  unsigned cons_nt;
 
   int nopen_parens;
 
@@ -661,6 +666,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           assert(is_shift || is_reduce || is_nt);
           static const unsigned MAX_OPEN_NTS = 100;
           if (is_nt && current.nopen_parens > MAX_OPEN_NTS) continue;
+          if (is_nt && current.cons_nt >= MAX_CONS_NT) continue;
           bool skipRest = false;
           if (ssize == 1) {
             if (!is_nt) continue;
@@ -808,6 +814,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           successor.stack_position = stack_lstm.state();
 
           successor.is_open_paren.push_back(-1);
+          successor.cons_nt = 0;
 
           /*
           if (successor.termc == 1) {
@@ -828,6 +835,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           stack_lstm.add_input(successor.stack_position,nt_embedding);
           successor.stack_position = stack_lstm.state();
           successor.is_open_paren.push_back(nt_index);
+          successor.cons_nt += 1;
         } else { // REDUCE
           --successor.nopen_parens;
           assert(successor.stack.size() > 2); // dummy symbol means > 2 (not >= 2)
@@ -891,6 +899,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           // stack_content.push_back(curr_word);
           //cerr << curr_word << endl;
           successor.is_open_paren.push_back(-1); // we just closed a paren at this position
+          successor.cons_nt = 0;
         } // end REDUCE
 
         if (successor.stack.size() <= 2 && successor.termc != 0) {
@@ -1029,6 +1038,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
             assert(is_shift || is_reduce || is_nt);
             static const unsigned MAX_OPEN_NTS = 100;
             if (is_nt && current.nopen_parens > MAX_OPEN_NTS) continue;
+            if (is_nt && current.cons_nt >= MAX_CONS_NT) continue;
             bool skipRest = false;
             if (ssize == 1) {
               if (!is_nt) continue;
@@ -1177,6 +1187,8 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
             successor.is_open_paren.push_back(-1);
 
+            successor.cons_nt = 0;
+
             /*
             if (successor.termc == 1) {
               Expression e_cum_neglogprob = -sum(successor.log_probs);
@@ -1196,6 +1208,8 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
             stack_lstm.add_input(successor.stack_position, nt_embedding);
             successor.stack_position = stack_lstm.state();
             successor.is_open_paren.push_back(nt_index);
+
+            successor.cons_nt += 1;
           } else { // REDUCE
             --successor.nopen_parens;
             assert(successor.stack.size() > 2); // dummy symbol means > 2 (not >= 2)
@@ -1262,6 +1276,8 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
             // stack_content.push_back(curr_word);
             //cerr << curr_word << endl;
             successor.is_open_paren.push_back(-1); // we just closed a paren at this position
+
+            successor.cons_nt = 0;
           } // end REDUCE
 
           bool termc_completed = false;
@@ -1393,6 +1409,8 @@ int main(int argc, char** argv) {
   HIDDEN_DIM = conf["hidden_dim"].as<unsigned>();
   ACTION_DIM = conf["action_dim"].as<unsigned>();
   LSTM_INPUT_DIM = conf["lstm_input_dim"].as<unsigned>();
+  MAX_CONS_NT = conf["max_cons_nt"].as<unsigned>();
+
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
     return 1;
