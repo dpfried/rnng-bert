@@ -7,6 +7,7 @@
 #include <ctime>
 #include <unordered_set>
 #include <unordered_map>
+#include <algorithm>
 
 #include <execinfo.h>
 #include <unistd.h>
@@ -44,7 +45,7 @@ unsigned LSTM_INPUT_DIM = 60;
 unsigned POS_DIM = 10;
 
 float ALPHA = 1.f;
-unsigned N_SAMPLES = 1;
+unsigned N_SAMPLES = 0;
 unsigned ACTION_SIZE = 0;
 unsigned VOCAB_SIZE = 0;
 unsigned NT_SIZE = 0;
@@ -76,6 +77,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("test_data,p", po::value<string>(), "Test corpus")
         ("dropout,D", po::value<float>(), "Dropout rate")
         ("samples,s", po::value<unsigned>(), "Sample N trees for each test sentence instead of greedy max decoding")
+        ("output_beam_as_samples", "Print the items in the beam in the same format as samples")
+        ("samples_include_gold", "Also include the gold parse in the list of samples output")
         ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
         ("model,m", po::value<string>(), "Load saved model from this file")
         ("use_pos_tags,P", "make POS tags visible to parser")
@@ -287,7 +290,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     // in the discriminative model, here we set up the buffer contents
     for (unsigned i = 0; i < sent.size(); ++i) {
         int wordid = sent.raw[i]; // this will be equal to unk at dev/test
-        if (build_training_graph && singletons.size() > wordid && singletons[wordid] && rand01() > 0.5)
+        if (build_training_graph && !is_evaluation && singletons.size() > wordid && singletons[wordid] && rand01() > 0.5)
           wordid = sent.unk[i];
         Expression w = lookup(*hg, p_w, wordid);
 
@@ -351,7 +354,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       //if (build_training_graph) nlp_t = dropout(nlp_t, 0.4);
       // r_t = abias + p2a * nlp
       Expression r_t = affine_transform({abias, p2a, nlp_t});
-      if (sample && ALPHA != 1.0f) r_t = r_t * ALPHA;
+      //if (sample && ALPHA != 1.0f) r_t = r_t * ALPHA;
       // adist = log_softmax(r_t, current_valid_actions)
       Expression adiste = log_softmax(r_t, current_valid_actions);
       vector<float> adist = as_vector(hg->incremental_forward());
@@ -360,9 +363,17 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       if (sample) {
         double p = rand01();
         assert(current_valid_actions.size() > 0);
+        vector<float> dist_to_sample;
+        if (ALPHA != 1.0f) {
+          Expression r_t_smoothed = r_t * ALPHA;
+          Expression adiste_smoothed = log_softmax(r_t_smoothed, current_valid_actions);
+          dist_to_sample = as_vector(hg->incremental_forward());
+        } else {
+          dist_to_sample = adist;
+        }
         unsigned w = 0;
         for (; w < current_valid_actions.size(); ++w) {
-          p -= exp(adist[current_valid_actions[w]]);
+          p -= exp(dist_to_sample[current_valid_actions[w]]);
           if (p < 0.0) { break; }
         }
         if (w == current_valid_actions.size()) w--;
@@ -514,52 +525,50 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
   }
 
 
+struct BeamState {
+  RNNPointer stack_position;
+  RNNPointer action_position;
+  RNNPointer buffer_position;
 
-
-struct ParserState {
-  LSTMBuilder stack_lstm;
-  LSTMBuilder *buffer_lstm;
-  LSTMBuilder action_lstm;
   vector<Expression> buffer;
   vector<int> bufferi;
-  LSTMBuilder const_lstm_fwd;
-  LSTMBuilder const_lstm_rev;
 
-  vector<Expression> stack;
-  vector<int> stacki;
+  vector<Expression> stack;  // variables representing subtree embeddings
+  vector<int> stacki; // position of words in the sentence of head of subtree
+
+  vector<int> is_open_paren; // -1 if no nonterminal has a parenthesis open, otherwise index of NT
+
   vector<unsigned> results;  // sequence of predicted actions
-  bool complete;
+
   vector<Expression> log_probs;
   double score;
   int action_count;
   int nopen_parens;
+  unsigned nt_count;
   char prev_a;
+
+  unsigned action;
 };
 
 
-struct ParserStateCompare {
-  bool operator()(const ParserState& a, const ParserState& b) const {
+struct BeamStateCompare {
+  // sort descending
+  bool operator()(const BeamState& a, const BeamState& b) const {
     return a.score > b.score;
   }
 };
 
-static void prune(vector<ParserState>& pq, unsigned k) {
+static void prune(vector<BeamState>& pq, unsigned k) {
   if (pq.size() == 1) return;
   if (k > pq.size()) k = pq.size();
-  partial_sort(pq.begin(), pq.begin() + k, pq.end(), ParserStateCompare());
+  partial_sort(pq.begin(), pq.begin() + k, pq.end(), BeamStateCompare());
   pq.resize(k);
-  reverse(pq.begin(), pq.end());
+  //reverse(pq.begin(), pq.end()); // shouldn't need to reverse
   //cerr << "PRUNE\n";
   //for (unsigned i = 0; i < pq.size(); ++i) {
   //  cerr << pq[i].score << endl;
   //}
 }
-
-static bool all_complete(const vector<ParserState>& pq) {
-  for (auto& ps : pq) if (!ps.complete) return false;
-  return true;
-}
-
 
 // log_prob_parser with beam-search
 // *** if correct_actions is empty, this runs greedy decoding ***
@@ -567,22 +576,23 @@ static bool all_complete(const vector<ParserState>& pq) {
 // this lets us use pretrained embeddings, when available, for words that were OOV in the
 // parser training data
 // set sample=true to sample rather than max
-vector<unsigned> log_prob_parser_beam(ComputationGraph* hg,
-                     const parser::Sentence& sent,
-                     const vector<int>& correct_actions,
-                     double *right,
-		     unsigned beam_size,
-                     bool sample = false) {
-    vector<unsigned> results;
-    const bool build_training_graph = correct_actions.size() > 0;
-    stack_lstm.new_graph(*hg);
+vector<pair<vector<unsigned>, double>> log_prob_parser_beam(ComputationGraph* hg,
+                                                            const parser::Sentence& sent,
+                                                            unsigned beam_size) {
+    // cout << "dropout: " << apply_dropout << endl;
+    if (!NO_STACK) stack_lstm.new_graph(*hg);
     action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
-    stack_lstm.start_new_sequence();
+    if (!NO_STACK) stack_lstm.start_new_sequence();
     buffer_lstm->new_graph(*hg);
     buffer_lstm->start_new_sequence();
     action_lstm.start_new_sequence();
+    if (!NO_STACK) stack_lstm.disable_dropout();
+    action_lstm.disable_dropout();
+    buffer_lstm->disable_dropout();
+    const_lstm_fwd.disable_dropout();
+    const_lstm_rev.disable_dropout();
     // variables in the computation graph representing the parameters
     Expression pbias = parameter(*hg, p_pbias);
     Expression S = parameter(*hg, p_S);
@@ -609,253 +619,278 @@ vector<unsigned> log_prob_parser_beam(ComputationGraph* hg,
     Expression action_start = parameter(*hg, p_action_start);
     Expression cW = parameter(*hg, p_cW);
 
-    action_lstm.add_input(action_start);
+    BeamState initial_state;
 
-    vector<Expression> buffer(sent.size() + 1);  // variables representing word embeddings
-    vector<int> bufferi(sent.size() + 1);  // position of the words in the sentence
+    action_lstm.add_input(action_start);
+    initial_state.action_position = action_lstm.state();
+
+    initial_state.buffer = vector<Expression>(sent.size() + 1);  // variables representing word embeddings
+    initial_state.bufferi = vector<int>(sent.size() + 1);  // position of the words in the sentence
     // precompute buffer representation from left to right
 
     // in the discriminative model, here we set up the buffer contents
     for (unsigned i = 0; i < sent.size(); ++i) {
-        int wordid = sent.raw[i]; // this will be equal to unk at dev/test
-        if (build_training_graph && singletons.size() > wordid && singletons[wordid] && rand01() > 0.5)
-          wordid = sent.unk[i];
-        Expression w = lookup(*hg, p_w, wordid);
+      int wordid = sent.raw[i]; // this will be equal to unk at dev/test
+      Expression w = lookup(*hg, p_w, wordid);
 
-        vector<Expression> args = {ib, w2l, w}; // learn embeddings
-        if (p_t && pretrained.count(sent.lc[i])) {  // include fixed pretrained vectors?
-          Expression t = const_lookup(*hg, p_t, sent.lc[i]);
-          args.push_back(t2l);
-          args.push_back(t);
-        }
-        if (USE_POS) {
-          args.push_back(p2w);
-          args.push_back(lookup(*hg, p_pos, sent.pos[i]));
-        }
-        buffer[sent.size() - i] = rectify(affine_transform(args));
-        bufferi[sent.size() - i] = i;
+      vector<Expression> args = {ib, w2l, w}; // learn embeddings
+      if (p_t && pretrained.count(sent.lc[i])) {  // include fixed pretrained vectors?
+        Expression t = const_lookup(*hg, p_t, sent.lc[i]);
+        args.push_back(t2l);
+        args.push_back(t);
+      }
+      if (USE_POS) {
+        args.push_back(p2w);
+        args.push_back(lookup(*hg, p_pos, sent.pos[i]));
+      }
+      initial_state.buffer[sent.size() - i] = rectify(affine_transform(args));
+      initial_state.bufferi[sent.size() - i] = i;
     }
     // dummy symbol to represent the empty buffer
-    buffer[0] = parameter(*hg, p_buffer_guard);
-    bufferi[0] = -999;
-    for (auto& b : buffer)
+    initial_state.buffer[0] = parameter(*hg, p_buffer_guard);
+    initial_state.bufferi[0] = -999;
+    for (auto &b : initial_state.buffer)
       buffer_lstm->add_input(b);
+    initial_state.buffer_position = buffer_lstm->state();
 
-    vector<Expression> stack;  // variables representing subtree embeddings
-    vector<int> stacki; // position of words in the sentence of head of subtree
-    stack.push_back(parameter(*hg, p_stack_guard));
-    stacki.push_back(-999); // not used for anything
+    initial_state.stack.push_back(parameter(*hg, p_stack_guard));
+    initial_state.stacki.push_back(-999); // not used for anything
     // drive dummy symbol on stack through LSTM
-    stack_lstm.add_input(stack.back());
-    vector<int> is_open_paren; // -1 if no nonterminal has a parenthesis open, otherwise index of NT
-    is_open_paren.push_back(-1); // corresponds to dummy symbol
-    vector<Expression> log_probs;
-    string rootword;
-    unsigned action_count = 0;  // incremented at each prediction
-    unsigned nt_count = 0; // number of times an NT has been introduced
+    if (!NO_STACK) {
+      stack_lstm.add_input(initial_state.stack.back());
+      initial_state.stack_position = stack_lstm.state();
+    }
+
+    initial_state.is_open_paren.push_back(-1); // corresponds to dummy symbol
+    initial_state.action_count = 0;  // incremented at each prediction
+    initial_state.nt_count = 0; // number of times an NT has been introduced
+    initial_state.nopen_parens = 0;
+    initial_state.prev_a = '0';
+    initial_state.score = 0.0;
+    initial_state.action = 0;
+
     vector<unsigned> current_valid_actions;
-    int nopen_parens = 0;
-    char prev_a = '0';
 
-    ParserState init;
+    vector<BeamState> completed;
 
-    init.stack_lstm = stack_lstm;
-    init.buffer_lstm = buffer_lstm;
-    init.action_lstm = action_lstm;
-    init.const_lstm_fwd = const_lstm_fwd;
-    init.const_lstm_rev = const_lstm_rev;
-    init.buffer = buffer;
-    init.bufferi = bufferi;
-    init.stack = stack;
-    init.stacki = stacki;
-    init.results = results;
-    init.log_probs = log_probs;
-    init.score = 0;
-    init.action_count=0;
-    init.nopen_parens=nopen_parens;
-    init.prev_a=prev_a;
-    if (init.stacki.size() ==1 && init.bufferi.size() == 1) { assert(!"bad0"); }
+    vector<BeamState> beam;
+    beam.push_back(initial_state);
 
-    vector<ParserState> pq;
-    pq.push_back(init);
-    vector<ParserState> completed;
+    while (completed.size() < beam_size && !beam.empty()) {
+      vector<BeamState> successors;
 
-     
-    while (pq.size()>0) {
-      const ParserState cur = pq.back();
-      pq.pop_back();
-      if (cur.stack.size() == 2 && cur.buffer.size() == 1) {
-        completed.push_back(cur);
-        if (completed.size() == beam_size) break;
-        continue;
-      }
-    //while(stack.size() > 2 || buffer.size() > 1) {
-      // get list of possible actions for the current parser state
-      current_valid_actions.clear();
-      for (auto a: possible_actions) {
-        if (IsActionForbidden_Discriminative(adict.Convert(a), cur.prev_a, cur.buffer.size(), cur.stack.size(), cur.nopen_parens))
-          continue;
-        current_valid_actions.push_back(a);
-      }
-      //UNTIL HERE BEAM SEARCH
-      //cerr << "valid actions = " << current_valid_actions.size() << endl;
+      while (!beam.empty()) {
 
-      // p_t = pbias + S * slstm + B * blstm + A * almst
-      Expression p_t = affine_transform({pbias, S, stack_lstm.back(), B, buffer_lstm->back(), A, action_lstm.back()});
-      Expression nlp_t = rectify(p_t);
-      //if (build_training_graph) nlp_t = dropout(nlp_t, 0.4);
-      // r_t = abias + p2a * nlp
-      Expression r_t = affine_transform({abias, p2a, nlp_t});
-      if (sample && ALPHA != 1.0f) r_t = r_t * ALPHA;
-      // adist = log_softmax(r_t, current_valid_actions)
-      Expression adiste = log_softmax(r_t, current_valid_actions);
-      vector<float> adist = as_vector(hg->incremental_forward());
-      double best_score = adist[current_valid_actions[0]];
-      unsigned model_action = current_valid_actions[0];
-      if (sample) {
-        double p = rand01();
-        assert(current_valid_actions.size() > 0);
-        unsigned w = 0;
-        for (; w < current_valid_actions.size(); ++w) {
-          p -= exp(adist[current_valid_actions[w]]);
-          if (p < 0.0) { break; }
+        BeamState current = beam.back();
+        beam.pop_back();
+
+        // get list of possible actions for the current parser state
+        current_valid_actions.clear();
+        for (auto a: possible_actions) {
+          if (IsActionForbidden_Discriminative(adict.Convert(a), current.prev_a, current.buffer.size(), current.stack.size(),
+                                               current.nopen_parens))
+            continue;
+          current_valid_actions.push_back(a);
         }
-        if (w == current_valid_actions.size()) w--;
-        model_action = current_valid_actions[w];
-      } else { // max
-        for (unsigned i = 1; i < current_valid_actions.size(); ++i) {
-          if (adist[current_valid_actions[i]] > best_score) {
-            best_score = adist[current_valid_actions[i]];
-            model_action = current_valid_actions[i];
+        //cerr << "valid actions = " << current_valid_actions.size() << endl;
+
+        // p_t = pbias + S * slstm + B * blstm + A * almst
+        Expression stack_summary = NO_STACK ? Expression() : stack_lstm.get_h(current.stack_position).back();
+        Expression action_summary = action_lstm.get_h(current.action_position).back();
+        Expression buffer_summary = buffer_lstm->get_h(current.buffer_position).back();
+        Expression p_t = NO_STACK ?
+                         affine_transform({pbias, B, buffer_summary, A, action_summary}) :
+                         affine_transform({pbias, S, stack_summary, B, buffer_summary, A, action_summary});
+        Expression nlp_t = rectify(p_t);
+        //if (build_training_graph) nlp_t = dropout(nlp_t, 0.4);
+        // r_t = abias + p2a * nlp
+        Expression r_t = affine_transform({abias, p2a, nlp_t});
+        //if (sample && ALPHA != 1.0f) r_t = r_t * ALPHA;
+        // adist = log_softmax(r_t, current_valid_actions)
+        Expression adiste = log_softmax(r_t, current_valid_actions);
+        vector<float> adist = as_vector(hg->incremental_forward());
+        /*
+        for (auto v : adist) {
+          cout << v << "\t";
+        }
+        cout << endl;
+         */
+
+        assert(!current_valid_actions.empty());
+        for (unsigned i = 0; i < current_valid_actions.size(); i++) {
+          unsigned possible_action = current_valid_actions[i];
+          double score = adist[possible_action];
+
+          // update only score, log_prob, and action for now
+          // other state vars will be updated after pruning beam for efficiency
+          BeamState successor = current;
+          successor.log_probs.push_back(pick(adiste, possible_action));
+
+          successor.results.push_back(possible_action);
+          successor.action = possible_action;
+
+
+          successor.score += score;
+          ++successor.action_count;
+
+          successors.push_back(successor);
+        }
+      }
+
+      // cut down to beam size
+      prune(successors, beam_size);
+
+      // update state variables for top K
+      // check if any of the successors are complete; add others back to the beam
+      for (unsigned i = 0; i < successors.size(); i++) {
+
+        BeamState successor = successors[i];
+        unsigned action = successor.action;
+
+        // add current action to action LSTM
+        Expression actione = lookup(*hg, p_a, action);
+        action_lstm.add_input(successor.action_position, actione);
+        successor.action_position = action_lstm.state();
+
+        // do action
+        const string &actionString = adict.Convert(action);
+        //cerr << "ACT: " << actionString << endl;
+        const char ac = actionString[0];
+        const char ac2 = actionString[1];
+        successor.prev_a = ac;
+
+        if (ac == 'S' && ac2 == 'H') {  // SHIFT
+          assert(successor.buffer.size() > 1); // dummy symbol means > 1 (not >= 1)
+          if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+            --successor.nopen_parens;
+            int i = successor.is_open_paren.size() - 1;
+            assert(successor.is_open_paren[i] >= 0);
+            Expression nonterminal = lookup(*hg, p_ntup, successor.is_open_paren[i]);
+            Expression terminal = successor.buffer.back();
+            Expression c = concatenate({nonterminal, terminal});
+            Expression pt = rectify(affine_transform({ptbias, ptW, c}));
+            successor.stack.pop_back();
+            successor.stacki.pop_back();
+            if (!NO_STACK) {
+              successor.stack_position = stack_lstm.head_of(successor.stack_position);
+            }
+            successor.buffer.pop_back();
+            successor.bufferi.pop_back();
+            successor.buffer_position = buffer_lstm->head_of(successor.buffer_position);
+            successor.is_open_paren.pop_back();
+            if (!NO_STACK) {
+              stack_lstm.add_input(successor.stack_position, pt);
+              successor.stack_position = stack_lstm.state();
+            }
+            successor.stack.push_back(pt);
+            successor.stacki.push_back(999);
+            successor.is_open_paren.push_back(-1);
+          } else {
+            successor.stack.push_back(successor.buffer.back());
+            if (!NO_STACK) {
+              stack_lstm.add_input(successor.stack_position, successor.buffer.back());
+              successor.stack_position = stack_lstm.state();
+            }
+            successor.stacki.push_back(successor.bufferi.back());
+            successor.buffer.pop_back();
+            successor.buffer_position = buffer_lstm->head_of(successor.buffer_position);
+            successor.bufferi.pop_back();
+            successor.is_open_paren.push_back(-1);
           }
-        }
-      }
-      unsigned action = model_action;
-      if (build_training_graph) {  // if we have reference actions (for training) use the reference action
-        if (action_count >= correct_actions.size()) {
-          cerr << "Correct action list exhausted, but not in final parser state.\n";
-          abort();
-        }
-        action = correct_actions[action_count];
-        if (model_action == action) { (*right)++; }
-      } else {
-        //cerr << "Chosen action: " << adict.Convert(action) << endl;
-      }
-      //cerr << "prob ="; for (unsigned i = 0; i < adist.size(); ++i) { cerr << ' ' << adict.Convert(i) << ':' << adist[i]; }
-      //cerr << endl;
-      ++action_count;
-      log_probs.push_back(pick(adiste, action));
-      results.push_back(action);
+        } else if (ac == 'N') { // NT
+          ++successor.nopen_parens;
+          assert(successor.buffer.size() > 1);
+          auto it = action2NTindex.find(action);
+          assert(it != action2NTindex.end());
+          int nt_index = it->second;
+          successor.nt_count++;
+          Expression nt_embedding = lookup(*hg, p_nt, nt_index);
+          successor.stack.push_back(nt_embedding);
+          if (!NO_STACK) {
+            stack_lstm.add_input(successor.stack_position, nt_embedding);
+            successor.stack_position = stack_lstm.state();
+          }
+          successor.stacki.push_back(-1);
+          successor.is_open_paren.push_back(nt_index);
+        } else { // REDUCE
+          --successor.nopen_parens;
+          assert(successor.stack.size() > 2); // dummy symbol means > 2 (not >= 2)
+          // find what paren we are closing
+          int i = successor.is_open_paren.size() - 1;
+          while (successor.is_open_paren[i] < 0) {
+            --i;
+            assert(i >= 0);
+          }
+          Expression nonterminal = lookup(*hg, p_ntup, successor.is_open_paren[i]);
+          int nchildren = successor.is_open_paren.size() - i - 1;
+          assert(nchildren > 0);
+          //cerr << "  number of children to reduce: " << nchildren << endl;
+          vector<Expression> children(nchildren);
+          const_lstm_fwd.start_new_sequence();
+          const_lstm_rev.start_new_sequence();
 
-      // add current action to action LSTM
-      Expression actione = lookup(*hg, p_a, action);
-      action_lstm.add_input(actione);
+          // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
+          // TO BE COMPOSED INTO A TREE EMBEDDING
+          for (i = 0; i < nchildren; ++i) {
+            children[i] = successor.stack.back();
+            assert (successor.stacki.back() != -1);
+            successor.stacki.pop_back();
+            successor.stack.pop_back();
+            if (!NO_STACK) {
+              successor.stack_position = stack_lstm.head_of(successor.stack_position);
+            }
+            successor.is_open_paren.pop_back();
+          }
+          successor.is_open_paren.pop_back(); // nt symbol
+          assert (successor.stacki.back() == -1);
+          successor.stacki.pop_back(); // nonterminal dummy
+          successor.stack.pop_back(); // nonterminal dummy
+          if (NO_STACK) {
+            successor.stack.push_back(Expression()); // placeholder since we check size
+          } else {
+            successor.stack_position = stack_lstm.head_of(successor.stack_position); // nt symbol
 
-      // do action
-      const string& actionString=adict.Convert(action);
-      //cerr << "ACT: " << actionString << endl;
-      const char ac = actionString[0];
-      const char ac2 = actionString[1];
-      prev_a = ac;
+            // BUILD TREE EMBEDDING USING BIDIR LSTM
+            const_lstm_fwd.add_input(nonterminal);
+            const_lstm_rev.add_input(nonterminal);
+            for (i = 0; i < nchildren; ++i) {
+              const_lstm_fwd.add_input(children[i]);
+              const_lstm_rev.add_input(children[nchildren - i - 1]);
+            }
+            Expression cfwd = const_lstm_fwd.back();
+            Expression crev = const_lstm_rev.back();
+            Expression c = concatenate({cfwd, crev});
+            Expression composed = rectify(affine_transform({cbias, cW, c}));
+            stack_lstm.add_input(successor.stack_position, composed);
+            successor.stack_position = stack_lstm.state();
+            successor.stack.push_back(composed);
+          }
+          successor.stacki.push_back(999); // who knows, should get rid of this
+          successor.is_open_paren.push_back(-1); // we just closed a paren at this position
+        } // end REDUCE
 
-      if (ac =='S' && ac2=='H') {  // SHIFT
-        assert(buffer.size() > 1); // dummy symbol means > 1 (not >= 1)
-        if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-          --nopen_parens;
-          int i = is_open_paren.size() - 1;
-          assert(is_open_paren[i] >= 0);
-          Expression nonterminal = lookup(*hg, p_ntup, is_open_paren[i]);
-          Expression terminal = buffer.back();
-          Expression c = concatenate({nonterminal, terminal});
-          Expression pt = rectify(affine_transform({ptbias, ptW, c}));
-          stack.pop_back();
-          stacki.pop_back();
-          stack_lstm.rewind_one_step();
-          buffer.pop_back();
-          bufferi.pop_back();
-          buffer_lstm->rewind_one_step();
-          is_open_paren.pop_back();
-          stack_lstm.add_input(pt);
-          stack.push_back(pt);
-          stacki.push_back(999);
-          is_open_paren.push_back(-1);
+        if (successor.stack.size() <= 2 && successor.buffer.size() <= 1) {
+          completed.push_back(successor);
         } else {
-          stack.push_back(buffer.back());
-          stack_lstm.add_input(buffer.back());
-          stacki.push_back(bufferi.back());
-          buffer.pop_back();
-          buffer_lstm->rewind_one_step();
-          bufferi.pop_back();
-          is_open_paren.push_back(-1);
+          beam.push_back(successor);
         }
-      } else if (ac == 'N') { // NT
-        ++nopen_parens;
-        assert(buffer.size() > 1);
-        auto it = action2NTindex.find(action);
-        assert(it != action2NTindex.end());
-        int nt_index = it->second;
-        nt_count++;
-        Expression nt_embedding = lookup(*hg, p_nt, nt_index);
-        stack.push_back(nt_embedding);
-        stack_lstm.add_input(nt_embedding);
-        stacki.push_back(-1);
-        is_open_paren.push_back(nt_index);
-      } else { // REDUCE
-        --nopen_parens;
-        assert(stack.size() > 2); // dummy symbol means > 2 (not >= 2)
-        // find what paren we are closing
-        int i = is_open_paren.size() - 1;
-        while(is_open_paren[i] < 0) { --i; assert(i >= 0); }
-        Expression nonterminal = lookup(*hg, p_ntup, is_open_paren[i]);
-        int nchildren = is_open_paren.size() - i - 1;
-        assert(nchildren > 0);
-        //cerr << "  number of children to reduce: " << nchildren << endl;
-        vector<Expression> children(nchildren);
-        const_lstm_fwd.start_new_sequence();
-        const_lstm_rev.start_new_sequence();
+      } // end successor iteration
+    } // end build completed
 
-        // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
-        // TO BE COMPOSED INTO A TREE EMBEDDING
-        for (i = 0; i < nchildren; ++i) {
-          children[i] = stack.back();
-          assert (stacki.back() != -1);
-          stacki.pop_back();
-          stack.pop_back();
-          stack_lstm.rewind_one_step();
-          is_open_paren.pop_back();
-        }
-        is_open_paren.pop_back(); // nt symbol
-        assert (stacki.back() == -1);
-        stacki.pop_back(); // nonterminal dummy
-        stack.pop_back(); // nonterminal dummy
-        stack_lstm.rewind_one_step(); // nt symbol
+    sort(completed.begin(), completed.end(), BeamStateCompare());
 
-        // BUILD TREE EMBEDDING USING BIDIR LSTM
-        const_lstm_fwd.add_input(nonterminal);
-        const_lstm_rev.add_input(nonterminal);
-        for (i = 0; i < nchildren; ++i) {
-          const_lstm_fwd.add_input(children[i]);
-          const_lstm_rev.add_input(children[nchildren - i - 1]);
-        }
-        Expression c = concatenate({const_lstm_fwd.back(), const_lstm_rev.back()});
-        Expression composed = rectify(affine_transform({cbias, cW, c}));
-        stack_lstm.add_input(composed);
-        stack.push_back(composed);
-        stacki.push_back(999); // who knows, should get rid of this
-        is_open_paren.push_back(-1); // we just closed a paren at this position
-      }
+    vector<pair<vector<unsigned>, double>> completed_actions_and_scores;
+    for (const auto & beam_state : completed) {
+      assert(beam_state.stack.size() == 2); // guard symbol, root
+      assert(beam_state.stacki.size() == 2);
+      assert(beam_state.buffer.size() == 1); // guard symbol
+      assert(beam_state.bufferi.size() == 1);
+      Expression tot_neglogprob = -sum(beam_state.log_probs);
+      assert(tot_neglogprob.pg != nullptr);
+      double tnlp = as_scalar(hg->incremental_forward());
+      completed_actions_and_scores.push_back(pair<vector<unsigned>, double>(beam_state.results, tnlp));
     }
-    if (build_training_graph && action_count != correct_actions.size()) {
-      cerr << "Unexecuted actions remain but final state reached!\n";
-      abort();
-    }
-    assert(stack.size() == 2); // guard symbol, root
-    assert(stacki.size() == 2);
-    assert(buffer.size() == 1); // guard symbol
-    assert(bufferi.size() == 1);
-    Expression tot_neglogprob = -sum(log_probs);
-    assert(tot_neglogprob.pg != nullptr);
-    return results;
+    return completed_actions_and_scores;
   }
 };
 
@@ -866,6 +901,27 @@ void signal_callback_handler(int /* signum */) {
   }
   cerr << "\nReceived SIGINT terminating optimization early...\n";
   requested_stop = true;
+}
+
+void print_parse(const vector<unsigned>& actions, const parser::Sentence& sentence, bool sample, ostream& out_stream) {
+  int ti = 0;
+  for (auto a : actions) {
+    if (adict.Convert(a)[0] == 'N') {
+      out_stream << " (" << ntermdict.Convert(action2NTindex.find(a)->second);
+    } else if (adict.Convert(a)[0] == 'S') {
+      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+        out_stream << termdict.Convert(sentence.raw[ti++]) << ")";
+      } else {
+        if (!sample) {
+          string preterminal = "XX";
+          out_stream << " (" << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ")";
+        } else { // use this branch to surpress preterminals
+          out_stream << ' ' << termdict.Convert(sentence.raw[ti++]);
+        }
+      }
+    } else out_stream << ')';
+  }
+  out_stream << endl;
 }
 
 int main(int argc, char** argv) {
@@ -1146,112 +1202,146 @@ int main(int argc, char** argv) {
     }
   } // should do training?
   if (test_corpus.size() > 0) { // do test evaluation
-        bool sample = conf.count("samples") > 0;
-        unsigned test_size = test_corpus.size();
-        double llh = 0;
-        double trs = 0;
-        double right = 0;
-        double dwords = 0;
-        auto t_start = chrono::high_resolution_clock::now();
-	const vector<int> actions;
-        for (unsigned sii = 0; sii < test_size; ++sii) {
-           const auto& sentence=test_corpus.sents[sii];
-           dwords += sentence.size();
-           for (unsigned z = 0; z < N_SAMPLES; ++z) {
-             ComputationGraph hg;
-             vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,actions,&right,sample,true); // TODO:  order of sample and true should be swapped, but doesn't seem to matter b/c we only go down this branch if sample == true
-             double lp = as_scalar(hg.incremental_forward());
-             cout << sii << " ||| " << -lp << " |||";
-             int ti = 0;
-             for (auto a : pred) {
-               if (adict.Convert(a)[0] == 'N') {
-                 cout << " (" << ntermdict.Convert(action2NTindex.find(a)->second);
-               } else if (adict.Convert(a)[0] == 'S') {
-                 if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-                   cout << termdict.Convert(sentence.raw[ti++]) << ")";
-                 } else {
-                   if (!sample) {
-                     string preterminal = "XX";
-                     cout << " (" << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ")";
-                   } else { // use this branch to surpress preterminals
-                     cout << ' ' << termdict.Convert(sentence.raw[ti++]);
-                   }
-                 }
-               } else cout << ')';
-             }
-             cout << endl;
-           }
-       }
-       ostringstream os;
-        os << "/tmp/parser_test_eval." << getpid() << ".txt";
-        const string pfx = os.str();
-        ofstream out(pfx.c_str());
-        t_start = chrono::high_resolution_clock::now();
-        for (unsigned sii = 0; sii < test_size; ++sii) {
-           const auto& sentence=test_corpus.sents[sii];
-           const vector<int>& actions=test_corpus.actions[sii];
-           dwords += sentence.size();
-           {  ComputationGraph hg;
-             // get log likelihood of gold
-              parser.log_prob_parser(&hg,sentence,actions,&right,true);
-              double lp = as_scalar(hg.incremental_forward());
-              llh += lp;
-           }
-           ComputationGraph hg;
-          // greedy predict
-           vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,vector<int>(),&right,true);
-           int ti = 0;
-           for (auto a : pred) {
-             if (adict.Convert(a)[0] == 'N') {
-               out << '(' << ntermdict.Convert(action2NTindex.find(a)->second) << ' ';
-             } else if (adict.Convert(a)[0] == 'S') {
-               if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-                 out << termdict.Convert(sentence.raw[ti++]) << ") ";
-               } else {
-                 if (true) {
-                   string preterminal = "XX";
-                   out << '(' << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ") ";
-                 } else { // use this branch to surpress preterminals
-                   out << termdict.Convert(sentence.raw[ti++]) << ' ';
-                 }
-               }
-             } else out << ") ";
-           }
-           out << endl;
-           double lp = 0;
-           trs += actions.size();
+    bool sample = conf.count("samples") > 0;
+    bool output_beam_as_samples = conf.count("output_beam_as_samples");
+    if (sample && output_beam_as_samples) {
+      cerr << "warning: outputting samples and the contents of the beam\n";
+    }
+    unsigned beam_size = conf["beam_size"].as<unsigned>();
+    unsigned test_size = test_corpus.size();
+    double llh = 0;
+    double trs = 0;
+    double right = 0;
+    double dwords = 0;
+    auto t_start = chrono::high_resolution_clock::now();
+    const vector<int> actions;
+    vector<unsigned> n_distinct_samples;
+    for (unsigned sii = 0; sii < test_size; ++sii) {
+      const auto& sentence=test_corpus.sents[sii];
+      dwords += sentence.size();
+      // TODO: this overrides dynet random seed, but should be ok if we're only sampling
+      cnn::rndeng->seed(sii);
+      set<vector<unsigned>> samples;
+      if (conf.count("samples_include_gold")) {
+        ComputationGraph hg;
+        vector<unsigned> result = parser.log_prob_parser(&hg,sentence, test_corpus.actions[sii],&right,true);
+        double lp = as_scalar(hg.incremental_forward());
+        cout << sii << " ||| " << -lp << " |||";
+        vector<unsigned> converted_actions(test_corpus.actions[sii].begin(), test_corpus.actions[sii].end());
+        print_parse(converted_actions, sentence, true, cout);
+        samples.insert(converted_actions);
+      }
+
+      for (unsigned z = 0; z < N_SAMPLES; ++z) {
+        ComputationGraph hg;
+        vector<unsigned> result = parser.log_prob_parser(&hg,sentence,actions,&right,sample,true); // TODO: fix ordering of sample and eval here
+        double lp = as_scalar(hg.incremental_forward());
+        cout << sii << " ||| " << -lp << " |||";
+        print_parse(result, sentence, true, cout);
+        samples.insert(result);
+      }
+
+      if (output_beam_as_samples) {
+        ComputationGraph hg;
+        auto beam_results = parser.log_prob_parser_beam(&hg, sentence, beam_size);
+        if (beam_results.size() < beam_size) {
+          cerr << "warning: only " << beam_results.size() << " parses found by beam search for sent " << sii << endl;
         }
-        auto t_end = chrono::high_resolution_clock::now();
-        out.close();
-        double err = (trs - right) / trs;
-        cerr << "Test output in " << pfx << endl;
-        //parser::EvalBResults res = parser::Evaluate("foo", pfx);
-        std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > evaluable.txt";
-        const char* cmd=command.c_str();
-        system(cmd);
-
-        std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" evaluable.txt>evalbout.txt";
-        const char* cmd2=command2.c_str();
-
-        system(cmd2);
-
-        std::ifstream evalfile("evalbout.txt");
-        std::string lineS;
-        std::string brackstr="Bracketing FMeasure";
-        double newfmeasure=0.0;
-        std::string strfmeasure="";
-        bool found=0;
-        while (getline(evalfile, lineS) && !newfmeasure){
-                if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
-                        //std::cout<<lineS<<"\n";
-                        strfmeasure=lineS.substr(lineS.size()-5, lineS.size());
-                        std::string::size_type sz;
-                        newfmeasure = std::stod (strfmeasure,&sz);
-                        //std::cout<<strfmeasure<<"\n";
-                }
+        unsigned long num_results = beam_results.size();
+        for (unsigned long i = 0; i < beam_size; i++) {
+          unsigned long ix = std::min(i, num_results - 1);
+          pair<vector<unsigned>, double> result_and_nlp = beam_results[ix];
+          double lp = result_and_nlp.second;
+          cout << sii << " ||| " << -lp << " |||";
+          print_parse(result_and_nlp.first, sentence, true, cout);
+          samples.insert(result_and_nlp.first);
         }
+      }
 
-       cerr<<"F1score: "<<newfmeasure<<"\n";
-    
+      n_distinct_samples.push_back(samples.size());
+    }
+    double avg_distinct_samples = accumulate(n_distinct_samples.begin(), n_distinct_samples.end(), 0.0) / (double)  n_distinct_samples.size();
+    cerr << "avg distinct samples: " << avg_distinct_samples << endl;
+    ostringstream os;
+    os << "/tmp/parser_test_eval." << getpid() << ".txt";
+    const string pfx = os.str();
+    ofstream out(pfx.c_str());
+    t_start = chrono::high_resolution_clock::now();
+    for (unsigned sii = 0; sii < test_size; ++sii) {
+      const auto& sentence=test_corpus.sents[sii];
+      const vector<int>& actions=test_corpus.actions[sii];
+      dwords += sentence.size();
+      {  ComputationGraph hg;
+        // get log likelihood of gold
+        vector<unsigned> result = parser.log_prob_parser(&hg,sentence,actions,&right,true);
+        double lp = as_scalar(hg.incremental_forward());
+        llh += lp;
+      }
+      ComputationGraph hg;
+      // greedy predict
+      pair<vector<unsigned>, double> result_and_nlp;
+      if (beam_size > 1) {
+        auto beam_results = parser.log_prob_parser_beam(&hg, sentence, beam_size);
+        result_and_nlp = beam_results[0];
+      } else {
+        vector<unsigned> result = parser.log_prob_parser(&hg, sentence, vector<int>(), &right, true);
+        double nlp = as_scalar(hg.incremental_forward());
+        result_and_nlp = pair<vector<unsigned>, double>(result, nlp);
+      }
+      int ti = 0;
+      // TODO: convert to use print_parse
+      for (auto a : result_and_nlp.first) {
+
+        if (adict.Convert(a)[0] == 'N') {
+          out << '(' << ntermdict.Convert(action2NTindex.find(a)->second) << ' ';
+        } else if (adict.Convert(a)[0] == 'S') {
+          if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+            out << termdict.Convert(sentence.raw[ti++]) << ") ";
+          } else {
+            if (true) {
+              string preterminal = "XX";
+              out << '(' << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ") ";
+            } else { // use this branch to surpress preterminals
+              out << termdict.Convert(sentence.raw[ti++]) << ' ';
+            }
+          }
+        } else out << ") ";
+      }
+      out << endl;
+      double lp = 0;
+      trs += actions.size();
+    }
+    auto t_end = chrono::high_resolution_clock::now();
+    out.close();
+    double err = (trs - right) / trs;
+    cerr << "Test output in " << pfx << endl;
+    //parser::EvalBResults res = parser::Evaluate("foo", pfx);
+    std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > evaluable.txt";
+    const char* cmd=command.c_str();
+    system(cmd);
+
+    std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" evaluable.txt>evalbout.txt";
+    const char* cmd2=command2.c_str();
+
+    system(cmd2);
+
+    std::ifstream evalfile("evalbout.txt");
+    std::string lineS;
+    std::string brackstr="Bracketing FMeasure";
+    double newfmeasure=0.0;
+    std::string strfmeasure="";
+    bool found=0;
+    while (getline(evalfile, lineS) && !newfmeasure){
+      if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
+        //std::cout<<lineS<<"\n";
+        strfmeasure=lineS.substr(lineS.size()-5, lineS.size());
+        std::string::size_type sz;
+        newfmeasure = std::stod (strfmeasure,&sz);
+        //std::cout<<strfmeasure<<"\n";
+      }
+    }
+
+    cerr<<"F1score: "<<newfmeasure<<"\n";
+
   }
 }

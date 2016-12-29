@@ -92,6 +92,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("ignore_word_in_greedy,i", "greedy decode")
         ("word_completion_is_shift,s", "consider a word completed when it's shifted for beaming and print purposes")
         ("decode_beam_size,b", po::value<unsigned>()->default_value(1), "size of beam to use in decode")
+        ("decode_beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
         ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
         ("help,h", "Help");
   po::options_description dcmdline_options;
@@ -609,10 +610,13 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     initial_state.is_open_paren.push_back(-1); // corresponds to dummy symbol
     initial_state.action_count = 0; // incremented at each prediction
     initial_state.nt_count = 0; // number of times an NT has been introduced
+    initial_state.cons_nt = 0; // number of NTs we've opened with no intervening shifts or reduces
     vector<unsigned> current_valid_actions;
     initial_state.nopen_parens = 0;
     initial_state.prev_a = '0';
     initial_state.termc = 0;
+    initial_state.score = 0.0;
+    initial_state.action = 0;
 
     vector<BeamState> completed;
 
@@ -922,7 +926,12 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
   vector<unsigned> log_prob_parser_beam_within_word(ComputationGraph* hg,
                                         const parser::Sentence& sent,
-                                        int beam_size = 1) {
+                                        int beam_size = 1,
+                                        int beam_filter_at_word_size = -1) {
+    if (beam_filter_at_word_size < 0)
+      beam_filter_at_word_size = beam_size;
+    cerr << "beam size: " << beam_size << endl;
+    cerr << "beam filter at word size: " << beam_filter_at_word_size << endl;
     //vector<unsigned> results;
     // vector<string> stack_content;
     // stack_content.push_back("ROOT_GUARD");
@@ -977,10 +986,13 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     initial_state.is_open_paren.push_back(-1); // corresponds to dummy symbol
     initial_state.action_count = 0; // incremented at each prediction
     initial_state.nt_count = 0; // number of times an NT has been introduced
+    initial_state.cons_nt = 0; // number of NTs we've opened with no intervening shifts or reduces
     vector<unsigned> current_valid_actions;
     initial_state.nopen_parens = 0;
     initial_state.prev_a = '0';
     initial_state.termc = 0;
+    initial_state.score = 0.0;
+    initial_state.action = 0;
 
     vector<BeamState> completed;
 
@@ -1037,11 +1049,19 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
             bool is_nt = (possibleActionString[0] == 'N');
             assert(is_shift || is_reduce || is_nt);
             static const unsigned MAX_OPEN_NTS = 100;
-            if (is_nt && current.nopen_parens > MAX_OPEN_NTS) continue;
-            if (is_nt && current.cons_nt >= MAX_CONS_NT) continue;
+            if (is_nt && current.nopen_parens > MAX_OPEN_NTS) {
+                //cerr << "more than max open" << endl;
+                continue;
+            }
+            if (is_nt && current.cons_nt >= MAX_CONS_NT) {
+                //cerr << "more than max cons: " << current.cons_nt << " " << MAX_CONS_NT << endl;
+                continue;
+            }
             bool skipRest = false;
             if (ssize == 1) {
-              if (!is_nt) continue;
+              if (!is_nt) {
+                  continue;
+              }
               skipRest = true;
             }
 
@@ -1323,7 +1343,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         } // end successor iteration
       } // end build completed for current_termc
 
-      prune(completed, beam_size);
+      prune(completed, beam_filter_at_word_size);
 
       BeamState best_completed = completed[0];
       Expression e_cum_neglogprob = -sum(best_completed.log_probs);
@@ -1411,6 +1431,8 @@ int main(int argc, char** argv) {
   LSTM_INPUT_DIM = conf["lstm_input_dim"].as<unsigned>();
   MAX_CONS_NT = conf["max_cons_nt"].as<unsigned>();
 
+  cerr << "max cons nt: " << MAX_CONS_NT << endl;
+
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
     return 1;
@@ -1441,7 +1463,9 @@ int main(int argc, char** argv) {
   parser::TopDownOracleGen dev_corpus(&termdict, &adict, &posdict, &ntermdict);
   parser::TopDownOracleGen2 test_corpus(&termdict, &adict, &posdict, &ntermdict);
   corpus.load_oracle(conf["training_data"].as<string>());
-  corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+  if (conf.count("bracketing_dev_data")) {
+    corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+  }
 
   if (conf.count("words"))
     parser::ReadEmbeddings_word2vec(conf["words"].as<string>(), &termdict, &pretrained);
@@ -1671,7 +1695,10 @@ int main(int argc, char** argv) {
         // greedy predict
         vector<unsigned> pred;
         if (conf.count("beam_within_word"))
-          pred = parser.log_prob_parser_beam_within_word(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
+          pred = parser.log_prob_parser_beam_within_word(&hg,
+                                                         sentence,
+                                                         conf["decode_beam_size"].as<unsigned>(),
+                                                         conf["decode_beam_filter_at_word_size"].as<int>());
         else
           pred = parser.log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
         double pred_lp = as_scalar(hg.incremental_forward());

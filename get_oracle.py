@@ -134,29 +134,41 @@ def get_actions(line):
     i = 0
     max_idx = (len(line_strip) - 1)
 
+    last_nt = None
     open_nts = 0
     cons_nts = 0
+    same_nts = 0
     max_open_nts = 0
     max_cons_nts = 0
+    max_same_cons_nts = 0
 
     while i <= max_idx:
         assert line_strip[i] == '(' or line_strip[i] == ')'
         if line_strip[i] == '(':
             if is_next_open_bracket(line_strip, i): # open non-terminal
+                curr_NT = get_nonterminal(line_strip, i)
+                output_actions.append('NT(' + curr_NT + ')')
+
+                if curr_NT == last_nt:
+                    same_nts += 1
+                else:
+                    same_nts = 1
+                last_nt = curr_NT
 
                 open_nts += 1
                 cons_nts += 1
 
                 max_open_nts = max(max_open_nts, open_nts)
                 max_cons_nts = max(max_cons_nts, cons_nts)
+                max_same_cons_nts = max(max_same_cons_nts, same_nts)
 
-                curr_NT = get_nonterminal(line_strip, i)
-                output_actions.append('NT(' + curr_NT + ')')
                 i += 1
                 while line_strip[i] != '(': # get the next open bracket, which may be a terminal or another non-terminal
                     i += 1
             else: # it's a terminal symbol
                 cons_nts = 0
+                same_nts = 0
+                last_nt = None
 
                 output_actions.append('SHIFT')
                 while line_strip[i] != ')':
@@ -167,6 +179,8 @@ def get_actions(line):
         else:
              open_nts -= 1
              cons_nts = 0
+             same_nts = 0
+             last_nt = None
              output_actions.append('REDUCE')
              if i == max_idx:
                  break
@@ -174,7 +188,7 @@ def get_actions(line):
              while line_strip[i] != ')' and line_strip[i] != '(':
                  i += 1
     assert i == max_idx
-    return output_actions, max_open_nts, max_cons_nts
+    return output_actions, max_open_nts, max_cons_nts, max_same_cons_nts
 
 def main():
     if len(sys.argv) != 3:
@@ -191,6 +205,8 @@ def main():
     max_open_nts_ix = None
     max_cons_nts = 0
     max_cons_nts_ix = None
+    max_same_cons_nts = 0
+    max_same_cons_nts_ix = None
     # get the oracle for the train file
     for line in dev_lines:
         line_ctr += 1
@@ -207,18 +223,22 @@ def main():
         print ' '.join(lowercase)
         unkified = unkify(tokens, words_list)
         print ' '.join(unkified)
-        output_actions, mon, mcn = get_actions(line)
+        output_actions, mon, mcn, mscn = get_actions(line)
         if mon > max_open_nts:
             max_open_nts = mon
             max_open_nts_ix = line_ctr
         if mcn > max_cons_nts:
             max_cons_nts = mcn
             max_cons_nts_ix = line_ctr
+        if mscn > max_same_cons_nts:
+            max_same_cons_nts = mscn
+            max_same_cons_nts_ix = line_ctr
         for action in output_actions:
             print action
         print ''
     print >> sys.stderr, "max open nts: %d, line %d" % (max_open_nts, max_open_nts_ix)
     print >> sys.stderr, "max cons nts: %d, line %d" % (max_cons_nts, max_cons_nts_ix)
+    print >> sys.stderr, "max same cons nts: %d, line %d" % (max_same_cons_nts, max_same_cons_nts_ix)
 
 if __name__ == "__main__":
     main()
