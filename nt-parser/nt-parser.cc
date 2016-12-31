@@ -54,7 +54,7 @@ unsigned POS_SIZE = 0;
 std::map<int,int> action2NTindex;  // pass in index of action NT(X), return index of X
 bool USE_POS = false;  // in discriminative parser, incorporate POS information in token embedding
 bool USE_PRETRAINED = false;  // in discriminative parser, use pretrained word embeddings (not updated)
-bool NO_STACK = false;  // in discriminative parser, use pretrained word embeddings (not updated)
+bool NO_STACK = false;
 
 using namespace cnn::expr;
 using namespace cnn;

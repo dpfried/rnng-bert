@@ -56,6 +56,9 @@ bool IGNORE_WORD_IN_GREEDY = false;
 
 bool WORD_COMPLETION_IS_SHIFT = false;
 
+bool NO_BUFFER = false;
+bool NO_HISTORY = false;
+
 using namespace cnn::expr;
 using namespace cnn;
 using namespace std;
@@ -94,6 +97,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("decode_beam_size,b", po::value<unsigned>()->default_value(1), "size of beam to use in decode")
         ("decode_beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
         ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
+        ("no_history", "Don't encode the history")
+        ("no_buffer", "Don't encode the buffer")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -278,26 +283,26 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
     if (apply_dropout) {
       stack_lstm.set_dropout(DROPOUT);
-      term_lstm.set_dropout(DROPOUT);
-      action_lstm.set_dropout(DROPOUT);
+      if (!NO_BUFFER) term_lstm.set_dropout(DROPOUT);
+      if (!NO_HISTORY) action_lstm.set_dropout(DROPOUT);
       const_lstm_fwd.set_dropout(DROPOUT);
       const_lstm_rev.set_dropout(DROPOUT);
     } else {
       stack_lstm.disable_dropout();
-      term_lstm.disable_dropout();
-      action_lstm.disable_dropout();
+      if (!NO_BUFFER) term_lstm.disable_dropout();
+      if (!NO_HISTORY) action_lstm.disable_dropout();
       const_lstm_fwd.disable_dropout();
       const_lstm_rev.disable_dropout();
     }
-    term_lstm.new_graph(*hg);
+    if (!NO_BUFFER) term_lstm.new_graph(*hg);
     stack_lstm.new_graph(*hg);
-    action_lstm.new_graph(*hg);
+    if (!NO_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
     cfsm->new_graph(*hg);
-    term_lstm.start_new_sequence();
+    if (!NO_BUFFER) term_lstm.start_new_sequence();
     stack_lstm.start_new_sequence();
-    action_lstm.start_new_sequence();
+    if (!NO_HISTORY) action_lstm.start_new_sequence();
     // variables in the computation graph representing the parameters
     Expression pbias = parameter(*hg, p_pbias);
     Expression S = parameter(*hg, p_S);
@@ -315,10 +320,10 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     Expression action_start = parameter(*hg, p_action_start);
     Expression cW = parameter(*hg, p_cW);
 
-    action_lstm.add_input(action_start);
+    if (!NO_HISTORY) action_lstm.add_input(action_start);
 
     vector<Expression> terms(1, lookup(*hg, p_w, kSOS));
-    term_lstm.add_input(terms.back());
+    if (!NO_BUFFER) term_lstm.add_input(terms.back());
 
     vector<Expression> stack;  // variables representing subtree embeddings
     stack.push_back(parameter(*hg, p_stack_guard));
@@ -347,14 +352,24 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
       //onerep
       Expression stack_summary = stack_lstm.back();
-      Expression action_summary = action_lstm.back();
-      Expression term_summary = term_lstm.back();
+      Expression action_summary = (NO_HISTORY) ? Expression() : action_lstm.back();
+      Expression term_summary = (NO_BUFFER) ? Expression() : term_lstm.back();
       if (apply_dropout) {
         stack_summary = dropout(stack_summary, DROPOUT);
-        action_summary = dropout(action_summary, DROPOUT);
-        term_summary = dropout(term_summary, DROPOUT);
+        if (!NO_HISTORY) action_summary = dropout(action_summary, DROPOUT);
+        if (!NO_BUFFER) term_summary = dropout(term_summary, DROPOUT);
       }
-      Expression p_t = affine_transform({pbias, S, stack_summary, A, action_summary, T, term_summary});
+      Expression p_t;
+      if (NO_BUFFER && NO_HISTORY) {
+        p_t = affine_transform({pbias, S, stack_summary});
+      } else if (NO_BUFFER && !NO_HISTORY) {
+        p_t = affine_transform({pbias, S, stack_summary, A, action_summary});
+      } else if (!NO_BUFFER && NO_HISTORY) {
+        p_t = affine_transform({pbias, S, stack_summary, T, term_summary});
+      } else {
+        p_t = affine_transform({pbias, S, stack_summary, A, action_summary, T, term_summary});
+      }
+
       Expression nlp_t = rectify(p_t);
       //tworep*
       //Expression p_t = affine_transform({pbias, S, stack_lstm.back(), A, action_lstm.back()});
@@ -398,7 +413,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
       // add current action to action LSTM
       Expression actione = lookup(*hg, p_a, action);
-      action_lstm.add_input(actione);
+      if (!NO_HISTORY) action_lstm.add_input(actione);
 
       // do action
       const string& actionString=adict.Convert(action);
@@ -430,7 +445,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         ++termc;
         Expression word = lookup(*hg, p_w, wordid);
         terms.push_back(word);
-        term_lstm.add_input(word);
+        if (!NO_BUFFER) term_lstm.add_input(word);
         stack.push_back(word);
         stack_lstm.add_input(word);
         is_open_paren.push_back(-1);
@@ -563,20 +578,20 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     // stack_content.push_back("ROOT_GUARD");
 
     stack_lstm.disable_dropout();
-    term_lstm.disable_dropout();
-    action_lstm.disable_dropout();
+    if (!NO_BUFFER) term_lstm.disable_dropout();
+    if (!NO_HISTORY) action_lstm.disable_dropout();
     const_lstm_fwd.disable_dropout();
     const_lstm_rev.disable_dropout();
 
-    term_lstm.new_graph(*hg);
+    if (!NO_BUFFER) term_lstm.new_graph(*hg);
     stack_lstm.new_graph(*hg);
-    action_lstm.new_graph(*hg);
+    if (!NO_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
     cfsm->new_graph(*hg);
-    term_lstm.start_new_sequence();
+    if (!NO_BUFFER) term_lstm.start_new_sequence();
     stack_lstm.start_new_sequence();
-    action_lstm.start_new_sequence();
+    if (!NO_HISTORY) action_lstm.start_new_sequence();
     // variables in the computation graph representing the parameters
     Expression pbias = parameter(*hg, p_pbias);
     Expression S = parameter(*hg, p_S);
@@ -596,12 +611,16 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
     BeamState initial_state;
 
-    action_lstm.add_input(action_start);
-    initial_state.action_position = action_lstm.state();
+    if (!NO_HISTORY) {
+      action_lstm.add_input(action_start);
+      initial_state.action_position = action_lstm.state();
+    }
 
     initial_state.terms.push_back(lookup(*hg, p_w, kSOS));
-    term_lstm.add_input(initial_state.terms.back());
-    initial_state.term_position = term_lstm.state();
+    if (!NO_BUFFER) {
+      term_lstm.add_input(initial_state.terms.back());
+      initial_state.term_position = term_lstm.state();
+    }
 
     initial_state.stack.push_back(parameter(*hg, p_stack_guard));
 
@@ -646,9 +665,19 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
         //onerep
         Expression stack_summary = stack_lstm.get_h(current.stack_position).back();
-        Expression action_summary = action_lstm.get_h(current.action_position).back();
-        Expression term_summary = term_lstm.get_h(current.term_position).back();
-        Expression p_t = affine_transform({pbias, S, stack_summary, A, action_summary, T, term_summary});
+        Expression action_summary = (NO_HISTORY) ? Expression() : action_lstm.get_h(current.action_position).back();
+        Expression term_summary = (NO_BUFFER) ? Expression() : term_lstm.get_h(current.term_position).back();
+        // Expression p_t = affine_transform({pbias, S, stack_summary, A, action_summary, T, term_summary});
+        Expression p_t;
+        if (NO_BUFFER && NO_HISTORY) {
+          p_t = affine_transform({pbias, S, stack_summary});
+        } else if (NO_BUFFER && !NO_HISTORY) {
+          p_t = affine_transform({pbias, S, stack_summary, A, action_summary});
+        } else if (!NO_BUFFER && NO_HISTORY) {
+          p_t = affine_transform({pbias, S, stack_summary, T, term_summary});
+        } else {
+          p_t = affine_transform({pbias, S, stack_summary, A, action_summary, T, term_summary});
+        }
         Expression nlp_t = rectify(p_t);
         Expression r_t = affine_transform({abias, p2a, nlp_t});
 
@@ -782,8 +811,10 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
         // add current action to action LSTM
         Expression actione = lookup(*hg, p_a, action);
-        action_lstm.add_input(successor.action_position, actione);
-        successor.action_position = action_lstm.state();
+        if (!NO_HISTORY) {
+          action_lstm.add_input(successor.action_position, actione);
+          successor.action_position = action_lstm.state();
+        }
 
         // do action
         const string& actionString=adict.Convert(action);
@@ -812,8 +843,10 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           ++successor.termc;
           Expression word = lookup(*hg, p_w, wordid);
           successor.terms.push_back(word);
-          term_lstm.add_input(successor.term_position, word);
-          successor.term_position = term_lstm.state();
+          if (!NO_BUFFER) {
+            term_lstm.add_input(successor.term_position, word);
+            successor.term_position = term_lstm.state();
+          }
 
           successor.stack.push_back(word);
           stack_lstm.add_input(successor.stack_position, word);
@@ -939,20 +972,20 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     // stack_content.push_back("ROOT_GUARD");
 
     stack_lstm.disable_dropout();
-    term_lstm.disable_dropout();
-    action_lstm.disable_dropout();
+    if (!NO_BUFFER) term_lstm.disable_dropout();
+    if (!NO_HISTORY) action_lstm.disable_dropout();
     const_lstm_fwd.disable_dropout();
     const_lstm_rev.disable_dropout();
 
-    term_lstm.new_graph(*hg);
+    if (!NO_BUFFER) term_lstm.new_graph(*hg);
     stack_lstm.new_graph(*hg);
-    action_lstm.new_graph(*hg);
+    if (!NO_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
     cfsm->new_graph(*hg);
-    term_lstm.start_new_sequence();
+    if (!NO_BUFFER) term_lstm.start_new_sequence();
     stack_lstm.start_new_sequence();
-    action_lstm.start_new_sequence();
+    if (!NO_HISTORY) action_lstm.start_new_sequence();
     // variables in the computation graph representing the parameters
     Expression pbias = parameter(*hg, p_pbias);
     Expression S = parameter(*hg, p_S);
@@ -972,12 +1005,16 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
     BeamState initial_state;
 
-    action_lstm.add_input(action_start);
-    initial_state.action_position = action_lstm.state();
+    if (!NO_HISTORY) {
+      action_lstm.add_input(action_start);
+      initial_state.action_position = action_lstm.state();
+    }
 
     initial_state.terms.push_back(lookup(*hg, p_w, kSOS));
-    term_lstm.add_input(initial_state.terms.back());
-    initial_state.term_position = term_lstm.state();
+    if (!NO_BUFFER) {
+      term_lstm.add_input(initial_state.terms.back());
+      initial_state.term_position = term_lstm.state();
+    }
 
     initial_state.stack.push_back(parameter(*hg, p_stack_guard));
 
@@ -1026,9 +1063,19 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
           //onerep
           Expression stack_summary = stack_lstm.get_h(current.stack_position).back();
-          Expression action_summary = action_lstm.get_h(current.action_position).back();
-          Expression term_summary = term_lstm.get_h(current.term_position).back();
-          Expression p_t = affine_transform({pbias, S, stack_summary, A, action_summary, T, term_summary});
+          Expression action_summary = (NO_HISTORY) ? Expression() : action_lstm.get_h(current.action_position).back();
+          Expression term_summary = (NO_BUFFER) ? Expression() : term_lstm.get_h(current.term_position).back();
+          //Expression p_t = affine_transform({pbias, S, stack_summary, A, action_summary, T, term_summary});
+          Expression p_t;
+          if (NO_BUFFER && NO_HISTORY) {
+            p_t = affine_transform({pbias, S, stack_summary});
+          } else if (NO_BUFFER && !NO_HISTORY) {
+            p_t = affine_transform({pbias, S, stack_summary, A, action_summary});
+          } else if (!NO_BUFFER && NO_HISTORY) {
+            p_t = affine_transform({pbias, S, stack_summary, T, term_summary});
+          } else {
+            p_t = affine_transform({pbias, S, stack_summary, A, action_summary, T, term_summary});
+          }
           Expression nlp_t = rectify(p_t);
           Expression r_t = affine_transform({abias, p2a, nlp_t});
 
@@ -1170,8 +1217,10 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
           // add current action to action LSTM
           Expression actione = lookup(*hg, p_a, action);
-          action_lstm.add_input(successor.action_position, actione);
-          successor.action_position = action_lstm.state();
+          if (!NO_HISTORY) {
+            action_lstm.add_input(successor.action_position, actione);
+            successor.action_position = action_lstm.state();
+          }
 
           // do action
           const string &actionString = adict.Convert(action);
@@ -1200,8 +1249,10 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
             ++successor.termc;
             Expression word = lookup(*hg, p_w, wordid);
             successor.terms.push_back(word);
-            term_lstm.add_input(successor.term_position, word);
-            successor.term_position = term_lstm.state();
+            if (!NO_BUFFER) {
+              term_lstm.add_input(successor.term_position, word);
+              successor.term_position = term_lstm.state();
+            }
 
             successor.stack.push_back(word);
             stack_lstm.add_input(successor.stack_position, word);
@@ -1444,6 +1495,9 @@ int main(int argc, char** argv) {
 
   WORD_COMPLETION_IS_SHIFT = conf.count("word_completion_is_shift");
 
+  NO_HISTORY = conf.count("no_history");
+  NO_BUFFER = conf.count("no_buffer");
+
   ostringstream os;
   os << "ntparse_gen"
      << "_D" << DROPOUT
@@ -1452,6 +1506,8 @@ int main(int argc, char** argv) {
      << '_' << HIDDEN_DIM
      << '_' << ACTION_DIM
      << '_' << LSTM_INPUT_DIM
+     << (NO_HISTORY ? "_no-history" : "")
+     << (NO_BUFFER ? "_no-buffer" : "")
      << "-pid" << getpid() << ".params";
   const string fname = os.str();
   cerr << "PARAMETER FILE: " << fname << endl;
