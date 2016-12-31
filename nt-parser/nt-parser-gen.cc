@@ -527,6 +527,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 
       prev_a = ac;
 
+      /*
       if (was_word_completed) {
         Expression e_cum_neglogprob = -sum(log_probs);
         double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
@@ -537,6 +538,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         cerr << endl;
         print_parse(results, sent);
       }
+      */
 
 
     }
