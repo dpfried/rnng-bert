@@ -1,6 +1,6 @@
 #!/bin/bash
 
-out_dir="expts_sampling_124c129/"
+out_dir="expts_sampling_interpolate"
 mkdir $out_dir
 
 num_samples=$1
@@ -19,10 +19,13 @@ hyp=${samples}.hyp.trees
 hyp_final=${samples}.hyp_final.trees
 parsing_result=${samples}.parsing_result.txt
 
-build/nt-parser/nt-parser --cnn-mem 1700 -x -T corpora/train.oracle -p corpora/dev.oracle -C corpora/dev.stripped --pretrained_dim 100 -w embeddings/sskip.100.filtered.vectors -P --lstm_input_dim 128 --hidden_dim 128 -m $discrim_model --alpha 0.8 -s $num_samples > $samples 2> ${samples}.stderr
-utils/cut-corpus.pl 3 $samples > $trees
-build/nt-parser/nt-parser-gen --cnn-mem 1700 -x -T corpora/train_gen.oracle --clusters clusters-train-berk.txt --input_dim 256 --lstm_input_dim 256 --hidden_dim 256 -p $trees -m $gen_model > $likelihoods 2> /dev/null
-utils/is-estimate-marginal-llh.pl $num_sentences $num_samples $samples $likelihoods > $log_likelihoods 2> $rescored
+if [ -z "$2" ] 
+then
+    python utils/rescore.py $num_sentences $num_samples $samples $likelihoods > $rescored
+else
+    python utils/rescore.py $num_sentences $num_samples $samples $likelihoods --gen_lambda $2 > $rescored
+fi
+
 utils/add-fake-preterms-for-eval.pl $rescored > $rescored_preterm
 utils/replace-unks-in-trees.pl corpora/dev.oracle $rescored_preterm > $hyp
 python utils/remove_dev_unk.py corpora/dev.stripped $hyp > $hyp_final

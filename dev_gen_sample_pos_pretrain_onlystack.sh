@@ -1,11 +1,11 @@
 #!/bin/bash
 
-out_dir="expts_sampling_124c129/"
+out_dir="expts_sampling_onlystack/"
 mkdir $out_dir
 
 num_samples=$1
 discrim_model="../rnng_adhi/expts/ntparse_pos_0_2_32_128_16_128-pid28571.params_91.94"
-gen_model="ntparse_gen_D0.3_2_256_256_16_256-pid4187.params"
+gen_model="expts/ntparse_gen_D0.3_2_256_256_16_256_no-history_no-buffer-pid11778.params_ep76.82"
 num_sentences=1700 # dev
 
 samples=${out_dir}/dev_pos_embeddings_s=${num_samples}.samples
@@ -21,7 +21,7 @@ parsing_result=${samples}.parsing_result.txt
 
 build/nt-parser/nt-parser --cnn-mem 1700 -x -T corpora/train.oracle -p corpora/dev.oracle -C corpora/dev.stripped --pretrained_dim 100 -w embeddings/sskip.100.filtered.vectors -P --lstm_input_dim 128 --hidden_dim 128 -m $discrim_model --alpha 0.8 -s $num_samples > $samples 2> ${samples}.stderr
 utils/cut-corpus.pl 3 $samples > $trees
-build/nt-parser/nt-parser-gen --cnn-mem 1700 -x -T corpora/train_gen.oracle --clusters clusters-train-berk.txt --input_dim 256 --lstm_input_dim 256 --hidden_dim 256 -p $trees -m $gen_model > $likelihoods 2> /dev/null
+build/nt-parser/nt-parser-gen --cnn-mem 1700 -x -T corpora/train_gen.oracle --clusters clusters-train-berk.txt --input_dim 256 --lstm_input_dim 256 --hidden_dim 256 -p $trees -m $gen_model --no_history --no_buffer > $likelihoods 2> /dev/null
 utils/is-estimate-marginal-llh.pl $num_sentences $num_samples $samples $likelihoods > $log_likelihoods 2> $rescored
 utils/add-fake-preterms-for-eval.pl $rescored > $rescored_preterm
 utils/replace-unks-in-trees.pl corpora/dev.oracle $rescored_preterm > $hyp
