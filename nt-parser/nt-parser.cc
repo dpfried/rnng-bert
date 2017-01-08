@@ -32,7 +32,7 @@
 #include "nt-parser/eval.h"
 
 // dictionaries
-cnn::Dict termdict, ntermdict, adict, posdict;
+cnn::Dict termdict, ntermdict, adict, posdict, non_unked_termdict;
 
 volatile bool requested_stop = false;
 unsigned IMPLICIT_REDUCE_AFTER_SHIFT = 0;
@@ -93,6 +93,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("words,w", po::value<string>(), "Pretrained word embeddings")
         ("beam_size,b", po::value<unsigned>()->default_value(1), "beam size")
         ("no_stack,S", "Don't encode the stack")
+        ("ptb_output_format", "When outputting parses, use original POS tags and non-unk'ed words")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -903,7 +904,7 @@ void signal_callback_handler(int /* signum */) {
   requested_stop = true;
 }
 
-void print_parse(const vector<unsigned>& actions, const parser::Sentence& sentence, bool sample, ostream& out_stream) {
+void print_parse(const vector<unsigned>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
   int ti = 0;
   for (auto a : actions) {
     if (adict.Convert(a)[0] == 'N') {
@@ -912,9 +913,10 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
       if (IMPLICIT_REDUCE_AFTER_SHIFT) {
         out_stream << termdict.Convert(sentence.raw[ti++]) << ")";
       } else {
-        if (!sample) {
-          string preterminal = "XX";
-          out_stream << " (" << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ")";
+        if (ptb_output_format) {
+          string preterminal = posdict.Convert(sentence.pos[ti]);
+          out_stream << " (" << preterminal << ' ' << non_unked_termdict.Convert(sentence.non_unked_raw[ti]) << ")";
+          ti++;
         } else { // use this branch to surpress preterminals
           out_stream << ' ' << termdict.Convert(sentence.raw[ti++]);
         }
@@ -979,9 +981,9 @@ int main(int argc, char** argv) {
 
   Model model;
 
-  parser::TopDownOracle corpus(&termdict, &adict, &posdict, &ntermdict);
-  parser::TopDownOracle dev_corpus(&termdict, &adict, &posdict, &ntermdict);
-  parser::TopDownOracle test_corpus(&termdict, &adict, &posdict, &ntermdict);
+  parser::TopDownOracle corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
+  parser::TopDownOracle dev_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
+  parser::TopDownOracle test_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   corpus.load_oracle(conf["training_data"].as<string>(), true);	
   corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
 
@@ -1014,6 +1016,8 @@ int main(int argc, char** argv) {
     cerr << "Loading test set\n";
     test_corpus.load_oracle(conf["test_data"].as<string>(), false);
   }
+
+  non_unked_termdict.Freeze();
 
   for (unsigned i = 0; i < adict.size(); ++i) {
     const string& a = adict.Convert(i);
@@ -1203,6 +1207,7 @@ int main(int argc, char** argv) {
   } // should do training?
   if (test_corpus.size() > 0) { // do test evaluation
     bool sample = conf.count("samples") > 0;
+    bool ptb_output_format = conf.count("ptb_output_format");
     bool output_beam_as_samples = conf.count("output_beam_as_samples");
     if (sample && output_beam_as_samples) {
       cerr << "warning: outputting samples and the contents of the beam\n";
@@ -1228,7 +1233,7 @@ int main(int argc, char** argv) {
         double lp = as_scalar(hg.incremental_forward());
         cout << sii << " ||| " << -lp << " |||";
         vector<unsigned> converted_actions(test_corpus.actions[sii].begin(), test_corpus.actions[sii].end());
-        print_parse(converted_actions, sentence, true, cout);
+        print_parse(converted_actions, sentence, ptb_output_format, cout);
         samples.insert(converted_actions);
       }
 
@@ -1237,7 +1242,7 @@ int main(int argc, char** argv) {
         vector<unsigned> result = parser.log_prob_parser(&hg,sentence,actions,&right,sample,true); // TODO: fix ordering of sample and eval here
         double lp = as_scalar(hg.incremental_forward());
         cout << sii << " ||| " << -lp << " |||";
-        print_parse(result, sentence, true, cout);
+        print_parse(result, sentence, ptb_output_format, cout);
         samples.insert(result);
       }
 
@@ -1253,7 +1258,7 @@ int main(int argc, char** argv) {
           pair<vector<unsigned>, double> result_and_nlp = beam_results[ix];
           double lp = result_and_nlp.second;
           cout << sii << " ||| " << -lp << " |||";
-          print_parse(result_and_nlp.first, sentence, true, cout);
+          print_parse(result_and_nlp.first, sentence, ptb_output_format, cout);
           samples.insert(result_and_nlp.first);
         }
       }

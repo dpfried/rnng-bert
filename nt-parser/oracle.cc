@@ -63,6 +63,7 @@ void TopDownOracle::load_oracle(const string& file, bool is_training) {
       ReadSentenceView(line, pd, &cur_sent.pos);
       getline(in, line);
       ReadSentenceView(line, d, &cur_sent.raw);
+      ReadSentenceView(line, nud, &cur_sent.non_unked_raw);
       getline(in, line);
       ReadSentenceView(line, d, &cur_sent.lc);
       getline(in, line);
@@ -70,6 +71,7 @@ void TopDownOracle::load_oracle(const string& file, bool is_training) {
     } else { // at test time, we ignore the raw strings and just use the "UNKified" versions
       ReadSentenceView(line, pd, &cur_sent.pos);
       getline(in, line);
+      ReadSentenceView(line, nud, &cur_sent.non_unked_raw);
       getline(in, line);
       ReadSentenceView(line, d, &cur_sent.lc);
       getline(in, line);
