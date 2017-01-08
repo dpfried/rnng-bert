@@ -32,7 +32,7 @@
 #include "nt-parser/eval.h"
 
 // dictionaries
-cnn::Dict termdict, ntermdict, adict, posdict;
+cnn::Dict termdict, ntermdict, adict, posdict, non_unked_termdict;
 
 volatile bool requested_stop = false;
 unsigned kSOS = 0;
@@ -1520,9 +1520,9 @@ int main(int argc, char** argv) {
   Model model;
   cfsm = new ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
 
-  parser::TopDownOracleGen corpus(&termdict, &adict, &posdict, &ntermdict);
-  parser::TopDownOracleGen dev_corpus(&termdict, &adict, &posdict, &ntermdict);
-  parser::TopDownOracleGen2 test_corpus(&termdict, &adict, &posdict, &ntermdict);
+  parser::TopDownOracleGen corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
+  parser::TopDownOracleGen dev_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
+  parser::TopDownOracleGen2 test_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   corpus.load_oracle(conf["training_data"].as<string>());
   if (conf.count("bracketing_dev_data")) {
     corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
@@ -1546,6 +1546,8 @@ int main(int argc, char** argv) {
     cerr << "Loading test set\n";
     test_corpus.load_oracle(conf["test_data"].as<string>());
   }
+
+  non_unked_termdict.Freeze();
 
   for (unsigned i = 0; i < adict.size(); ++i) {
     const string& a = adict.Convert(i);
