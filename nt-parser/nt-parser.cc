@@ -93,7 +93,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("words,w", po::value<string>(), "Pretrained word embeddings")
         ("beam_size,b", po::value<unsigned>()->default_value(1), "beam size")
         ("no_stack,S", "Don't encode the stack")
-        ("ptb_output_format", "When outputting parses, use original POS tags and non-unk'ed words")
+        ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1207,7 +1207,14 @@ int main(int argc, char** argv) {
   } // should do training?
   if (test_corpus.size() > 0) { // do test evaluation
     bool sample = conf.count("samples") > 0;
-    bool ptb_output_format = conf.count("ptb_output_format");
+    ostringstream ptb_os;
+    if (conf.count("ptb_output_file")) {
+      ptb_os << conf["ptb_output_file"].as<string>();
+    } else {
+      ptb_os << "/tmp/parser_ptb_out." << getpid() << ".txt";
+    }
+    ofstream ptb_out(ptb_os.str().c_str());
+
     bool output_beam_as_samples = conf.count("output_beam_as_samples");
     if (sample && output_beam_as_samples) {
       cerr << "warning: outputting samples and the contents of the beam\n";
@@ -1233,7 +1240,8 @@ int main(int argc, char** argv) {
         double lp = as_scalar(hg.incremental_forward());
         cout << sii << " ||| " << -lp << " |||";
         vector<unsigned> converted_actions(test_corpus.actions[sii].begin(), test_corpus.actions[sii].end());
-        print_parse(converted_actions, sentence, ptb_output_format, cout);
+        print_parse(converted_actions, sentence, false, cout);
+        print_parse(converted_actions, sentence, true, ptb_out);
         samples.insert(converted_actions);
       }
 
@@ -1242,7 +1250,8 @@ int main(int argc, char** argv) {
         vector<unsigned> result = parser.log_prob_parser(&hg,sentence,actions,&right,sample,true); // TODO: fix ordering of sample and eval here
         double lp = as_scalar(hg.incremental_forward());
         cout << sii << " ||| " << -lp << " |||";
-        print_parse(result, sentence, ptb_output_format, cout);
+        print_parse(result, sentence, false, cout);
+        print_parse(result, sentence, true, ptb_out);
         samples.insert(result);
       }
 
@@ -1258,7 +1267,8 @@ int main(int argc, char** argv) {
           pair<vector<unsigned>, double> result_and_nlp = beam_results[ix];
           double lp = result_and_nlp.second;
           cout << sii << " ||| " << -lp << " |||";
-          print_parse(result_and_nlp.first, sentence, ptb_output_format, cout);
+          print_parse(result_and_nlp.first, sentence, false, cout);
+          print_parse(result_and_nlp.first, sentence, true, ptb_out);
           samples.insert(result_and_nlp.first);
         }
       }
