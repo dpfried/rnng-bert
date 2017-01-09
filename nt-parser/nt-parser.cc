@@ -1241,6 +1241,7 @@ int main(int argc, char** argv) {
         cout << sii << " ||| " << -lp << " |||";
         vector<unsigned> converted_actions(test_corpus.actions[sii].begin(), test_corpus.actions[sii].end());
         print_parse(converted_actions, sentence, false, cout);
+        ptb_out << sii << " ||| " << -lp << " |||";
         print_parse(converted_actions, sentence, true, ptb_out);
         samples.insert(converted_actions);
       }
@@ -1251,6 +1252,7 @@ int main(int argc, char** argv) {
         double lp = as_scalar(hg.incremental_forward());
         cout << sii << " ||| " << -lp << " |||";
         print_parse(result, sentence, false, cout);
+        ptb_out << sii << " ||| " << -lp << " |||";
         print_parse(result, sentence, true, ptb_out);
         samples.insert(result);
       }
@@ -1268,6 +1270,7 @@ int main(int argc, char** argv) {
           double lp = result_and_nlp.second;
           cout << sii << " ||| " << -lp << " |||";
           print_parse(result_and_nlp.first, sentence, false, cout);
+          ptb_out << sii << " ||| " << -lp << " |||";
           print_parse(result_and_nlp.first, sentence, true, ptb_out);
           samples.insert(result_and_nlp.first);
         }
