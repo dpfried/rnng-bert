@@ -52,6 +52,7 @@ unsigned NT_SIZE = 0;
 float DROPOUT = 0.0f;
 unsigned POS_SIZE = 0;
 std::map<int,int> action2NTindex;  // pass in index of action NT(X), return index of X
+
 bool USE_POS = false;  // in discriminative parser, incorporate POS information in token embedding
 bool USE_PRETRAINED = false;  // in discriminative parser, use pretrained word embeddings (not updated)
 bool NO_STACK = false;
@@ -1037,16 +1038,17 @@ int main(int argc, char** argv) {
     possible_actions[i] = i;
 
   ParserBuilder parser(&model, pretrained);
+  SimpleSGDTrainer sgd(&model);
+
   if (conf.count("model")) {
     ifstream in(conf["model"].as<string>().c_str());
     boost::archive::text_iarchive ia(in);
-    ia >> model;
+    ia >> model >> sgd;
   }
 
   //TRAINING
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
-    SimpleSGDTrainer sgd(&model);
     //AdamTrainer sgd(&model);
     //MomentumSGDTrainer sgd(&model);
     //sgd.eta_decay = 0.08;
@@ -1073,7 +1075,9 @@ int main(int argc, char** argv) {
       for (unsigned sii = 0; sii < status_every_i_iterations; ++sii) {
            if (si == corpus.sents.size()) {
              si = 0;
-             if (first) { first = false; } else { sgd.update_epoch(); }
+             if (first) { first = false; } else {
+               sgd.update_epoch();
+             }
              cerr << "**SHUFFLE\n";
              random_shuffle(order.begin(), order.end());
            }
@@ -1104,6 +1108,16 @@ int main(int argc, char** argv) {
 
       static int logc = 0;
       ++logc;
+      if (logc % 400 == 0) {
+        static int serialize_count = 0;
+        ostringstream epoch_os;
+        epoch_os << fname << "_40k-" << serialize_count;
+        const string epoch_fname = epoch_os.str();
+        cerr << "40K sentences x " << serialize_count << ", writing to "  << epoch_fname << endl;
+        ofstream out(epoch_fname);
+        boost::archive::text_oarchive oa(out);
+        oa << model << sgd;
+      }
       if (logc % 25 == 1) { // report on dev set
         unsigned dev_size = dev_corpus.size();
         double llh = 0;
@@ -1188,7 +1202,8 @@ int main(int argc, char** argv) {
 	  bestf1=newfmeasure;
           ofstream out(fname);
           boost::archive::text_oarchive oa(out);
-          oa << model;
+          // oa << model;
+          oa << model << sgd;
           system((string("cp ") + pfx + string(" ") + pfx + string(".best")).c_str());
           // Create a soft link to the most recent model in order to make it
           // easier to refer to it in a shell script.

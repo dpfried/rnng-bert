@@ -12,42 +12,64 @@ struct Trainer {
     eta0(e0), eta(e0), eta_decay(), epoch(), lambda(lam), clipping_enabled(true), clip_threshold(5), clips(), updates(), model(m) {}
   virtual ~Trainer();
 
-  virtual void update(real scale = 1.0) = 0;
-  void update_epoch(real r = 1) {
-    epoch += r;
-    eta = eta0 / (1 + epoch * eta_decay);
-  }
+  protected:
+    Trainer() {}
 
-  // if clipping is enabled and the gradient is too big, return the amount to
-  // scale the gradient by (otherwise 1)
-  float clip_gradients();
+  public:
+    virtual void update(real scale = 1.0) = 0;
+    void update_epoch(real r = 1) {
+      epoch += r;
+      eta = eta0 / (1 + epoch * eta_decay);
+    }
 
-  // learning rates
-  real eta0;
-  real eta;
-  real eta_decay;
-  real epoch;
+    // if clipping is enabled and the gradient is too big, return the amount to
+    // scale the gradient by (otherwise 1)
+    float clip_gradients();
 
-  real lambda; // weight regularization (l2)
+    // learning rates
+    real eta0;
+    real eta;
+    real eta_decay;
+    real epoch;
 
-  // clipping
-  real clipping_enabled;
-  real clip_threshold;
-  real clips;
-  real updates;
+    real lambda; // weight regularization (l2)
 
-  void status() {
-    std::cerr << "[epoch=" << epoch << " eta=" << eta << " clips=" << clips << " updates=" << updates << "] ";
-    updates = clips = 0;
-  }
+    // clipping
+    real clipping_enabled;
+    real clip_threshold;
+    real clips;
+    real updates;
 
-  Model* model;  // parameters and gradients live here
+    void status() {
+      std::cerr << "[epoch=" << epoch << " eta=" << eta << " clips=" << clips << " updates=" << updates << "] ";
+      updates = clips = 0;
+    }
+
+    Model* model;  // parameters and gradients live here
+
+  private:
+    friend class boost::serialization::access;
+    template<class Archive>
+    void serialize(Archive& ar, const unsigned int) {
+      ar & eta0 & eta & eta_decay & epoch;
+      ar & clipping_enabled & clip_threshold & clips & updates;
+      ar & lambda;
+      ar & model;
+    }
 };
 
 struct SimpleSGDTrainer : public Trainer {
   explicit SimpleSGDTrainer(Model* m, real lam = 1e-6, real e0 = 0.1) : Trainer(m, lam, e0) {}
   void update(real scale) override;
   void update(const std::vector<LookupParameters*> &lookup_params, const std::vector<Parameters*> &params, real scale = 1);
+
+  private:
+    SimpleSGDTrainer() {}
+    friend class boost::serialization::access;
+  template<class Archive>
+  void serialize(Archive& ar, const unsigned int) {
+    ar & boost::serialization::base_object<Trainer>(*this);
+  }
 };
 
 struct MomentumSGDTrainer : public Trainer {

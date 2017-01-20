@@ -52,8 +52,6 @@ unsigned NT_SIZE = 0;
 float DROPOUT = 0.0f;
 std::map<int,int> action2NTindex;  // pass in index of action NT(X), return index of X
 
-int EPOCH_SERIALIZATION_INTERVAL = -1;
-
 bool IGNORE_WORD_IN_GREEDY = false;
 
 bool WORD_COMPLETION_IS_SHIFT = false;
@@ -101,7 +99,6 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
         ("no_history", "Don't encode the history")
         ("no_buffer", "Don't encode the buffer")
-        ("epoch_serialization_interval", po::value<int>()->default_value(-1))
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1487,8 +1484,6 @@ int main(int argc, char** argv) {
   LSTM_INPUT_DIM = conf["lstm_input_dim"].as<unsigned>();
   MAX_CONS_NT = conf["max_cons_nt"].as<unsigned>();
 
-  EPOCH_SERIALIZATION_INTERVAL = conf["epoch_serialization_interval"].as<int>();
-
   cerr << "max cons nt: " << MAX_CONS_NT << endl;
 
   if (conf.count("train") && conf.count("dev_data") == 0) {
@@ -1568,17 +1563,21 @@ int main(int argc, char** argv) {
     possible_actions[i] = i;
 
   ParserBuilder parser(&model, pretrained);
+
+
+
+  SimpleSGDTrainer sgd(&model);
   if (conf.count("model")) {
     ifstream in(conf["model"].as<string>().c_str());
+    assert(in);
     boost::archive::text_iarchive ia(in);
-    ia >> model;
+    ia >> model >> sgd;
   }
 
   //TRAINING
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
     //AdamTrainer sgd(&model);
-    SimpleSGDTrainer sgd(&model);
     //sgd.eta = 0.01;
     //sgd.eta0 = 0.01;
     //MomentumSGDTrainer sgd(&model);
@@ -1607,16 +1606,6 @@ int main(int argc, char** argv) {
              si = 0;
              if (first) { first = false; } else {
                   sgd.update_epoch();
-                  int epoch_number = tot_seen / corpus.sents.size();
-                  if (EPOCH_SERIALIZATION_INTERVAL >= 0 && epoch_number % EPOCH_SERIALIZATION_INTERVAL == 0) {
-                    ostringstream epoch_os;
-                    epoch_os << fname << "_" << epoch_number;
-                    const string epoch_fname = epoch_os.str();
-                    cerr << "start of epoch " << epoch_number << " writing to "  << epoch_fname << endl;
-                    ofstream out(epoch_fname);
-                    boost::archive::text_oarchive oa(out);
-                    oa << model;
-                  }
                   //sgd.eta /= 2;
               }
              //cerr << "NO SHUFFLE" << endl;
@@ -1658,6 +1647,16 @@ int main(int argc, char** argv) {
         // sample tree and sentence
         parser.log_prob_parser(&cg, parser::Sentence(), vector<int>(),&x,true);
       }
+      if (logc % 400 == 0) {
+        static int serialize_count = 0;
+        ostringstream epoch_os;
+        epoch_os << fname << "_40k-" << serialize_count;
+        const string epoch_fname = epoch_os.str();
+        cerr << "40K sentences x " << serialize_count << ", writing to "  << epoch_fname << endl;
+        ofstream out(epoch_fname);
+        boost::archive::text_oarchive oa(out);
+        oa << model << sgd;
+      }
       if (logc % 100 == 0) { // report on dev set
         unsigned dev_size = dev_corpus.size();
         double llh = 0;
@@ -1687,7 +1686,8 @@ int main(int argc, char** argv) {
           best_dev_llh = llh;
           ofstream out(fname);
           boost::archive::text_oarchive oa(out);
-          oa << model;
+          oa << model << sgd;
+          // oa << model;
           // Create a soft link to the most recent model in order to make it
           // easier to refer to it in a shell script.
           if (!softlinkCreated) {
