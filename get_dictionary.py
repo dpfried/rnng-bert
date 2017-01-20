@@ -1,3 +1,5 @@
+import sys
+
 def is_next_open_bracket(line, start_idx):
     for char in line[(start_idx + 1):]:
         if char == '(':
@@ -17,7 +19,9 @@ def get_between_brackets(line, start_idx):
 
 def get_dict(lines):
     output = [] 
-    for line in lines:
+    for line_ct, line in enumerate(lines):
+        if line_ct % 1000 == 0:
+            sys.stderr.write("\rbuild dict: %d" % line_ct)
         #print 'curr line', line_strip
         line_strip = line.rstrip()
         #print 'length of the sentence', len(line_strip)
@@ -43,8 +47,7 @@ def get_dict(lines):
 
 if __name__ == '__main__':
     input_file = open('train.02-21', 'r')
-    lines = input_file.readlines()
-    words_list = get_dict(lines) 
+    words_list = get_dict(input_file) 
     #print 'number of words', len(words_list)
     for word in words_list:
         print word

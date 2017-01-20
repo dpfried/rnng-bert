@@ -1656,6 +1656,7 @@ int main(int argc, char** argv) {
         ofstream out(epoch_fname);
         boost::archive::text_oarchive oa(out);
         oa << model << sgd;
+        serialize_count++;
       }
       if (logc % 100 == 0) { // report on dev set
         unsigned dev_size = dev_corpus.size();

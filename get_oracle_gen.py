@@ -163,15 +163,15 @@ def main():
     if len(sys.argv) != 3:
         raise NotImplementedError('Program only takes two arguments:  train file and dev file (for vocabulary mapping purposes)')
     train_file = open(sys.argv[1], 'r')
-    lines = train_file.readlines()
+    # lines = train_file.readlines()
+    words_list = get_dictionary.get_dict(train_file) 
     train_file.close()
     dev_file = open(sys.argv[2], 'r')
-    dev_lines = dev_file.readlines()
-    dev_file.close()
-    words_list = get_dictionary.get_dict(lines) 
     line_ctr = 0
     # get the oracle for the train file
-    for line in dev_lines:
+    for i, line in enumerate(dev_file):
+        if i % 1000 == 0:
+            sys.stderr.write("\rget oracle %d" % i)
         line_ctr += 1
         # assert that the parenthesis are balanced
         if line.count('(') != line.count(')'):
@@ -190,6 +190,7 @@ def main():
         for action in output_actions:
             print action
         print ''
+    dev_file.close()
     
 
 if __name__ == "__main__":

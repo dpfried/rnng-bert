@@ -194,12 +194,11 @@ def main():
     if len(sys.argv) != 3:
         raise NotImplementedError('Program only takes two arguments:  train file and dev file (for vocabulary mapping purposes)')
     train_file = open(sys.argv[1], 'r')
-    lines = train_file.readlines()
+    # lines = train_file.readlines()
+    words_list = get_dictionary.get_dict(train_file)
     train_file.close()
     dev_file = open(sys.argv[2], 'r')
-    dev_lines = dev_file.readlines()
-    dev_file.close()
-    words_list = get_dictionary.get_dict(lines)
+    # dev_lines = dev_file.readlines()
     line_ctr = 0
     max_open_nts = 0
     max_open_nts_ix = None
@@ -208,8 +207,10 @@ def main():
     max_same_cons_nts = 0
     max_same_cons_nts_ix = None
     # get the oracle for the train file
-    for line in dev_lines:
+    for line in dev_file:
         line_ctr += 1
+        if line_ctr % 1000 == 0:
+            sys.stderr.write("\rget oracle %d" % line_ctr)
         # assert that the parenthesis are balanced
         if line.count('(') != line.count(')'):
             raise NotImplementedError('Unbalanced number of parenthesis in line ' + str(line_ctr))
@@ -239,6 +240,7 @@ def main():
     print >> sys.stderr, "max open nts: %d, line %d" % (max_open_nts, max_open_nts_ix)
     print >> sys.stderr, "max cons nts: %d, line %d" % (max_cons_nts, max_cons_nts_ix)
     print >> sys.stderr, "max same cons nts: %d, line %d" % (max_same_cons_nts, max_same_cons_nts_ix)
+    dev_file.close()
 
 if __name__ == "__main__":
     main()
