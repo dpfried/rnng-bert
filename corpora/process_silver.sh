@@ -1,14 +1,22 @@
 #!/bin/bash
 
-echo "silver dev, discrim"
-python ../get_oracle.py silver_train.stripped dev.stripped > silver_dev.oracle
-echo "silver test, discrim"
-python ../get_oracle.py silver_train.stripped test.stripped > silver_test.oracle
+train_file=silver_train.stripped
+dev_file=dev.stripped
+test_file=test.stripped
+dictionary_file=silver_train.dictionary
+
+echo "building dictionary"
+python ../get_dictionary.py $train_file > $dictionary_file
+
+# echo "silver dev, discrim"
+# python ../get_oracle.py $dictionary_file $dev_file > silver_dev.oracle
+# echo "silver test, discrim"
+# python ../get_oracle.py $dictionary_file $test_file > silver_test.oracle
 echo "silver train, discrim"
-python ../get_oracle.py silver_train.stripped silver_train.stripped > silver_train.oracle
+python ../get_oracle.py $dictionary_file $train_file > silver_train.oracle
 # echo "silver dev, gen"
-# python ../get_oracle_gen.py silver_train.stripped dev.stripped > silver_dev_gen.oracle
+# python ../get_oracle_gen.py $dictionary_file $dev_file > silver_dev_gen.oracle
 # echo "silver test, gen"
-# python ../get_oracle_gen.py silver_train.stripped test.stripped > silver_test_gen.oracle
+# python ../get_oracle_gen.py $dictionary_file $test_file > silver_test_gen.oracle
 echo "silver train, gen"
-python ../get_oracle_gen.py silver_train.stripped silver_train.stripped > silver_train_gen.oracle
+python ../get_oracle_gen.py $dictionary_file $train_file > silver_train_gen.oracle

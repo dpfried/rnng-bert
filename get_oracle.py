@@ -192,11 +192,14 @@ def get_actions(line):
 
 def main():
     if len(sys.argv) != 3:
-        raise NotImplementedError('Program only takes two arguments:  train file and dev file (for vocabulary mapping purposes)')
-    train_file = open(sys.argv[1], 'r')
-    # lines = train_file.readlines()
-    words_list = get_dictionary.get_dict(train_file)
-    train_file.close()
+        raise NotImplementedError('Program only takes two arguments:  dictionary file and dev file (for vocabulary mapping purposes)')
+    # train_file = open(sys.argv[1], 'r')
+    # words_list = set(get_dictionary.get_dict(train_file))
+    # train_file.close()
+    dictionary_file = open(sys.argv[1], 'r')
+    words_list = set(line.strip() for line in dictionary_file)
+    dictionary_file.close()
+
     dev_file = open(sys.argv[2], 'r')
     # dev_lines = dev_file.readlines()
     line_ctr = 0
