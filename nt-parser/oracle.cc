@@ -52,11 +52,16 @@ void TopDownOracle::load_oracle(const string& file, bool is_training) {
   int lc = 0;
   string line;
   vector<int> cur_acts;
+  int sent_count = 0;
   while(getline(in, line)) {
     ++lc;
     //cerr << "line number = " << lc << endl;
     cur_acts.clear();
     if (line.size() == 0 || line[0] == '#') continue;
+    sent_count++;
+    if (sent_count % 1000 == 0) {
+      cerr << "\rsent " << sent_count;
+    }
     sents.resize(sents.size() + 1);
     auto& cur_sent = sents.back();
     if (is_training) {  // at training time, we load both "UNKified" versions of the data, and raw versions
@@ -112,6 +117,7 @@ void TopDownOracle::load_oracle(const string& file, bool is_training) {
       abort();
     }
   }
+  cerr << endl;
   cerr << "Loaded " << sents.size() << " sentences\n";
   cerr << "    cumulative      action vocab size: " << ad->size() << endl;
   cerr << "    cumulative    terminal vocab size: " << d->size() << endl;

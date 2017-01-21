@@ -1167,16 +1167,18 @@ int main(int argc, char** argv) {
         double err = (trs - right) / trs;
         cerr << "Dev output in " << pfx << endl;
         //parser::EvalBResults res = parser::Evaluate("foo", pfx);
-	std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > evaluable.txt";
+    std::string evaluable_fname = pfx + "_evaluable.txt";
+    std::string evalbout_fname = pfx + "_evalbout.txt";
+	std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > " + evaluable_fname;
 	const char* cmd=command.c_str();
 	system(cmd);
 
-        std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" evaluable.txt>evalbout.txt";
+        std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" " + evaluable_fname + " > " + evalbout_fname; 
         const char* cmd2=command2.c_str();
 
         system(cmd2);
         
-        std::ifstream evalfile("evalbout.txt");
+        std::ifstream evalfile(evalbout_fname);
         std::string lineS;
         std::string brackstr="Bracketing FMeasure";
         double newfmeasure=0.0;
@@ -1208,6 +1210,7 @@ int main(int argc, char** argv) {
           system((string("cp ") + pfx + string(" ") + pfx + string(".best")).c_str());
           // Create a soft link to the most recent model in order to make it
           // easier to refer to it in a shell script.
+          /*
           if (!softlinkCreated) {
             string softlink = " latest_model";
             if (system((string("rm -f ") + softlink).c_str()) == 0 && 
@@ -1217,6 +1220,7 @@ int main(int argc, char** argv) {
             }
             softlinkCreated = true;
           }
+          */
         }
       }
     }
@@ -1350,16 +1354,18 @@ int main(int argc, char** argv) {
     double err = (trs - right) / trs;
     cerr << "Test output in " << pfx << endl;
     //parser::EvalBResults res = parser::Evaluate("foo", pfx);
-    std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > evaluable.txt";
+    std::string evaluable_fname = pfx + "_evaluable.txt";
+    std::string evalbout_fname = pfx + "_evalbout.txt";
+	std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > " + evaluable_fname;
     const char* cmd=command.c_str();
     system(cmd);
 
-    std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" evaluable.txt>evalbout.txt";
+    std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" " + evaluable_fname + " > " + evalbout_fname; 
     const char* cmd2=command2.c_str();
 
     system(cmd2);
 
-    std::ifstream evalfile("evalbout.txt");
+    std::ifstream evalfile(evalbout_fname);
     std::string lineS;
     std::string brackstr="Bracketing FMeasure";
     double newfmeasure=0.0;
