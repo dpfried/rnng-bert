@@ -1,7 +1,6 @@
 #!/bin/bash
 dynet_seed=$1
 output_prefix=expts/gen_silver_${dynet_seed}
-# TODO up the memory
 build/nt-parser/nt-parser-gen \
     --cnn-seed ${dynet_seed} \
     --cnn-mem 3000,3000,4000 \

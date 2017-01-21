@@ -40,7 +40,7 @@ function(find_mkl)
 endfunction()
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
-set(CMAKE_CXX_FLAGS "-Wall -std=c++11 -O3 -g")
+# set(CMAKE_CXX_FLAGS "-Wall -std=c++11 -O3 -g")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_FAST_MATH")
 if (MKL OR MKL_ROOT)
@@ -48,6 +48,7 @@ if (MKL OR MKL_ROOT)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_USE_MKL_ALL")
 endif()
 
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -funroll-loops -fno-finite-math-only -Wall -Wno-missing-braces -std=c++11 -Ofast -g -march=native")
 enable_testing()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
