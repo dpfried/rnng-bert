@@ -13,8 +13,8 @@
 #include <signal.h>
 
 #include <boost/functional/hash.hpp>
-#include <boost/archive/text_oarchive.hpp>
-#include <boost/archive/text_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
+#include <boost/archive/binary_iarchive.hpp>
 #include <boost/program_options.hpp>
 
 #include "cnn/training.h"
@@ -78,6 +78,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("clusters,c", po::value<string>(), "Clusters word clusters file")
         ("dev_data,d", po::value<string>(), "Development corpus")
         ("bracketing_dev_data,C", po::value<string>(), "Development bracketed corpus")
+        ("gold_training_data", po::value<string>(), "List of Transitions - smaller corpus (e.g. wsj in a wsj+silver experiment)")
         ("test_data,p", po::value<string>(), "Test corpus")
         ("eta_decay,e", po::value<float>(), "Start decaying eta after this many epochs")
         ("model,m", po::value<string>(), "Load saved model from this file")
@@ -1520,9 +1521,17 @@ int main(int argc, char** argv) {
   parser::TopDownOracleGen corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   parser::TopDownOracleGen dev_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   parser::TopDownOracleGen2 test_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
+  parser::TopDownOracleGen gold_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   corpus.load_oracle(conf["training_data"].as<string>());
   if (conf.count("bracketing_dev_data")) {
     corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+  }
+
+  bool has_gold_training_data = false;
+
+  if (conf.count("gold_training_data")) {
+    gold_corpus.load_oracle(conf["gold_training_data"].as<string>());
+    has_gold_training_data = true;
   }
 
   if (conf.count("words"))
@@ -1570,7 +1579,7 @@ int main(int argc, char** argv) {
   if (conf.count("model")) {
     ifstream in(conf["model"].as<string>().c_str());
     assert(in);
-    boost::archive::text_iarchive ia(in);
+    boost::archive::binary_iarchive ia(in);
     ia >> model >> sgd;
   }
 
@@ -1583,127 +1592,145 @@ int main(int argc, char** argv) {
     //MomentumSGDTrainer sgd(&model);
     sgd.eta_decay = 0.08;
     //sgd.eta_decay = 0.05;
-    vector<unsigned> order(corpus.sents.size());
-    for (unsigned i = 0; i < corpus.sents.size(); ++i)
-      order[i] = i;
-    double tot_seen = 0;
-    status_every_i_iterations = min((int)status_every_i_iterations, (int)corpus.sents.size());
-    unsigned si = corpus.sents.size();
-    cerr << "NUMBER OF TRAINING SENTENCES: " << corpus.sents.size() << endl;
-    unsigned trs = 0;
-    unsigned words = 0;
-    double right = 0;
-    double llh = 0;
-    bool first = true;
+
+    unsigned tot_seen = 0;
     int iter = -1;
+
     double best_dev_llh = 9e99;
-    //cerr << "TRAINING STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << endl;
-    while(!requested_stop) {
-      ++iter;
+    double bestf1=0.0;
+
+    int logc = 0;
+
+    auto train_block = [&](const parser::TopDownOracleGen& corpus, vector<unsigned>::iterator indices_begin, vector<unsigned>::iterator indices_end, int epoch_size) {
+      unsigned sentence_count = std::distance(indices_begin, indices_end);
+      status_every_i_iterations = min(status_every_i_iterations, sentence_count);
+      cerr << "Number of sentences in current block: " << sentence_count << endl;
+      unsigned trs = 0;
+      unsigned words = 0;
+      double right = 0;
+      double llh = 0;
+      //cerr << "TRAINING STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << endl;
       auto time_start = chrono::system_clock::now();
-      for (unsigned sii = 0; sii < status_every_i_iterations; ++sii) {
-           if (si == corpus.sents.size()) {
-             si = 0;
-             if (first) { first = false; } else {
-                  sgd.update_epoch();
-                  //sgd.eta /= 2;
-              }
-             //cerr << "NO SHUFFLE" << endl;
-             cerr << "**SHUFFLE\n";
-             random_shuffle(order.begin(), order.end());
-             //sgd.eta /= 2;
-           }
-           tot_seen += 1;
-           auto& sentence = corpus.sents[order[si]];
-        const vector<int>& actions=corpus.actions[order[si]];
-           ComputationGraph hg;
-           // train
-           parser.log_prob_parser(&hg,sentence,actions,&right,false);
-           double lp = as_scalar(hg.incremental_forward());
-           if (lp < 0) {
-             cerr << "Log prob < 0 on sentence " << order[si] << ": lp=" << lp << endl;
-             assert(lp >= 0.0);
-           }
-           hg.backward();
-           sgd.update(1.0);
-           llh += lp;
-           ++si;
-           trs += actions.size();
-           words += sentence.size();
-      }
-      sgd.status();
-      auto time_now = chrono::system_clock::now();
-      auto dur = chrono::duration_cast<chrono::milliseconds>(time_now - time_start);
-      cerr << "update #" << iter << " (epoch " << (tot_seen / corpus.sents.size()) <<
-         /*" |time=" << put_time(localtime(&time_now), "%c %Z") << ")\tllh: "<< */
-        ") per-action-ppl: " << exp(llh / trs) << " per-input-ppl: " << exp(llh / words) << " per-sent-ppl: " << exp(llh / status_every_i_iterations) << " err: " << (trs - right) / trs << " [" << dur.count() / (double)status_every_i_iterations << "ms per instance]" << endl;
-      llh = trs = right = words = 0;
-      static int logc = 0;
-      ++logc;
-      if (logc > 50) {
-        // generate random sample
-        ComputationGraph cg;
-        double x;
-        // sample tree and sentence
-        parser.log_prob_parser(&cg, parser::Sentence(), vector<int>(),&x,true);
-      }
-      if (logc % 400 == 0) {
-        static int serialize_count = 0;
-        ostringstream epoch_os;
-        epoch_os << fname << "_40k-" << serialize_count;
-        const string epoch_fname = epoch_os.str();
-        cerr << "40K sentences x " << serialize_count << ", writing to "  << epoch_fname << endl;
-        ofstream out(epoch_fname);
-        boost::archive::text_oarchive oa(out);
-        oa << model << sgd;
-        serialize_count++;
-      }
-      if (logc % 100 == 0) { // report on dev set
-        unsigned dev_size = dev_corpus.size();
-        double llh = 0;
-        double trs = 0;
-        double right = 0;
-        double dwords = 0;
-        auto t_start = chrono::high_resolution_clock::now();
-        for (unsigned sii = 0; sii < dev_size; ++sii) {
-           const auto& sentence=dev_corpus.sents[sii];
-	   const vector<int>& actions=dev_corpus.actions[sii];
-           dwords += sentence.size();
-           {  ComputationGraph hg;
-             //
-              parser.log_prob_parser(&hg,sentence,actions,&right,true);
-              double lp = as_scalar(hg.incremental_forward());
-              llh += lp;
-           }
-           double lp = 0;
-           trs += actions.size();
+
+      for (vector<unsigned>::iterator index_iter = indices_begin; index_iter != indices_end; ++index_iter) {
+        tot_seen += 1;
+        auto& sentence = corpus.sents[*index_iter];
+        const vector<int>& actions=corpus.actions[*index_iter];
+        ComputationGraph hg;
+        parser.log_prob_parser(&hg,sentence,actions,&right,false);
+        double lp = as_scalar(hg.incremental_forward());
+        if (lp < 0) {
+          cerr << "Log prob < 0 on sentence " << *index_iter << ": lp=" << lp << endl;
+          assert(lp >= 0.0);
         }
-        auto t_end = chrono::high_resolution_clock::now();
-        double err = (trs - right) / trs;
-        //parser::EvalBResults res = parser::Evaluate("foo", pfx);
-        cerr << "  **dev (iter=" << iter << " epoch=" << (tot_seen / corpus.size()) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
-        if (llh < best_dev_llh && (tot_seen / corpus.size()) > 1.0) {
-          cerr << "  new best...writing model to " << fname << " ...\n";
-          best_dev_llh = llh;
-          ofstream out(fname);
-          boost::archive::text_oarchive oa(out);
-          oa << model << sgd;
-          // oa << model;
-          // Create a soft link to the most recent model in order to make it
-          // easier to refer to it in a shell script.
-          /*
-          if (!softlinkCreated) {
-            string softlink = " latest_model";
-            if (system((string("rm -f ") + softlink).c_str()) == 0 && 
-                system((string("ln -s ") + fname + softlink).c_str()) == 0) {
-              cerr << "Created " << softlink << " as a soft link to " << fname 
-                   << " for convenience." << endl;
-            }
-            softlinkCreated = true;
+        hg.backward();
+        sgd.update(1.0);
+        llh += lp;
+        trs += actions.size();
+        words += sentence.size();
+
+        if (tot_seen % status_every_i_iterations == 0) {
+          ++iter;
+          sgd.status();
+          auto time_now = chrono::system_clock::now();
+          auto dur = chrono::duration_cast<chrono::milliseconds>(time_now - time_start);
+          cerr << "update #" << iter << " (epoch " << (static_cast<double>(tot_seen) / epoch_size) <<
+               /*" |time=" << put_time(localtime(&time_now), "%c %Z") << ")\tllh: "<< */
+               ") per-action-ppl: " << exp(llh / trs) << " per-input-ppl: " << exp(llh / words) << " per-sent-ppl: " << exp(llh / status_every_i_iterations) << " err: " << (trs - right) / trs << " [" << dur.count() / (double)status_every_i_iterations << "ms per instance]" << endl;
+          llh = trs = right = words = 0;
+
+          ++logc;
+          if (logc > 50) {
+            // generate random sample
+            ComputationGraph cg;
+            double x;
+            // sample tree and sentence
+            parser.log_prob_parser(&cg, parser::Sentence(), vector<int>(),&x,true);
           }
-          */
+          if (logc % 100 == 0) { // report on dev set
+            unsigned dev_size = dev_corpus.size();
+            double llh = 0;
+            double trs = 0;
+            double right = 0;
+            double dwords = 0;
+            auto t_start = chrono::high_resolution_clock::now();
+            for (unsigned sii = 0; sii < dev_size; ++sii) {
+              const auto& sentence=dev_corpus.sents[sii];
+              const vector<int>& actions=dev_corpus.actions[sii];
+              dwords += sentence.size();
+              {  ComputationGraph hg;
+                parser.log_prob_parser(&hg,sentence,actions,&right,true);
+                double lp = as_scalar(hg.incremental_forward());
+                llh += lp;
+              }
+              double lp = 0;
+              trs += actions.size();
+            }
+            auto t_end = chrono::high_resolution_clock::now();
+            double err = (trs - right) / trs;
+            //parser::EvalBResults res = parser::Evaluate("foo", pfx);
+            cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
+            if (llh < best_dev_llh && (static_cast<double>(tot_seen) / epoch_size) > 1.0) {
+              cerr << "  new best...writing model to " << fname << ".bin ...\n";
+              best_dev_llh = llh;
+              ofstream out(fname + ".bin");
+              boost::archive::binary_oarchive oa(out);
+              oa << model << sgd;
+              // oa << model;
+              // Create a soft link to the most recent model in order to make it
+              // easier to refer to it in a shell script.
+              /*
+              if (!softlinkCreated) {
+                string softlink = " latest_model";
+                if (system((string("rm -f ") + softlink).c_str()) == 0 &&
+                    system((string("ln -s ") + fname + softlink).c_str()) == 0) {
+                  cerr << "Created " << softlink << " as a soft link to " << fname
+                       << " for convenience." << endl;
+                }
+                softlinkCreated = true;
+              }
+              */
+            }
+          }
         }
       }
+
+    };
+
+    int epoch = 0;
+
+    while (!requested_stop) {
+      parser::TopDownOracleGen* main_corpus = &corpus;
+
+      int sentence_count = 0;
+
+      if (has_gold_training_data) {
+        main_corpus = &gold_corpus;
+        vector<unsigned> silver_indices(corpus.size());
+        std::iota(silver_indices.begin(), silver_indices.end(), 0);
+        std::random_shuffle(silver_indices.begin(), silver_indices.end());
+        unsigned offset = std::min(corpus.size(), gold_corpus.size() * 10);
+        train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, corpus.size() + gold_corpus.size());
+        sentence_count += offset;
+      }
+
+      vector<unsigned> main_indices(main_corpus->size());
+      std::iota(main_indices.begin(), main_indices.end(), 0);
+      std::random_shuffle(main_indices.begin(), main_indices.end());
+      sentence_count += main_indices.size();
+      train_block(*main_corpus, main_indices.begin(), main_indices.end(), sentence_count);
+
+      sgd.update_epoch();
+
+      ostringstream epoch_os;
+      epoch_os << fname << "_" << epoch << ".bin";
+      const string epoch_fname = epoch_os.str();
+      cerr << "epoch " << epoch << " of " << sentence_count << " sentences, writing to "  << epoch_fname << endl;
+      ofstream out(epoch_fname);
+      boost::archive::binary_oarchive oa(out);
+      oa << model << sgd;
+
+      epoch++;
     }
   } // should do training?
   if (conf.count("greedy_decode_dev")) { // do test evaluation
