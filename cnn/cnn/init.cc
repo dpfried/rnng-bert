@@ -2,6 +2,8 @@
 #include "cnn/aligned-mem-pool.h"
 #include "cnn/cnn.h"
 
+#include <boost/algorithm/string.hpp>
+
 #include <iostream>
 #include <random>
 #include <cmath>
@@ -36,7 +38,8 @@ void Initialize(int& argc, char**& argv, unsigned random_seed, bool shared_param
   cerr << "[cnn] initializing CUDA\n";
   gpudevices = Initialize_GPU(argc, argv);
 #endif
-  unsigned long num_mb = 512UL;
+  string mem_descriptor;
+  //unsigned long num_mb = 512UL;
   int argi = 1;
   while(argi < argc) {
     string arg = argv[argi];
@@ -45,8 +48,9 @@ void Initialize(int& argc, char**& argv, unsigned random_seed, bool shared_param
         cerr << "[cnn] --cnn-mem expects an argument (the memory, in megabytes, to reserve)\n";
         abort();
       } else {
-        string a2 = argv[argi+1];
-        istringstream c(a2); c >> num_mb;
+        mem_descriptor = argv[argi+1];
+        //string a2 = argv[argi+1];
+        //istringstream c(a2); c >> num_mb;
         RemoveArgs(argc, argv, argi, 2);
       }
     } else if (arg == "--cnn-seed" || arg == "--cnn_seed") {
@@ -70,8 +74,22 @@ void Initialize(int& argc, char**& argv, unsigned random_seed, bool shared_param
   cerr << "[cnn] random seed: " << random_seed << endl;
   rndeng = new mt19937(random_seed);
 
-  cerr << "[cnn] allocating memory: " << num_mb << "MB\n";
-  devices.push_back(new Device_CPU(num_mb, shared_parameters));
+  cerr << "[cnn] allocating memory: " << mem_descriptor << "MB\n";
+
+  vector<string> mem_strs;
+  boost::algorithm::split(mem_strs, mem_descriptor, boost::is_any_of(","));
+
+  int mb_fwd, mb_bwd, mb_params;
+
+  if (mem_strs.size() == 1) {
+    mb_fwd = mb_bwd = mb_params = stoi(mem_strs[0]) / 3;
+  } else {
+    mb_fwd = stoi(mem_strs[0]);
+    mb_bwd = stoi(mem_strs[1]);
+    mb_params = stoi(mem_strs[2]);
+  }
+
+  devices.push_back(new Device_CPU(mb_fwd, mb_bwd, mb_params, shared_parameters));
   int default_index = 0;
   if (gpudevices.size() > 0) {
     for (auto gpu : gpudevices)

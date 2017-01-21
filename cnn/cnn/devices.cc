@@ -43,7 +43,7 @@ Device_GPU::~Device_GPU() {}
 // CPU -- 0 params
 //     -- 50mb fxs
 //     -- 50mb dEdfx
-Device_CPU::Device_CPU(int mb, bool shared) :
+Device_CPU::Device_CPU(int mb_fwd, int mb_bwd, int mb_params, bool shared) :
     Device(DeviceType::CPU, &cpu_mem), shmem(mem) {
   if (shared) shmem = new SharedAllocator();
   kSCALAR_MINUSONE = (float*) mem->malloc(sizeof(float));
@@ -54,11 +54,13 @@ Device_CPU::Device_CPU(int mb, bool shared) :
   *kSCALAR_ZERO = 0;
 
   // this is the big memory allocation: the pools
+
+    cerr << "allocating memory for fwd/bwd/params" << mb_fwd << "/" << mb_bwd << "/" << mb_params << endl;
         
-  size_t byte_count = (size_t)mb << 20;
-  fxs = new AlignedMemoryPool(byte_count, mem); // memory for node values
-  dEdfs = new AlignedMemoryPool(byte_count, mem); // memory for node gradients
-  ps = new AlignedMemoryPool(byte_count, mem); // memory for parameters
+  //size_t byte_count = (size_t)mb << 20;
+  fxs = new AlignedMemoryPool((size_t)mb_fwd << 20, mem); // memory for node values
+  dEdfs = new AlignedMemoryPool((size_t)mb_bwd << 20, mem); // memory for node gradients
+  ps = new AlignedMemoryPool((size_t)mb_params << 20, mem); // memory for parameters
 
 }
 

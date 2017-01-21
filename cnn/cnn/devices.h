@@ -40,7 +40,7 @@ class Device_GPU : public Device {
 
 class Device_CPU : public Device {
  public:
-  explicit Device_CPU(int mb, bool shared);
+  explicit Device_CPU(int mb_fwd, int mb_bwd, int mb_params, bool shared);
   ~Device_CPU();
   CPUAllocator cpu_mem;
   MemAllocator* shmem;
