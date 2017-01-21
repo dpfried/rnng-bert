@@ -1581,6 +1581,8 @@ int main(int argc, char** argv) {
     assert(in);
     boost::archive::binary_iarchive ia(in);
     ia >> model >> sgd;
+    // TODO: figure out deserialization ordering
+    // ia >> termdict >> adict >> ntermdict >> posdict;
   }
 
   //TRAINING
@@ -1616,16 +1618,18 @@ int main(int argc, char** argv) {
         tot_seen += 1;
         auto& sentence = corpus.sents[*index_iter];
         const vector<int>& actions=corpus.actions[*index_iter];
-        ComputationGraph hg;
-        parser.log_prob_parser(&hg,sentence,actions,&right,false);
-        double lp = as_scalar(hg.incremental_forward());
-        if (lp < 0) {
-          cerr << "Log prob < 0 on sentence " << *index_iter << ": lp=" << lp << endl;
-          assert(lp >= 0.0);
+        {
+          ComputationGraph hg;
+          parser.log_prob_parser(&hg, sentence, actions, &right, false);
+          double lp = as_scalar(hg.incremental_forward());
+          if (lp < 0) {
+            cerr << "Log prob < 0 on sentence " << *index_iter << ": lp=" << lp << endl;
+            assert(lp >= 0.0);
+          }
+          hg.backward();
+          sgd.update(1.0);
+          llh += lp;
         }
-        hg.backward();
-        sgd.update(1.0);
-        llh += lp;
         trs += actions.size();
         words += sentence.size();
 
@@ -1676,6 +1680,7 @@ int main(int argc, char** argv) {
               ofstream out(fname + ".bin");
               boost::archive::binary_oarchive oa(out);
               oa << model << sgd;
+              oa << termdict << adict << ntermdict << posdict;
               // oa << model;
               // Create a soft link to the most recent model in order to make it
               // easier to refer to it in a shell script.
@@ -1729,6 +1734,7 @@ int main(int argc, char** argv) {
       ofstream out(epoch_fname);
       boost::archive::binary_oarchive oa(out);
       oa << model << sgd;
+      oa << termdict << adict << ntermdict << posdict;
 
       epoch++;
     }
