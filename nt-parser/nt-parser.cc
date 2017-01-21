@@ -1212,6 +1212,7 @@ int main(int argc, char** argv) {
               */
             }
           }
+          time_start = chrono::system_clock::now();
         }
       }
 
