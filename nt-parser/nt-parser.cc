@@ -1231,7 +1231,7 @@ int main(int argc, char** argv) {
         std::iota(silver_indices.begin(), silver_indices.end(), 0);
         std::random_shuffle(silver_indices.begin(), silver_indices.end());
         unsigned offset = std::min(corpus.size(), gold_corpus.size() * 10);
-        train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, corpus.size() + gold_corpus.size());
+        train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, offset + gold_corpus.size());
         sentence_count += offset;
       }
 

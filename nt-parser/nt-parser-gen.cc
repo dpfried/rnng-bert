@@ -1674,7 +1674,7 @@ int main(int argc, char** argv) {
             double err = (trs - right) / trs;
             //parser::EvalBResults res = parser::Evaluate("foo", pfx);
             cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
-            if (llh < best_dev_llh && (static_cast<double>(tot_seen) / epoch_size) > 1.0) {
+            if (llh < best_dev_llh) {
               cerr << "  new best...writing model to " << fname << ".bin ...\n";
               best_dev_llh = llh;
               ofstream out(fname + ".bin");
@@ -1716,7 +1716,7 @@ int main(int argc, char** argv) {
         std::iota(silver_indices.begin(), silver_indices.end(), 0);
         std::random_shuffle(silver_indices.begin(), silver_indices.end());
         unsigned offset = std::min(corpus.size(), gold_corpus.size() * 10);
-        train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, corpus.size() + gold_corpus.size());
+        train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, offset + gold_corpus.size());
         sentence_count += offset;
       }
 
