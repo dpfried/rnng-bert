@@ -1047,6 +1047,7 @@ int main(int argc, char** argv) {
 
   ParserBuilder parser(&model, pretrained);
   SimpleSGDTrainer sgd(&model);
+  cerr << "using sgd for training" << endl;
 
   if (conf.count("model")) {
     ifstream in(conf["model"].as<string>().c_str());

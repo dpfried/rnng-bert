@@ -1576,6 +1576,8 @@ int main(int argc, char** argv) {
 
 
   SimpleSGDTrainer sgd(&model);
+  cerr << "using sgd for training" << endl;
+
   if (conf.count("model")) {
     ifstream in(conf["model"].as<string>().c_str());
     assert(in);
