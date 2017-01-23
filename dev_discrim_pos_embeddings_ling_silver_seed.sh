@@ -6,7 +6,7 @@ build/nt-parser/nt-parser \
     -p corpora/silver_dev.oracle \
     -C corpora/dev.stripped \
     --gold_training_data corpora/silver_wsj-train.oracle \
-    -P
+    -P \
     --pretrained_dim 100 \
     -w embeddings/sskip.100.vectors \
     --lstm_input_dim 128 \
