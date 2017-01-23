@@ -993,6 +993,7 @@ int main(int argc, char** argv) {
 
   if (conf.count("gold_training_data")) {
     gold_corpus.load_oracle(conf["gold_training_data"].as<string>(), true);
+    gold_corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
     has_gold_training_data = true;
   }
 
@@ -1187,7 +1188,7 @@ int main(int argc, char** argv) {
 
 
 
-            cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / corpus.size()) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << newfmeasure << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
+            cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << newfmeasure << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
             if (newfmeasure>bestf1) {
               cerr << "  new best...writing model to " << fname << ".bin ...\n";
               best_dev_err = err;

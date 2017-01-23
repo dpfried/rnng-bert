@@ -1531,6 +1531,9 @@ int main(int argc, char** argv) {
 
   if (conf.count("gold_training_data")) {
     gold_corpus.load_oracle(conf["gold_training_data"].as<string>());
+    if (conf.count("bracketing_dev_data")) {
+      gold_corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+    }
     has_gold_training_data = true;
   }
 
