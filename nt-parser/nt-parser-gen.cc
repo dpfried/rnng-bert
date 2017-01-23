@@ -59,10 +59,13 @@ bool WORD_COMPLETION_IS_SHIFT = false;
 bool NO_BUFFER = false;
 bool NO_HISTORY = false;
 
+unsigned SILVER_BLOCKS_PER_GOLD = 10;
+
 using namespace cnn::expr;
 using namespace cnn;
 using namespace std;
 namespace po = boost::program_options;
+
 
 vector<unsigned> possible_actions;
 unordered_map<unsigned, vector<float>> pretrained;
@@ -79,6 +82,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("dev_data,d", po::value<string>(), "Development corpus")
         ("bracketing_dev_data,C", po::value<string>(), "Development bracketed corpus")
         ("gold_training_data", po::value<string>(), "List of Transitions - smaller corpus (e.g. wsj in a wsj+silver experiment)")
+        ("silver_blocks_per_gold", po::value<unsigned>()->default_value(10), "How many same-sized blocks of the silver data should be sampled and trained, between every train on the entire gold set?")
         ("test_data,p", po::value<string>(), "Test corpus")
         ("eta_decay,e", po::value<float>(), "Start decaying eta after this many epochs")
         ("model,m", po::value<string>(), "Load saved model from this file")
@@ -1485,6 +1489,8 @@ int main(int argc, char** argv) {
   LSTM_INPUT_DIM = conf["lstm_input_dim"].as<unsigned>();
   MAX_CONS_NT = conf["max_cons_nt"].as<unsigned>();
 
+  SILVER_BLOCKS_PER_GOLD = conf["silver_blocks_per_gold"].as<unsigned>();
+
   cerr << "max cons nt: " << MAX_CONS_NT << endl;
 
   if (conf.count("train") && conf.count("dev_data") == 0) {
@@ -1720,7 +1726,7 @@ int main(int argc, char** argv) {
         vector<unsigned> silver_indices(corpus.size());
         std::iota(silver_indices.begin(), silver_indices.end(), 0);
         std::random_shuffle(silver_indices.begin(), silver_indices.end());
-        unsigned offset = std::min(corpus.size(), gold_corpus.size() * 10);
+        unsigned offset = std::min(corpus.size(), gold_corpus.size() * SILVER_BLOCKS_PER_GOLD);
         train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, offset + gold_corpus.size());
         sentence_count += offset;
       }
