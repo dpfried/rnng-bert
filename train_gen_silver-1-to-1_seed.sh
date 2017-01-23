@@ -8,7 +8,7 @@ build/nt-parser/nt-parser-gen \
     -T corpora/silver_train_gen.oracle \
     -d corpora/silver_dev_gen.oracle \
     --gold_training_data corpora/silver_wsj-train_gen.oracle \
-    --silver_blocks_per_gold 1
+    --silver_blocks_per_gold 1 \
     -t \
     --clusters clusters-silver-train-berk.txt \
     --input_dim 256 \
