@@ -930,7 +930,7 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
 }
 
 int main(int argc, char** argv) {
-  cnn::Initialize(argc, argv);
+  unsigned random_seed = cnn::Initialize(argc, argv);
 
   cerr << "COMMAND LINE:"; 
   for (unsigned i = 0; i < static_cast<unsigned>(argc); ++i) cerr << ' ' << argv[i];
@@ -979,7 +979,7 @@ int main(int argc, char** argv) {
      << '_' << ACTION_DIM
      << '_' << LSTM_INPUT_DIM
      << (NO_STACK ? "_no-stack" : "")
-     << "-seed" << cnn::global_random_seed
+     << "-seed" << random_seed
      << "-pid" << getpid() << ".params";
   const string fname = os.str();
   cerr << "PARAMETER FILE: " << fname << endl;
