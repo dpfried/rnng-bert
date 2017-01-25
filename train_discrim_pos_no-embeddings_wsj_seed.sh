@@ -3,7 +3,7 @@ dynet_seed=$1
 output_prefix=expts/discrim_wsj_no-embeddings_${dynet_seed}
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
-    --cnn-mem 2000,2000,500 \
+    --cnn-mem 2000,2000,2000 \
     -x \
     -T corpora/train.oracle \
     -d corpora/dev.oracle \
