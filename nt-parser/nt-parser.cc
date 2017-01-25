@@ -17,6 +17,7 @@
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/program_options.hpp>
 
+#include "cnn/init.h"
 #include "cnn/training.h"
 #include "cnn/cnn.h"
 #include "cnn/expr.h"
@@ -977,7 +978,8 @@ int main(int argc, char** argv) {
      << '_' << HIDDEN_DIM
      << '_' << ACTION_DIM
      << '_' << LSTM_INPUT_DIM
-          << (NO_STACK ? "_no-stack" : "")
+     << (NO_STACK ? "_no-stack" : "")
+     << "-seed" << cnn::global_random_seed
      << "-pid" << getpid() << ".params";
   const string fname = os.str();
   cerr << "PARAMETER FILE: " << fname << endl;

@@ -71,6 +71,7 @@ void Initialize(int& argc, char**& argv, unsigned random_seed, bool shared_param
     random_device rd;
     random_seed = rd();
   }
+  global_random_seed = random_seed;
   cerr << "[cnn] random seed: " << random_seed << endl;
   rndeng = new mt19937(random_seed);
 

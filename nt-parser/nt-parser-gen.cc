@@ -17,6 +17,7 @@
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/program_options.hpp>
 
+#include "cnn/init.h"
 #include "cnn/training.h"
 #include "cnn/cnn.h"
 #include "cnn/expr.h"
@@ -1434,6 +1435,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     assert(tot_neglogprob.pg != nullptr);
     return best.results;
   }
+
 };
 
 void signal_callback_handler(int signum) {
@@ -1515,6 +1517,7 @@ int main(int argc, char** argv) {
      << '_' << LSTM_INPUT_DIM
      << (NO_HISTORY ? "_no-history" : "")
      << (NO_BUFFER ? "_no-buffer" : "")
+     << "-seed" << cnn::global_random_seed
      << "-pid" << getpid() << ".params";
   const string fname = os.str();
   cerr << "PARAMETER FILE: " << fname << endl;
