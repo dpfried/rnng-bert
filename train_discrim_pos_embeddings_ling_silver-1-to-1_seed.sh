@@ -9,7 +9,7 @@ build/nt-parser/nt-parser \
     -d corpora/silver_dev.oracle \
     -C corpora/dev.stripped \
     --gold_training_data corpora/silver_wsj-train.oracle \
-    --silver_blocks_per_gold 1
+    --silver_blocks_per_gold 1 \
     -t \
     -P \
     --pretrained_dim 100 \
