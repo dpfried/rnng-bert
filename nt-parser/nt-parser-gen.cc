@@ -1742,6 +1742,7 @@ int main(int argc, char** argv) {
 
       sgd.update_epoch();
 
+      /*
       ostringstream epoch_os;
       epoch_os << fname << "_" << epoch << ".bin";
       const string epoch_fname = epoch_os.str();
@@ -1750,6 +1751,7 @@ int main(int argc, char** argv) {
       boost::archive::binary_oarchive oa(out);
       oa << model << sgd;
       oa << termdict << adict << ntermdict << posdict;
+      */
 
       epoch++;
     }
