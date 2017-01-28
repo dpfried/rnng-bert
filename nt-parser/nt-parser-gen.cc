@@ -105,6 +105,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
         ("no_history", "Don't encode the history")
         ("no_buffer", "Don't encode the buffer")
+        ("block_count", po::value<unsigned>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
+        ("block_num", po::value<unsigned>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -169,6 +171,28 @@ static void prune(vector<BeamState>& pq, unsigned k) {
   //for (unsigned i = 0; i < pq.size(); ++i) {
   //  cerr << pq[i].score << endl;
   //}
+}
+
+void print_parse(const vector<unsigned>& actions, const parser::Sentence& sentence, bool include_preterms, ostream& out_stream) {
+  int ti = 0;
+  for (auto a : actions) {
+    if (adict.Convert(a)[0] == 'N') {
+      out_stream << " (" << ntermdict.Convert(action2NTindex.find(a)->second);
+    } else if (adict.Convert(a)[0] == 'S') {
+      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+        out_stream << termdict.Convert(sentence.raw[ti++]) << ")";
+      } else {
+        if (include_preterms) {
+          string preterminal = "XX";
+          out_stream << " (" << preterminal << ' ' << termdict.Convert(sentence.raw[ti]) << ")";
+          ti++;
+        } else { // use this branch to surpress preterminals
+          out_stream << ' ' << termdict.Convert(sentence.raw[ti++]);
+        }
+      }
+    } else out_stream << ')';
+  }
+  out_stream << endl;
 }
 
 struct ParserBuilder {
@@ -251,6 +275,7 @@ static bool IsActionForbidden_Generative(const string& a, char prev_a, unsigned 
   return false;
 }
 
+  /*
 void print_parse(const vector<unsigned>& actions, const parser::Sentence& sent) {
   unsigned termc = 0;
   for (unsigned action : actions) {
@@ -268,6 +293,7 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& sent) 
   }
   cerr << endl;
 }
+   */
 
 // returns parse actions for input sentence (in training just returns the reference)
 // this lets us use pretrained embeddings, when available, for words that were OOV in the
@@ -971,8 +997,8 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
                                         int beam_filter_at_word_size = -1) {
     if (beam_filter_at_word_size < 0)
       beam_filter_at_word_size = beam_size;
-    cerr << "beam size: " << beam_size << endl;
-    cerr << "beam filter at word size: " << beam_filter_at_word_size << endl;
+    //cerr << "beam size: " << beam_size << endl;
+    //cerr << "beam filter at word size: " << beam_filter_at_word_size << endl;
     //vector<unsigned> results;
     // vector<string> stack_content;
     // stack_content.push_back("ROOT_GUARD");
@@ -1412,12 +1438,14 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
           last_termc = best_completed.termc - 1;
       else 
           last_termc = best_completed.termc;
+      /*
       cerr << "best nlp after " << last_termc << "[" << best_completed.log_probs.size() << "]: \t" << cum_neglogprob << endl;
       for (unsigned i = 0; i < best_completed.log_probs.size(); i++) {
         cerr << as_scalar(best_completed.log_probs[i].value()) << " ";
       }
       cerr << endl;
-      print_parse(best_completed.results, sent);
+      print_parse(best_completed.results, sent, false, cerr);
+       */
 
       // replace beam with completed, for next termc
       beam.clear();
@@ -1757,71 +1785,54 @@ int main(int argc, char** argv) {
     }
   } // should do training?
   if (conf.count("greedy_decode_dev")) { // do test evaluation
-      bool sample = conf.count("samples") > 0;
-      unsigned dev_size = dev_corpus.size();
-      double llh = 0;
-      double trs = 0;
-      double right = 0;
-      double dwords = 0;
-      auto t_start = chrono::high_resolution_clock::now();
-      const vector<int> actions;
-      /*
-      for (unsigned sii = 0; sii < dev_size; ++sii) {
-        const auto &sentence = dev_corpus.sents[sii];
-        dwords += sentence.size();
-        for (unsigned z = 0; z < N_SAMPLES; ++z) {
-          ComputationGraph hg;
-          vector<unsigned> pred = parser.log_prob_parser(&hg, sentence, actions, &right, sample,
-                                                         true); // TODO:  order of sample and true should be swapped, but doesn't seem to matter b/c we only go down this branch if sample == true
-          double lp = as_scalar(hg.incremental_forward());
-          cout << sii << " ||| " << -lp << " |||";
-          int ti = 0;
-          for (auto a : pred) {
-            if (adict.Convert(a)[0] == 'N') {
-              cout << " (" << ntermdict.Convert(action2NTindex.find(a)->second);
-            } else if (adict.Convert(a)[0] == 'S') {
-              if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-                cout << termdict.Convert(sentence.raw[ti++]) << ")";
-              } else {
-                if (!sample) {
-                  string preterminal = "XX";
-                  cout << " (" << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ")";
-                } else { // use this branch to surpress preterminals
-                  cout << ' ' << termdict.Convert(sentence.raw[ti++]);
-                }
-              }
-            } else cout << ')';
-          }
-          cout << endl;
-        }
+    unsigned start_index = 0;
+    unsigned stop_index = dev_corpus.size();
+    unsigned block_count = conf["block_count"].as<unsigned>();
+    unsigned block_num = conf["block_num"].as<unsigned>();
+
+    if (block_count > 0) {
+      assert(block_num < block_count);
+      unsigned q = dev_corpus.size() / block_count;
+      unsigned r = dev_corpus.size() % block_count;
+      start_index = q * block_num + min(block_num, r);
+      stop_index = q * (block_num + 1) + min(block_num + 1, r);
+    }
+
+    cerr << "decoding sentences " << start_index << " .. " << (stop_index - 1) << endl;
+
+
+    ostringstream os;
+    if (conf.count("dev_output_file")) {
+      os << conf["dev_output_file"].as<string>();
+    } else {
+      os << "/tmp/parser_dev_eval." << getpid() << ".txt";
+    }
+    if (block_count > 0) {
+      os << "_block-" << block_num;
+    }
+    const string pfx = os.str();
+    cerr << "writing to " << pfx << endl;
+    ofstream out(pfx.c_str());
+    auto t_start = chrono::high_resolution_clock::now();
+    for (unsigned sii = start_index; sii < stop_index; ++sii) {
+      auto t_sentence_start =  chrono::high_resolution_clock::now();
+      const auto &sentence = dev_corpus.sents[sii];
+      const vector<int> &actions = dev_corpus.actions[sii];
+      cerr << endl;
+      cerr << endl << "sentence: " << sii << endl;
+      cerr << "gold:\t";
+      print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cerr);
+      {
+        ComputationGraph hg;
+        parser.log_prob_parser(&hg, sentence, actions, nullptr, true);
+        double nlp = as_scalar(hg.incremental_forward());
+        cerr << "gold score:\t" << -nlp << endl;
       }
-       */
-      ostringstream os;
-      if (conf.count("dev_output_file")) {
-        os << conf["dev_output_file"].as<string>();
-      } else {
-        os << "/tmp/parser_dev_eval." << getpid() << ".txt";
-      }
-      const string pfx = os.str();
-      cerr << "writing to " << pfx << endl;
-      ofstream out(pfx.c_str());
-      t_start = chrono::high_resolution_clock::now();
-      for (unsigned sii = 0; sii < dev_size; ++sii) {
-        const auto &sentence = dev_corpus.sents[sii];
-        const vector<int> &actions = dev_corpus.actions[sii];
-        dwords += sentence.size();
-        cerr << endl << "sent " << sii << endl;
-        {
-          ComputationGraph hg;
-          // get log likelihood of gold
-          parser.log_prob_parser(&hg, sentence, actions, &right, true);
-          double lp = as_scalar(hg.incremental_forward());
-          llh += lp;
-          cerr << "gold nlp: " << lp << endl;
-        }
+      vector<unsigned> pred;
+      double pred_nlp;
+      {
         ComputationGraph hg;
         // greedy predict
-        vector<unsigned> pred;
         if (conf.count("beam_within_word"))
           pred = parser.log_prob_parser_beam_within_word(&hg,
                                                          sentence,
@@ -1829,64 +1840,61 @@ int main(int argc, char** argv) {
                                                          conf["decode_beam_filter_at_word_size"].as<int>());
         else
           pred = parser.log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
-        double pred_lp = as_scalar(hg.incremental_forward());
-        cerr << "pred nlp: " << pred_lp << endl;
-        int ti = 0;
-        for (auto a : pred) {
-          if (adict.Convert(a)[0] == 'N') {
-            out << '(' << ntermdict.Convert(action2NTindex.find(a)->second) << ' ';
-          } else if (adict.Convert(a)[0] == 'S') {
-            if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-              out << termdict.Convert(sentence.raw[ti++]) << ") ";
-            } else {
-              if (true) {
-                string preterminal = "XX";
-                out << '(' << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ") ";
-              } else { // use this branch to surpress preterminals
-                out << termdict.Convert(sentence.raw[ti++]) << ' ';
-              }
-            }
-          } else out << ") ";
-        }
-        out << endl;
-        double lp = 0;
-        trs += actions.size();
+
+        pred_nlp = as_scalar(hg.incremental_forward());
       }
-      auto t_end = chrono::high_resolution_clock::now();
-      out.close();
-      double err = (trs - right) / trs;
-      cerr << "Test output in " << pfx << endl;
-      //parser::EvalBResults res = parser::Evaluate("foo", pfx);
-      std::string evaluable_fname = pfx + "_evaluable.txt";
-      std::string evalbout_fname = pfx + "_evalbout.txt";
-      std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > " + evaluable_fname;
-      const char *cmd = command.c_str();
-      system(cmd);
-
-        std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" " + evaluable_fname + " > " + evalbout_fname; 
-      const char *cmd2 = command2.c_str();
-
-      system(cmd2);
-
-      std::ifstream evalfile(evalbout_fname);
-      std::string lineS;
-      std::string brackstr = "Bracketing FMeasure";
-      double newfmeasure = 0.0;
-      std::string strfmeasure = "";
-      bool found = 0;
-      while (getline(evalfile, lineS) && !newfmeasure) {
-        if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
-          //std::cout<<lineS<<"\n";
-          strfmeasure = lineS.substr(lineS.size() - 5, lineS.size());
-          std::string::size_type sz;
-          newfmeasure = std::stod(strfmeasure, &sz);
-          //std::cout<<strfmeasure<<"\n";
-        }
+      vector<int> pred_int = vector<int>(pred.begin(), pred.end());
+      cerr << "pred:\t";
+      print_parse(pred, sentence, true, cerr);
+      cerr << "pred score:\t" << -pred_nlp << endl;
+      {
+        // rescore, to check for errors in beam search scoring
+        ComputationGraph hg;
+        // get log likelihood of gold
+        parser.log_prob_parser(&hg, sentence, pred_int, nullptr, true);
+        double pred_rescore = -as_scalar(hg.incremental_forward());
+        cerr << "pred rescore:\t" << pred_rescore << endl;
       }
+      cerr << "match?:\t" << (pred_int == actions ? "True" : "False");
 
-      cerr << "F1score: " << newfmeasure << "\n";
-
+      // print decode to file
+      print_parse(pred, sentence, true, out);
+      double lp = 0;
     }
+    auto t_end = chrono::high_resolution_clock::now();
+    out.close();
+    cerr << "Test output in " << pfx << endl;
+    //parser::EvalBResults res = parser::Evaluate("foo", pfx);
+    std::string evaluable_fname = pfx + "_evaluable.txt";
+    std::string evalbout_fname = pfx + "_evalbout.txt";
+    std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > " + evaluable_fname;
+    const char *cmd = command.c_str();
+    system(cmd);
+
+    std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" " + evaluable_fname + " > " + evalbout_fname;
+    const char *cmd2 = command2.c_str();
+
+    system(cmd2);
+
+    std::ifstream evalfile(evalbout_fname);
+    std::string lineS;
+    std::string brackstr = "Bracketing FMeasure";
+    double newfmeasure = 0.0;
+    std::string strfmeasure = "";
+    bool found = 0;
+    while (getline(evalfile, lineS) && !newfmeasure) {
+      if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
+        //std::cout<<lineS<<"\n";
+        strfmeasure = lineS.substr(lineS.size() - 5, lineS.size());
+        std::string::size_type sz;
+        newfmeasure = std::stod(strfmeasure, &sz);
+        //std::cout<<strfmeasure<<"\n";
+      }
+    }
+
+    cerr << "F1score: " << newfmeasure << "\n";
+
+  }
   if (test_corpus.size() > 0) {
     // if rescoring, we may have many repeats, cache them
     unordered_map<vector<int>, unordered_map<vector<int>, double, boost::hash<vector<int>>>, boost::hash<vector<int>>> s2a2p;

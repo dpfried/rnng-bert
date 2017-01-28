@@ -147,6 +147,7 @@ void TopDownOracleGen::load_oracle(const string& file) {
     if (line.size() == 0 || line[0] == '#') continue;
     sents.resize(sents.size() + 1);
     auto& cur_sent = sents.back();
+    ReadSentenceView(line, nud, &cur_sent.non_unked_raw);
     getline(in, line);
     ReadSentenceView(line, d, &cur_sent.raw);
     //getline(in, line);
