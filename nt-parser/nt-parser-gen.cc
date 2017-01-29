@@ -1818,15 +1818,15 @@ int main(int argc, char** argv) {
       auto t_sentence_start =  chrono::high_resolution_clock::now();
       const auto &sentence = dev_corpus.sents[sii];
       const vector<int> &actions = dev_corpus.actions[sii];
-      cerr << endl;
-      cerr << endl << "sentence: " << sii << endl;
-      cerr << "gold:\t";
-      print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cerr);
+      cout << endl;
+      cout << endl << "sentence: " << sii << endl;
+      cout << "gold:\t";
+      print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cout);
       {
         ComputationGraph hg;
         parser.log_prob_parser(&hg, sentence, actions, nullptr, true);
         double nlp = as_scalar(hg.incremental_forward());
-        cerr << "gold score:\t" << -nlp << endl;
+        cout << "gold score:\t" << -nlp << endl;
       }
       vector<unsigned> pred;
       double pred_nlp;
@@ -1844,19 +1844,20 @@ int main(int argc, char** argv) {
         pred_nlp = as_scalar(hg.incremental_forward());
       }
       vector<int> pred_int = vector<int>(pred.begin(), pred.end());
-      cerr << "pred:\t";
-      print_parse(pred, sentence, true, cerr);
-      cerr << "pred score:\t" << -pred_nlp << endl;
+      cout << "pred:\t";
+      print_parse(pred, sentence, true, cout);
+      cout << "pred score:\t" << -pred_nlp << endl;
       {
         // rescore, to check for errors in beam search scoring
         ComputationGraph hg;
         // get log likelihood of gold
         parser.log_prob_parser(&hg, sentence, pred_int, nullptr, true);
         double pred_rescore = -as_scalar(hg.incremental_forward());
-        cerr << "pred rescore:\t" << pred_rescore << endl;
+        cout << "pred rescore:\t" << pred_rescore << endl;
       }
-      cerr << "match?:\t" << (pred_int == actions ? "True" : "False");
-
+      cout << "match?:\t" << (pred_int == actions ? "True" : "False") << endl;
+      auto t_sentence_end =  chrono::high_resolution_clock::now();
+      cout << chrono::duration_cast<chrono::milliseconds>(t_sentence_end - t_sentence_start).count() / 1000.0 << " seconds" << endl;
       // print decode to file
       print_parse(pred, sentence, true, out);
       double lp = 0;
