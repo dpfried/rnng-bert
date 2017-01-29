@@ -1,5 +1,6 @@
 import sys
 import get_dictionary
+from get_dictionary import is_next_open_bracket, get_between_brackets
 
 # tokens is a list of tokens, so no need to split it again
 def unkify(tokens, words_dict):
@@ -69,23 +70,6 @@ def unkify(tokens, words_dict):
             final.append(token.rstrip())
     return final
 
-def is_next_open_bracket(line, start_idx):
-    for char in line[(start_idx + 1):]:
-        if char == '(':
-            return True
-        elif char == ')':
-            return False
-    raise IndexError('Bracket possibly not balanced, open bracket not followed by closed bracket')
-
-def get_between_brackets(line, start_idx):
-    output = []
-    for char in line[(start_idx + 1):]:
-        if char == ')':
-            break
-        assert not(char == '(')
-        output.append(char)
-    return ''.join(output)
-
 # start_idx = open bracket
 #def skip_terminals(line, start_idx):
 #    line_end_idx = len(line) - 1
@@ -95,7 +79,7 @@ def get_between_brackets(line, start_idx):
 #            return (i + 2)
 #    raise IndexError('No close bracket found in a terminal')
 
-def get_tags_tokens_lowercase(line):
+def get_tag_token_pairs(line):
     output = []
     #print 'curr line', line_strip
     line_strip = line.rstrip()
@@ -105,6 +89,10 @@ def get_tags_tokens_lowercase(line):
             assert line_strip[i] == '('
         if line_strip[i] == '(' and not(is_next_open_bracket(line_strip, i)): # fulfilling this condition means this is a terminal symbol
             output.append(get_between_brackets(line_strip, i))
+    return output
+
+def get_tags_tokens_lowercase(line):
+    output = get_tag_token_pairs(line)
     #print 'output:',output
     output_tags = []
     output_tokens = []
@@ -115,7 +103,23 @@ def get_tags_tokens_lowercase(line):
         output_tags.append(terminal_split[0])
         output_tokens.append(terminal_split[1])
         output_lowercase.append(terminal_split[1].lower())
+
     return [output_tags, output_tokens, output_lowercase]
+
+def get_tags_tokens_morphfeats(line):
+    output = get_tag_token_pairs(line)
+    output_tags = []
+    output_tokens = []
+    output_morph_feats = []
+    for terminal in output:
+        terminal_split = terminal.split()
+        assert(len(terminal_split)) == 2
+        tag, morph_feats = terminal_split[0].split('##')[:2]
+        output_tags.append(tag)
+        output_tokens.append(terminal_split[1])
+        output_morph_feats.append('|'.join([feat for feat in morph_feats.split('|')
+                                            if not feat.startswith("lem=")]))
+    return output_tags, output_tokens, output_morph_feats
 
 def get_nonterminal(line, start_idx):
     assert line[start_idx] == '(' # make sure it's an open bracket

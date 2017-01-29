@@ -1315,7 +1315,7 @@ int main(int argc, char** argv) {
   }
   if (conf.count("samples")) {
     N_SAMPLES = conf["samples"].as<unsigned>();
-    if (N_SAMPLES == 0) { cerr << "Please specify N>0 samples\n"; abort(); }
+    //if (N_SAMPLES == 0) { cerr << "Please specify N>0 samples\n"; abort(); }
   }
   
   ostringstream os;
@@ -1614,7 +1614,7 @@ int main(int argc, char** argv) {
       epoch++;
     }
   } // should do training?
-  if (test_corpus.size() > 0) { // do test evaluation
+  if (test_corpus.size() > 0) { // do inference for test evaluation
     bool sample = conf.count("samples") > 0;
     ostringstream ptb_os;
     if (conf.count("ptb_output_file")) {
