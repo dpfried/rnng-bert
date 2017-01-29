@@ -1818,15 +1818,15 @@ int main(int argc, char** argv) {
       auto t_sentence_start =  chrono::high_resolution_clock::now();
       const auto &sentence = dev_corpus.sents[sii];
       const vector<int> &actions = dev_corpus.actions[sii];
-      cerr << endl;
-      cerr << endl << "sentence: " << sii << endl;
-      cerr << "gold:\t";
-      print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cerr);
+      cout << endl;
+      cout << endl << "sentence: " << sii << endl;
+      cout << "gold:\t";
+      print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cout);
       {
         ComputationGraph hg;
         parser.log_prob_parser(&hg, sentence, actions, nullptr, true);
         double nlp = as_scalar(hg.incremental_forward());
-        cerr << "gold score:\t" << -nlp << endl;
+        cout << "gold score:\t" << -nlp << endl;
       }
       vector<unsigned> pred;
       double pred_nlp;
@@ -1844,55 +1844,59 @@ int main(int argc, char** argv) {
         pred_nlp = as_scalar(hg.incremental_forward());
       }
       vector<int> pred_int = vector<int>(pred.begin(), pred.end());
-      cerr << "pred:\t";
-      print_parse(pred, sentence, true, cerr);
-      cerr << "pred score:\t" << -pred_nlp << endl;
+      cout << "pred:\t";
+      print_parse(pred, sentence, true, cout);
+      cout << "pred score:\t" << -pred_nlp << endl;
       {
         // rescore, to check for errors in beam search scoring
         ComputationGraph hg;
         // get log likelihood of gold
         parser.log_prob_parser(&hg, sentence, pred_int, nullptr, true);
         double pred_rescore = -as_scalar(hg.incremental_forward());
-        cerr << "pred rescore:\t" << pred_rescore << endl;
+        cout << "pred rescore:\t" << pred_rescore << endl;
       }
-      cerr << "match?:\t" << (pred_int == actions ? "True" : "False");
-
+      cout << "match?:\t" << (pred_int == actions ? "True" : "False") << endl;
+      auto t_sentence_end =  chrono::high_resolution_clock::now();
+      cout << chrono::duration_cast<chrono::milliseconds>(t_sentence_end - t_sentence_start).count() / 1000.0 << " seconds" << endl;
       // print decode to file
       print_parse(pred, sentence, true, out);
       double lp = 0;
     }
     auto t_end = chrono::high_resolution_clock::now();
     out.close();
-    cerr << "Test output in " << pfx << endl;
-    //parser::EvalBResults res = parser::Evaluate("foo", pfx);
-    std::string evaluable_fname = pfx + "_evaluable.txt";
-    std::string evalbout_fname = pfx + "_evalbout.txt";
-    std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > " + evaluable_fname;
-    const char *cmd = command.c_str();
-    system(cmd);
+    if (block_count == 0) { // if we've divided up into blocks, won't have a full list of decodes to compare against
+      cerr << "Test output in " << pfx << endl;
+      //parser::EvalBResults res = parser::Evaluate("foo", pfx);
+      std::string evaluable_fname = pfx + "_evaluable.txt";
+      std::string evalbout_fname = pfx + "_evalbout.txt";
+      std::string command = "python remove_dev_unk.py " + corpus.devdata + " " + pfx + " > " + evaluable_fname;
+      const char *cmd = command.c_str();
+      system(cmd);
 
-    std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" " + evaluable_fname + " > " + evalbout_fname;
-    const char *cmd2 = command2.c_str();
+      std::string command2 =
+              "EVALB/evalb -p EVALB/COLLINS.prm " + corpus.devdata + " " + evaluable_fname + " > " + evalbout_fname;
+      const char *cmd2 = command2.c_str();
 
-    system(cmd2);
+      system(cmd2);
 
-    std::ifstream evalfile(evalbout_fname);
-    std::string lineS;
-    std::string brackstr = "Bracketing FMeasure";
-    double newfmeasure = 0.0;
-    std::string strfmeasure = "";
-    bool found = 0;
-    while (getline(evalfile, lineS) && !newfmeasure) {
-      if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
-        //std::cout<<lineS<<"\n";
-        strfmeasure = lineS.substr(lineS.size() - 5, lineS.size());
-        std::string::size_type sz;
-        newfmeasure = std::stod(strfmeasure, &sz);
-        //std::cout<<strfmeasure<<"\n";
+      std::ifstream evalfile(evalbout_fname);
+      std::string lineS;
+      std::string brackstr = "Bracketing FMeasure";
+      double newfmeasure = 0.0;
+      std::string strfmeasure = "";
+      bool found = 0;
+      while (getline(evalfile, lineS) && !newfmeasure) {
+        if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
+          //std::cout<<lineS<<"\n";
+          strfmeasure = lineS.substr(lineS.size() - 5, lineS.size());
+          std::string::size_type sz;
+          newfmeasure = std::stod(strfmeasure, &sz);
+          //std::cout<<strfmeasure<<"\n";
+        }
       }
-    }
 
-    cerr << "F1score: " << newfmeasure << "\n";
+      cerr << "F1score: " << newfmeasure << "\n";
+    }
 
   }
   if (test_corpus.size() > 0) {
