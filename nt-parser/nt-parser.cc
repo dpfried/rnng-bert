@@ -115,11 +115,11 @@ struct AbstractParser {
   virtual void new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) = 0;
   virtual bool is_finished() = 0;
   virtual vector<unsigned> get_valid_actions() = 0;
-  virtual Expression get_action_log_probs(const vector<unsigned> &valid_actions) = 0;
+  virtual Expression get_action_log_probs(const vector<unsigned>& valid_actions) = 0;
   virtual void perform_action(const unsigned action) = 0;
   virtual void finish_sentence() = 0;
 
-  vector<unsigned> log_prob_parser_abstract(
+  vector<unsigned> abstract_log_prob_parser(
       ComputationGraph* hg,
       const parser::Sentence& sent,
       const vector<int>& correct_actions,
@@ -138,7 +138,6 @@ struct AbstractParser {
     vector<unsigned> results;
 
     while(!is_finished()) {
-      // get list of possible actions for the current parser state
       vector<unsigned> valid_actions = get_valid_actions();
 
       Expression adiste = get_action_log_probs(valid_actions);
@@ -326,7 +325,7 @@ struct ParserBuilder : public AbstractParser {
   int nopen_parens = 0;
   char prev_a = '0';
 
-  void new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) {
+  void new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) override {
     this->hg = hg;
     this->apply_dropout = apply_dropout;
 
@@ -425,11 +424,11 @@ struct ParserBuilder : public AbstractParser {
     prev_a = '0';
   }
 
-  bool is_finished() {
+  bool is_finished() override {
     return stack.size() == 2 && buffer.size() == 1;
   }
 
-  vector<unsigned> get_valid_actions() {
+  vector<unsigned> get_valid_actions() override {
     vector<unsigned> valid_actions;
     for (auto a: possible_actions) {
       if (IsActionForbidden_Discriminative(adict.Convert(a), prev_a, buffer.size(), stack.size(), nopen_parens))
@@ -439,7 +438,7 @@ struct ParserBuilder : public AbstractParser {
     return valid_actions;
   }
 
-  Expression get_action_log_probs(const vector<unsigned> &valid_actions) {
+  Expression get_action_log_probs(const vector<unsigned>& valid_actions) override {
     Expression stack_summary = NO_STACK ? Expression() : stack_lstm.back();
     Expression action_summary = action_lstm.back();
     Expression buffer_summary = buffer_lstm->back();
@@ -456,7 +455,7 @@ struct ParserBuilder : public AbstractParser {
     return log_softmax(r_t, valid_actions);
   }
 
-  void perform_action(const unsigned action) {
+  void perform_action(const unsigned action) override {
     const string& actionString = adict.Convert(action);
     const char ac = actionString[0];
     const char ac2 = actionString[1];
@@ -568,7 +567,7 @@ struct ParserBuilder : public AbstractParser {
     }
   }
 
-  void finish_sentence() {
+  void finish_sentence() override {
     assert(stack.size() == 2); // guard symbol, root
     assert(stacki.size() == 2);
     assert(buffer.size() == 1); // guard symbol
@@ -1246,6 +1245,57 @@ struct ParserBuilder : public AbstractParser {
       }
       return completed_actions_and_scores;
     }
+};
+
+struct EnsembledParser : public AbstractParser {
+  enum class CombineType { sum, product };
+
+  vector<ParserBuilder>& parsers;
+  CombineType combine_type;
+
+  explicit EnsembledParser(vector<ParserBuilder>& parsers, CombineType combine_type) :
+      parsers(parsers), combine_type(combine_type) {
+    assert(!parsers.empty());
+  }
+
+  void new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) override {
+    for (ParserBuilder& parser : parsers)
+      parser.new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
+  }
+
+  bool is_finished() override {
+    return parsers.front().is_finished();
+  }
+
+  vector<unsigned> get_valid_actions() override {
+    return parsers.front().get_valid_actions();
+  }
+
+  Expression get_action_log_probs(const vector<unsigned>& valid_actions) override {
+    vector<Expression> all_log_probs;
+    for (ParserBuilder& parser : parsers)
+      all_log_probs.push_back(parser.get_action_log_probs(valid_actions));
+    Expression combined_log_probs;
+    switch (combine_type) {
+      case CombineType::sum:
+        combined_log_probs = logsumexp(all_log_probs);
+        break;
+      case CombineType::product:
+        combined_log_probs = sum(all_log_probs);
+        break;
+    }
+    return log_softmax(combined_log_probs, valid_actions);
+  }
+
+  void perform_action(const unsigned action) override {
+    for (ParserBuilder& parser : parsers)
+      parser.perform_action(action);
+  }
+
+  void finish_sentence() override {
+    for (ParserBuilder& parser : parsers)
+      parser.finish_sentence();
+  }
 };
 
 void signal_callback_handler(int /* signum */) {
