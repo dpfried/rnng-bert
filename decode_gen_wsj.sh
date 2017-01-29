@@ -5,6 +5,7 @@ model_file=ntparse_gen_D0.3_2_256_256_16_256-seed4-pid1478.params.bin
 
 if [ "$#" -ne 3 ]; then
     echo "args: beam_size beam_size_at_word block_num"
+    exit 1
 fi
 
 beam_size=$1
