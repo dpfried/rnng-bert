@@ -1863,36 +1863,39 @@ int main(int argc, char** argv) {
     }
     auto t_end = chrono::high_resolution_clock::now();
     out.close();
-    cerr << "Test output in " << pfx << endl;
-    //parser::EvalBResults res = parser::Evaluate("foo", pfx);
-    std::string evaluable_fname = pfx + "_evaluable.txt";
-    std::string evalbout_fname = pfx + "_evalbout.txt";
-    std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > " + evaluable_fname;
-    const char *cmd = command.c_str();
-    system(cmd);
+    if (block_count == 0) { // if we've divided up into blocks, won't have a full list of decodes to compare against
+      cerr << "Test output in " << pfx << endl;
+      //parser::EvalBResults res = parser::Evaluate("foo", pfx);
+      std::string evaluable_fname = pfx + "_evaluable.txt";
+      std::string evalbout_fname = pfx + "_evalbout.txt";
+      std::string command = "python remove_dev_unk.py " + corpus.devdata + " " + pfx + " > " + evaluable_fname;
+      const char *cmd = command.c_str();
+      system(cmd);
 
-    std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" " + evaluable_fname + " > " + evalbout_fname;
-    const char *cmd2 = command2.c_str();
+      std::string command2 =
+              "EVALB/evalb -p EVALB/COLLINS.prm " + corpus.devdata + " " + evaluable_fname + " > " + evalbout_fname;
+      const char *cmd2 = command2.c_str();
 
-    system(cmd2);
+      system(cmd2);
 
-    std::ifstream evalfile(evalbout_fname);
-    std::string lineS;
-    std::string brackstr = "Bracketing FMeasure";
-    double newfmeasure = 0.0;
-    std::string strfmeasure = "";
-    bool found = 0;
-    while (getline(evalfile, lineS) && !newfmeasure) {
-      if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
-        //std::cout<<lineS<<"\n";
-        strfmeasure = lineS.substr(lineS.size() - 5, lineS.size());
-        std::string::size_type sz;
-        newfmeasure = std::stod(strfmeasure, &sz);
-        //std::cout<<strfmeasure<<"\n";
+      std::ifstream evalfile(evalbout_fname);
+      std::string lineS;
+      std::string brackstr = "Bracketing FMeasure";
+      double newfmeasure = 0.0;
+      std::string strfmeasure = "";
+      bool found = 0;
+      while (getline(evalfile, lineS) && !newfmeasure) {
+        if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
+          //std::cout<<lineS<<"\n";
+          strfmeasure = lineS.substr(lineS.size() - 5, lineS.size());
+          std::string::size_type sz;
+          newfmeasure = std::stod(strfmeasure, &sz);
+          //std::cout<<strfmeasure<<"\n";
+        }
       }
-    }
 
-    cerr << "F1score: " << newfmeasure << "\n";
+      cerr << "F1score: " << newfmeasure << "\n";
+    }
 
   }
   if (test_corpus.size() > 0) {
