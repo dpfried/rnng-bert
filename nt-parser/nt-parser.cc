@@ -84,6 +84,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("samples_include_gold", "Also include the gold parse in the list of samples output")
         ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
         ("model,m", po::value<string>(), "Load saved model from this file")
+        ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
         ("use_pos_tags,P", "make POS tags visible to parser")
         ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
         ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
@@ -1359,6 +1360,22 @@ int main(int argc, char** argv) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
     return 1;
   }
+
+  if (conf.count("train") && conf.count("test_data")) {
+    cerr << "Cannot specify --train with --test-data." << endl;
+    return 1;
+  }
+
+  if (conf.count("train") && conf.count("models")) {
+    cerr << "Cannot specify --train with --models." << endl;
+    return 1;
+  }
+
+  if (conf.count("model") && conf.count("models")) {
+    cerr << "Cannot specify --model and --models." << endl;
+    return 1;
+  }
+
   if (conf.count("alpha")) {
     ALPHA = conf["alpha"].as<float>();
     if (ALPHA <= 0.f) { cerr << "--alpha must be between 0 and +infty\n"; abort(); }
@@ -1384,8 +1401,6 @@ int main(int argc, char** argv) {
   const string fname = os.str();
   cerr << "PARAMETER FILE: " << fname << endl;
   //bool softlinkCreated = false;
-
-  Model model;
 
   parser::TopDownOracle corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   parser::TopDownOracle dev_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
@@ -1451,19 +1466,21 @@ int main(int argc, char** argv) {
   for (unsigned i = 0; i < adict.size(); ++i)
     possible_actions[i] = i;
 
-  ParserBuilder parser(&model, pretrained);
-  SimpleSGDTrainer sgd(&model);
-  cerr << "using sgd for training" << endl;
-
-  if (conf.count("model")) {
-    ifstream in(conf["model"].as<string>().c_str());
-    boost::archive::binary_iarchive ia(in);
-    ia >> model >> sgd;
-  }
-
   //TRAINING
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
+
+    Model model;
+    ParserBuilder parser(&model, pretrained);
+    SimpleSGDTrainer sgd(&model);
+    cerr << "using sgd for training" << endl;
+
+    if (conf.count("model")) {
+      ifstream in(conf["model"].as<string>().c_str());
+      boost::archive::binary_iarchive ia(in);
+      ia >> model >> sgd;
+    }
+
     //AdamTrainer sgd(&model);
     //MomentumSGDTrainer sgd(&model);
     //sgd.eta_decay = 0.08;
@@ -1664,7 +1681,38 @@ int main(int argc, char** argv) {
       epoch++;
     }
   } // should do training?
+
   if (test_corpus.size() > 0) { // do inference for test evaluation
+    vector<Model> models;
+    vector<ParserBuilder> parsers;
+    std::shared_ptr<EnsembledParser> ensembled_parser;
+
+    AbstractParser* abstract_parser;
+
+    if (conf.count("model")) {
+      models.push_back(Model());
+      parsers.push_back(ParserBuilder(&models.back(), pretrained));
+      ifstream in(conf["model"].as<string>());
+      boost::archive::binary_iarchive ia(in);
+      ia >> models.back();
+      abstract_parser = &parsers.back();
+    }
+
+    else {
+      assert(conf.count("models"));
+      vector<string> model_paths = conf["models"].as<vector<string>>();
+      assert(!model_paths.empty());
+      for (const string& path : model_paths) {
+        models.push_back(Model());
+        parsers.push_back(ParserBuilder(&models.back(), pretrained));
+        ifstream in(path);
+        boost::archive::binary_iarchive ia(in);
+        ia >> models.back();
+      }
+      ensembled_parser = std::make_shared<EnsembledParser>(parsers, EnsembledParser::CombineType::product);
+      abstract_parser = ensembled_parser.get();
+    }
+
     bool sample = conf.count("samples") > 0;
     ostringstream ptb_os;
     if (conf.count("ptb_output_file")) {
@@ -1695,7 +1743,7 @@ int main(int argc, char** argv) {
       set<vector<unsigned>> samples;
       if (conf.count("samples_include_gold")) {
         ComputationGraph hg;
-        vector<unsigned> result = parser.log_prob_parser(&hg,sentence, test_corpus.actions[sii],&right,true);
+        vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg,sentence, test_corpus.actions[sii],&right,true);
         double lp = as_scalar(hg.incremental_forward());
         cout << sii << " ||| " << -lp << " |||";
         vector<unsigned> converted_actions(test_corpus.actions[sii].begin(), test_corpus.actions[sii].end());
@@ -1707,7 +1755,7 @@ int main(int argc, char** argv) {
 
       for (unsigned z = 0; z < N_SAMPLES; ++z) {
         ComputationGraph hg;
-        vector<unsigned> result = parser.log_prob_parser(&hg,sentence,actions,&right,sample,true); // TODO: fix ordering of sample and eval here
+        vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg,sentence,actions,&right,sample,true); // TODO: fix ordering of sample and eval here
         double lp = as_scalar(hg.incremental_forward());
         cout << sii << " ||| " << -lp << " |||";
         print_parse(result, sentence, false, cout);
@@ -1716,6 +1764,7 @@ int main(int argc, char** argv) {
         samples.insert(result);
       }
 
+      /*
       if (output_beam_as_samples) {
         ComputationGraph hg;
         auto beam_results = parser.log_prob_parser_beam(&hg, sentence, beam_size);
@@ -1734,6 +1783,7 @@ int main(int argc, char** argv) {
           samples.insert(result_and_nlp.first);
         }
       }
+      */
 
       n_distinct_samples.push_back(samples.size());
     }
@@ -1750,18 +1800,18 @@ int main(int argc, char** argv) {
       dwords += sentence.size();
       {  ComputationGraph hg;
         // get log likelihood of gold
-        vector<unsigned> result = parser.log_prob_parser(&hg,sentence,actions,&right,true);
+        vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg,sentence,actions,&right,true);
         double lp = as_scalar(hg.incremental_forward());
         llh += lp;
       }
       ComputationGraph hg;
       // greedy predict
       pair<vector<unsigned>, double> result_and_nlp;
-      if (beam_size > 1) {
+      /* if (beam_size > 1) {
         auto beam_results = parser.log_prob_parser_beam(&hg, sentence, beam_size);
         result_and_nlp = beam_results[0];
-      } else {
-        vector<unsigned> result = parser.log_prob_parser(&hg, sentence, vector<int>(), &right, true);
+      } else */ {
+        vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(), &right, true);
         double nlp = as_scalar(hg.incremental_forward());
         result_and_nlp = pair<vector<unsigned>, double>(result, nlp);
       }
@@ -1795,7 +1845,7 @@ int main(int argc, char** argv) {
     //parser::EvalBResults res = parser::Evaluate("foo", pfx);
     std::string evaluable_fname = pfx + "_evaluable.txt";
     std::string evalbout_fname = pfx + "_evalbout.txt";
-	std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > " + evaluable_fname;
+	  std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > " + evaluable_fname;
     const char* cmd=command.c_str();
     system(cmd);
 
