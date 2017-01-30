@@ -1251,31 +1251,31 @@ struct ParserBuilder : public AbstractParser {
 struct EnsembledParser : public AbstractParser {
   enum class CombineType { sum, product };
 
-  vector<ParserBuilder>& parsers;
+  vector<std::shared_ptr<ParserBuilder>> parsers;
   CombineType combine_type;
 
-  explicit EnsembledParser(vector<ParserBuilder>& parsers, CombineType combine_type) :
+  explicit EnsembledParser(vector<std::shared_ptr<ParserBuilder>> parsers, CombineType combine_type) :
       parsers(parsers), combine_type(combine_type) {
     assert(!parsers.empty());
   }
 
   void new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) override {
-    for (ParserBuilder& parser : parsers)
-      parser.new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
+    for (const std::shared_ptr<ParserBuilder>& parser : parsers)
+      parser->new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
   }
 
   bool is_finished() override {
-    return parsers.front().is_finished();
+    return parsers.front()->is_finished();
   }
 
   vector<unsigned> get_valid_actions() override {
-    return parsers.front().get_valid_actions();
+    return parsers.front()->get_valid_actions();
   }
 
   Expression get_action_log_probs(const vector<unsigned>& valid_actions) override {
     vector<Expression> all_log_probs;
-    for (ParserBuilder& parser : parsers)
-      all_log_probs.push_back(parser.get_action_log_probs(valid_actions));
+    for (const std::shared_ptr<ParserBuilder>& parser : parsers)
+      all_log_probs.push_back(parser->get_action_log_probs(valid_actions));
     Expression combined_log_probs;
     switch (combine_type) {
       case CombineType::sum:
@@ -1289,13 +1289,13 @@ struct EnsembledParser : public AbstractParser {
   }
 
   void perform_action(const unsigned action) override {
-    for (ParserBuilder& parser : parsers)
-      parser.perform_action(action);
+    for (const std::shared_ptr<ParserBuilder>& parser : parsers)
+      parser->perform_action(action);
   }
 
   void finish_sentence() override {
-    for (ParserBuilder& parser : parsers)
-      parser.finish_sentence();
+    for (const std::shared_ptr<ParserBuilder>& parser : parsers)
+      parser->finish_sentence();
   }
 };
 
@@ -1683,31 +1683,35 @@ int main(int argc, char** argv) {
   } // should do training?
 
   if (test_corpus.size() > 0) { // do inference for test evaluation
-    vector<Model> models;
-    vector<ParserBuilder> parsers;
+    vector<std::shared_ptr<Model>> models;
+    vector<std::shared_ptr<ParserBuilder>> parsers;
     std::shared_ptr<EnsembledParser> ensembled_parser;
 
     AbstractParser* abstract_parser;
 
     if (conf.count("model")) {
-      models.push_back(Model());
-      parsers.push_back(ParserBuilder(&models.back(), pretrained));
-      ifstream in(conf["model"].as<string>());
+      models.push_back(std::make_shared<Model>());
+      parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), pretrained));
+      string path(conf["model"].as<string>());
+      cerr << "Loading single parser from " << path << "..." << endl;
+      ifstream in(path);
       boost::archive::binary_iarchive ia(in);
-      ia >> models.back();
-      abstract_parser = &parsers.back();
+      ia >> *models.back();
+      abstract_parser = parsers.back().get();
     }
 
     else {
       assert(conf.count("models"));
       vector<string> model_paths = conf["models"].as<vector<string>>();
       assert(!model_paths.empty());
+      cerr << "Loading ensembled parser..." << endl;
       for (const string& path : model_paths) {
-        models.push_back(Model());
-        parsers.push_back(ParserBuilder(&models.back(), pretrained));
+        models.push_back(std::make_shared<Model>());
+        parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), pretrained));
+        cerr << "Loading parser from " << path << "..." << endl;
         ifstream in(path);
         boost::archive::binary_iarchive ia(in);
-        ia >> models.back();
+        ia >> *models.back();
       }
       ensembled_parser = std::make_shared<EnsembledParser>(parsers, EnsembledParser::CombineType::product);
       abstract_parser = ensembled_parser.get();
