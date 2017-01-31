@@ -202,11 +202,11 @@ struct AbstractParser {
                             bool apply_dropout) = 0;
   virtual bool is_finished() = 0;
   virtual vector<unsigned> get_valid_actions() = 0;
-  virtual pair<Expression, Expression> get_action_log_probs_and_cfsm_input(const vector<unsigned>& valid_actions) = 0;
+  virtual pair<Expression, Expression> get_action_log_probs_and_next_word_log_prob(const vector<unsigned>& valid_actions, unsigned next_word, bool get_next_word) = 0;
   virtual void perform_action(const unsigned action, unsigned wordid) = 0;
   virtual void finish_sentence() = 0;
-  virtual unsigned sample_word(Expression cfsm_input) = 0;
-  virtual Expression word_neg_log_prob(Expression cfsm_input, unsigned wordid) = 0;
+  //virtual unsigned sample_word(Expression cfsm_input) = 0;
+  //virtual Expression word_neg_log_prob(Expression cfsm_input, unsigned wordid) = 0;
   virtual unsigned term_count() = 0;
 
   vector<unsigned> abstract_log_prob_parser(ComputationGraph* hg,
@@ -221,6 +221,11 @@ struct AbstractParser {
     bool apply_dropout = (DROPOUT && !is_evaluation);
     if (sample) apply_dropout = false;
 
+    if (sample) {
+      cerr << "sampling not implemented in abstract parser (TODO: figure out ensembling class-factored soft-max)" << endl;
+      abort();
+    }
+
     new_sentence(hg, this_cfsm, sent, is_evaluation, apply_dropout);
 
     unsigned action_count = 0;  // incremented at each prediction
@@ -229,12 +234,17 @@ struct AbstractParser {
 
     while (!is_finished()) {
       vector<unsigned> current_valid_actions = get_valid_actions();
-      pair<Expression,Expression> adiste_and_cfsm_input = get_action_log_probs_and_cfsm_input(current_valid_actions);
-      Expression adiste = adiste_and_cfsm_input.first;
-      Expression cfsm_input = adiste_and_cfsm_input.second;
+      bool has_next_word = term_count() < sent.size();
+      if (has_next_word)
+        assert(sent.raw[term_count()] >= 0); // for int -> unsigned conversion
+      unsigned next_word = has_next_word ? sent.raw[term_count()] : 0;
+      pair<Expression,Expression> adiste_and_next_word_log_prob = get_action_log_probs_and_next_word_log_prob(current_valid_actions, next_word, has_next_word);
+      Expression adiste = adiste_and_next_word_log_prob.first;
+      Expression next_word_log_prob = adiste_and_next_word_log_prob.second;
       unsigned action = 0;
       unsigned wordid = 0;
 
+      /*
       if (sample) {
         auto dist = as_vector(hg->incremental_forward());
         double p = rand01();
@@ -254,7 +264,9 @@ struct AbstractParser {
         }
         wordid = sample_word(cfsm_input);
         cerr << " " << termdict.Convert(wordid);
-      } else {
+      } else
+        */
+      {
         if (action_count >= correct_actions.size()) {
           cerr << "Correct action list exhausted, but not in final parser state.\n";
           cerr << "action count: " << action_count << endl;
@@ -273,9 +285,9 @@ struct AbstractParser {
         log_probs.push_back(pick(adiste, action));
         const string &a = adict.Convert(action);
         if (a[0] == 'S') {
-          assert(sent.raw[term_count()] >= 0); // for int -> unsigned conversion
-          wordid = sent.raw[term_count()];
-          log_probs.push_back(-word_neg_log_prob(cfsm_input, wordid));
+          assert(has_next_word);
+          wordid = next_word;
+          log_probs.push_back(next_word_log_prob);
         }
       }
       results.push_back(action);
@@ -467,7 +479,8 @@ struct ParserBuilder : public AbstractParser {
     return current_valid_actions;
   }
 
-  pair<Expression,Expression> get_action_log_probs_and_cfsm_input(const vector<unsigned>& valid_actions) override {
+  //pair<Expression,Expression> get_action_log_probs_and_cfsm_input(const vector<unsigned>& valid_actions) override {
+  pair<Expression, Expression> get_action_log_probs_and_next_word_log_prob(const vector<unsigned>& valid_actions, unsigned next_word, bool get_next_word) override {
     assert (stack.size() == stack_content.size());
     // get list of possible actions for the current parser state
     //cerr << "valid actions = " << current_valid_actions.size() << endl;
@@ -502,7 +515,8 @@ struct ParserBuilder : public AbstractParser {
 
     // adist = log_softmax(r_t, current_valid_actions)
     Expression adiste = log_softmax(r_t, valid_actions);
-    return pair<Expression,Expression>(adiste, nlp_t);
+    Expression next_word_log_prob = get_next_word ? -this_cfsm->neg_log_softmax(nlp_t, next_word) : input(*hg, 0.0);
+    return pair<Expression,Expression>(adiste, next_word_log_prob);
   }
 
   void perform_action(const unsigned action, unsigned wordid) override {
@@ -652,13 +666,17 @@ struct ParserBuilder : public AbstractParser {
     assert(stack.size() == 2); // guard symbol, root
   }
 
+  /*
   unsigned sample_word(Expression word_params) override {
     return this_cfsm->sample(word_params);
   }
+   */
 
+  /*
   Expression word_neg_log_prob(Expression word_params, unsigned wordid) override {
     return this_cfsm->neg_log_softmax(word_params, wordid);
   }
+   */
 
   unsigned term_count() override {
     return termc;
@@ -1837,6 +1855,45 @@ struct ParserBuilder : public AbstractParser {
 
 };
 
+/*
+struct EnsembledParser: public AbstractParser {
+  enum class CombineType { sum, product };
+
+  vector<ParserBuilder>& parsers;
+  CombineType combine_type;
+
+  explicit EnsembledParser(vector<ParserBuilder>& parsers, CombineType combine_type) :
+          parsers(parsers), combine_type(combine_type) {
+    assert(!parsers.empty());
+  }
+
+  void new_sentence(ComputationGraph *hg, ClassFactoredSoftmaxBuilder *this_cfsm, const parser::Sentence &sent,
+                            bool is_evaluation, bool apply_dropout) override {
+    for (ParserBuilder& parser : parsers)
+      parser.new_sentence(hg, this_cfsm, sent, is_evaluation, apply_dropout);
+  }
+
+  bool is_finished() override {
+    return parsers.front().is_finished();
+  }
+
+  vector<unsigned int> get_valid_actions() override {
+    return parsers.front().get_valid_actions();
+  }
+
+  pair<Expression, Expression> get_action_log_probs_and_cfsm_input(const vector<unsigned> &valid_actions) override {
+    return nullptr;
+  }
+
+  void perform_action(const unsigned action, unsigned wordid) override {
+    for (ParserBuilder& parser : parsers)
+      parser.perform_action(action);
+  }
+
+
+};
+*/
+
 void signal_callback_handler(int signum) {
   if (signum == SIGINT) {
     if (requested_stop) {
@@ -2338,9 +2395,11 @@ int main(int argc, char** argv) {
         parser.abstract_log_prob_parser(&hg, &cfsm, sentence, actions, &right, true, false);
         lp = as_scalar(hg.incremental_forward());
 
-        //parser.log_prob_parser(&hg, &cfsm, sentence, actions, &right, true, false);
-        //double unabs_lp = as_scalar(hg.incremental_forward());
-        //assert(lp == unabs_lp);
+        /*
+        parser.log_prob_parser(&hg, &cfsm, sentence, actions, &right, true, false);
+        double unabs_lp = as_scalar(hg.incremental_forward());
+        assert(lp == unabs_lp);
+         */
       }
       llh += lp;
     }
