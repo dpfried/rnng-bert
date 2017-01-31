@@ -71,8 +71,6 @@ namespace po = boost::program_options;
 vector<unsigned> possible_actions;
 unordered_map<unsigned, vector<float>> pretrained;
 
-ClassFactoredSoftmaxBuilder *cfsm = nullptr;
-
 void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   po::options_description opts("Configuration options");
   opts.add_options()
@@ -87,6 +85,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("test_data,p", po::value<string>(), "Test corpus")
         ("eta_decay,e", po::value<float>(), "Start decaying eta after this many epochs")
         ("model,m", po::value<string>(), "Load saved model from this file")
+        ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
         ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
         ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
         ("input_dim", po::value<unsigned>()->default_value(32), "input embedding size")
@@ -195,7 +194,108 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
   out_stream << endl;
 }
 
-struct ParserBuilder {
+struct AbstractParser {
+  virtual void new_sentence(ComputationGraph* hg,
+                            ClassFactoredSoftmaxBuilder* this_cfsm,
+                            const parser::Sentence& sent,
+                            bool is_evaluation,
+                            bool apply_dropout) = 0;
+  virtual bool is_finished() = 0;
+  virtual vector<unsigned> get_valid_actions() = 0;
+  virtual pair<Expression, Expression> get_action_log_probs_and_cfsm_input(const vector<unsigned>& valid_actions) = 0;
+  virtual void perform_action(const unsigned action, unsigned wordid) = 0;
+  virtual void finish_sentence() = 0;
+  virtual unsigned sample_word(Expression cfsm_input) = 0;
+  virtual Expression word_neg_log_prob(Expression cfsm_input, unsigned wordid) = 0;
+  virtual unsigned term_count() = 0;
+
+  vector<unsigned> abstract_log_prob_parser(ComputationGraph* hg,
+                                            ClassFactoredSoftmaxBuilder* this_cfsm,
+                                            const parser::Sentence& sent,
+                                            const vector<int>& correct_actions,
+                                            double *right,
+                                            bool is_evaluation,
+                                            bool sample) {
+    assert(sample == sent.size() == 0);
+    assert(sample || correct_actions.size() > 0);
+    bool apply_dropout = (DROPOUT && !is_evaluation);
+    if (sample) apply_dropout = false;
+
+    new_sentence(hg, this_cfsm, sent, is_evaluation, apply_dropout);
+
+    unsigned action_count = 0;  // incremented at each prediction
+    vector<Expression> log_probs;
+    vector<unsigned> results;
+
+    while (!is_finished()) {
+      vector<unsigned> current_valid_actions = get_valid_actions();
+      pair<Expression,Expression> adiste_and_cfsm_input = get_action_log_probs_and_cfsm_input(current_valid_actions);
+      Expression adiste = adiste_and_cfsm_input.first;
+      Expression cfsm_input = adiste_and_cfsm_input.second;
+      unsigned action = 0;
+      unsigned wordid = 0;
+
+      if (sample) {
+        auto dist = as_vector(hg->incremental_forward());
+        double p = rand01();
+        assert(current_valid_actions.size() > 0);
+        unsigned w = 0;
+        for (; w < current_valid_actions.size(); ++w) {
+          p -= exp(dist[current_valid_actions[w]]);
+          if (p < 0.0) { break; }
+        }
+        if (w == current_valid_actions.size()) w--;
+        action = current_valid_actions[w];
+        const string &a = adict.Convert(action);
+        if (a[0] == 'R') cerr << ")";
+        if (a[0] == 'N') {
+          int nt = action2NTindex[action];
+          cerr << " (" << ntermdict.Convert(nt);
+        }
+        wordid = sample_word(cfsm_input);
+        cerr << " " << termdict.Convert(wordid);
+      } else {
+        if (action_count >= correct_actions.size()) {
+          cerr << "Correct action list exhausted, but not in final parser state.\n";
+          cerr << "action count: " << action_count << endl;
+          cerr << "gold parse:\t";
+          print_parse(vector<unsigned>(correct_actions.begin(), correct_actions.end()), sent, false, cerr);
+          cerr << "pred parse:\t";
+          print_parse(results, sent, false, cerr);
+          cerr << "is finished:\t" << is_finished() << endl;
+          abort();
+        }
+        assert(correct_actions[action_count] >= 0); // for int -> unsigned conversion
+        action = correct_actions[action_count];
+        //cerr << "prob ="; for (unsigned i = 0; i < adist.size(); ++i) { cerr << ' ' << adict.Convert(i) << ':' << adist[i]; }
+        //cerr << endl;
+        ++action_count;
+        log_probs.push_back(pick(adiste, action));
+        const string &a = adict.Convert(action);
+        if (a[0] == 'S') {
+          assert(sent.raw[term_count()] >= 0); // for int -> unsigned conversion
+          wordid = sent.raw[term_count()];
+          log_probs.push_back(-word_neg_log_prob(cfsm_input, wordid));
+        }
+      }
+      results.push_back(action);
+      perform_action(action, wordid);
+    }
+    if (action_count != correct_actions.size()) {
+      cerr << "Unexecuted actions remain but final state reached!\n";
+      abort();
+    }
+    finish_sentence();
+    if (!sample) {
+      Expression tot_neglogprob = -sum(log_probs);
+      assert(tot_neglogprob.pg != nullptr);
+    }
+    if (sample) cerr << "\n";
+    return results;
+  }
+};
+
+struct ParserBuilder : public AbstractParser {
   LSTMBuilder stack_lstm; // (layers, input, hidden, trainer)
   LSTMBuilder term_lstm; // (layers, input, hidden, trainer)
   LSTMBuilder action_lstm;
@@ -225,33 +325,33 @@ struct ParserBuilder {
   Parameters* p_cW;
 
   explicit ParserBuilder(Model* model, const unordered_map<unsigned, vector<float>>& pretrained) :
-      stack_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model),
-      term_lstm(LAYERS, INPUT_DIM, HIDDEN_DIM, model),  // sequence of generated terminals
-      action_lstm(LAYERS, ACTION_DIM, HIDDEN_DIM, model),
-      const_lstm_fwd(1, LSTM_INPUT_DIM, LSTM_INPUT_DIM, model), // used to compose children of a node into a representation of the node
-      const_lstm_rev(1, LSTM_INPUT_DIM, LSTM_INPUT_DIM, model), // used to compose children of a node into a representation of the node
-      p_w(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})),
-      p_t(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})),
-      p_nt(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})),
-      p_ntup(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})),
-      p_a(model->add_lookup_parameters(ACTION_SIZE, {ACTION_DIM})),
-      p_pbias(model->add_parameters({HIDDEN_DIM})),
-      p_A(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
-      p_S(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
-      p_T(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
-      //p_pbias2(model->add_parameters({HIDDEN_DIM})),
-      //p_A2(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
-      //p_S2(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
-      //p_w2l(model->add_parameters({LSTM_INPUT_DIM, INPUT_DIM})),
-      //p_ib(model->add_parameters({LSTM_INPUT_DIM})),
-      p_cbias(model->add_parameters({LSTM_INPUT_DIM})),
-      p_p2a(model->add_parameters({ACTION_SIZE, HIDDEN_DIM})),
-      p_action_start(model->add_parameters({ACTION_DIM})),
-      p_abias(model->add_parameters({ACTION_SIZE})),
+          stack_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model),
+          term_lstm(LAYERS, INPUT_DIM, HIDDEN_DIM, model),  // sequence of generated terminals
+          action_lstm(LAYERS, ACTION_DIM, HIDDEN_DIM, model),
+          const_lstm_fwd(1, LSTM_INPUT_DIM, LSTM_INPUT_DIM, model), // used to compose children of a node into a representation of the node
+          const_lstm_rev(1, LSTM_INPUT_DIM, LSTM_INPUT_DIM, model), // used to compose children of a node into a representation of the node
+          p_w(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})),
+          p_t(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})),
+          p_nt(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})),
+          p_ntup(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})),
+          p_a(model->add_lookup_parameters(ACTION_SIZE, {ACTION_DIM})),
+          p_pbias(model->add_parameters({HIDDEN_DIM})),
+          p_A(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
+          p_S(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
+          p_T(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
+          //p_pbias2(model->add_parameters({HIDDEN_DIM})),
+          //p_A2(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
+          //p_S2(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
+          //p_w2l(model->add_parameters({LSTM_INPUT_DIM, INPUT_DIM})),
+          //p_ib(model->add_parameters({LSTM_INPUT_DIM})),
+          p_cbias(model->add_parameters({LSTM_INPUT_DIM})),
+          p_p2a(model->add_parameters({ACTION_SIZE, HIDDEN_DIM})),
+          p_action_start(model->add_parameters({ACTION_DIM})),
+          p_abias(model->add_parameters({ACTION_SIZE})),
 
-      p_stack_guard(model->add_parameters({LSTM_INPUT_DIM})),
+          p_stack_guard(model->add_parameters({LSTM_INPUT_DIM})),
 
-      p_cW(model->add_parameters({LSTM_INPUT_DIM, LSTM_INPUT_DIM * 2})) {
+          p_cW(model->add_parameters({LSTM_INPUT_DIM, LSTM_INPUT_DIM * 2})) {
     if (pretrained.size() > 0) {
       cerr << "Pretrained embeddings not implemented\n";
       abort();
@@ -259,57 +359,327 @@ struct ParserBuilder {
   }
 
 // checks to see if a proposed action is valid in discriminative models
-static bool IsActionForbidden_Generative(const string& a, char prev_a, unsigned tsize, unsigned ssize, unsigned nopen_parens) {
-  bool is_shift = (a[0] == 'S' && a[1]=='H');
-  bool is_reduce = (a[0] == 'R' && a[1]=='E');
-  bool is_nt = (a[0] == 'N');
-  assert(is_shift || is_reduce || is_nt);
-  static const unsigned MAX_OPEN_NTS = 100;
-  if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
-  if (ssize == 1) {
-    if (!is_nt) return true;
+  static bool IsActionForbidden_Generative(const string& a, char prev_a, unsigned tsize, unsigned ssize, unsigned nopen_parens) {
+    bool is_shift = (a[0] == 'S' && a[1]=='H');
+    bool is_reduce = (a[0] == 'R' && a[1]=='E');
+    bool is_nt = (a[0] == 'N');
+    assert(is_shift || is_reduce || is_nt);
+    static const unsigned MAX_OPEN_NTS = 100;
+    if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
+    if (ssize == 1) {
+      if (!is_nt) return true;
+      return false;
+    }
+    // you can't reduce after an NT action
+    if (is_reduce && prev_a == 'N') return true;
     return false;
   }
-  // you can't reduce after an NT action
-  if (is_reduce && prev_a == 'N') return true;
-  return false;
-}
 
-  /*
-void print_parse(const vector<unsigned>& actions, const parser::Sentence& sent) {
+  ComputationGraph* hg;
+  ClassFactoredSoftmaxBuilder* this_cfsm;
+  bool apply_dropout;
+  bool is_evaluation;
+
+  unsigned sent_length = 0;
+
+  Expression pbias, S, A, T, cbias, p2a, abias, action_start, cW;
+  vector<int> is_open_paren; // -1 if no nonterminal has a parenthesis open, otherwise index of NT
+  vector<string> stack_content;
+  vector<Expression> stack;  // variables representing subtree embeddings
+  vector<Expression> terms;
+  unsigned nt_count = 0; // number of times an NT has been introduced
+  int nopen_parens = 0;
+  char prev_a = '0';
   unsigned termc = 0;
-  for (unsigned action : actions) {
-    const string& a = adict.Convert(action);
-    if (a[0] == 'R') {
-      cerr << ") ";
-    } else if (a[0] == 'N') {
-      int nt = action2NTindex[action];
-      cerr << " (" << ntermdict.Convert(nt) << " ";
-    } else if (a[0] =='S') {
-      string word = termdict.Convert(sent.raw[termc]);
-      cerr << word << " ";
-      termc++;
+
+  void new_sentence(ComputationGraph* hg, ClassFactoredSoftmaxBuilder* this_cfsm, const parser::Sentence& sent, bool is_evaluation, bool apply_dropout) override {
+    this->hg = hg;
+    this->apply_dropout = apply_dropout;
+    this->is_evaluation = is_evaluation;
+    this->this_cfsm = this_cfsm;
+    sent_length = sent.size();
+
+    if (apply_dropout) {
+      stack_lstm.set_dropout(DROPOUT);
+      if (!NO_BUFFER) term_lstm.set_dropout(DROPOUT);
+      if (!NO_HISTORY) action_lstm.set_dropout(DROPOUT);
+      const_lstm_fwd.set_dropout(DROPOUT);
+      const_lstm_rev.set_dropout(DROPOUT);
+    } else {
+      stack_lstm.disable_dropout();
+      if (!NO_BUFFER) term_lstm.disable_dropout();
+      if (!NO_HISTORY) action_lstm.disable_dropout();
+      const_lstm_fwd.disable_dropout();
+      const_lstm_rev.disable_dropout();
     }
+    if (!NO_BUFFER) term_lstm.new_graph(*hg);
+    stack_lstm.new_graph(*hg);
+    if (!NO_HISTORY) action_lstm.new_graph(*hg);
+    const_lstm_fwd.new_graph(*hg);
+    const_lstm_rev.new_graph(*hg);
+    this_cfsm->new_graph(*hg);
+    if (!NO_BUFFER) term_lstm.start_new_sequence();
+    stack_lstm.start_new_sequence();
+    if (!NO_HISTORY) action_lstm.start_new_sequence();
+    // variables in the computation graph representing the parameters
+    pbias = parameter(*hg, p_pbias);
+    S = parameter(*hg, p_S);
+    A = parameter(*hg, p_A);
+    T = parameter(*hg, p_T);
+    cbias = parameter(*hg, p_cbias);
+    p2a = parameter(*hg, p_p2a);
+    abias = parameter(*hg, p_abias);
+    action_start = parameter(*hg, p_action_start);
+    cW = parameter(*hg, p_cW);
+
+    if (!NO_HISTORY) action_lstm.add_input(action_start);
+
+    terms.clear();
+    terms.push_back(lookup(*hg, p_w, kSOS));
+    if (!NO_BUFFER) term_lstm.add_input(terms.back());
+
+    stack_content.clear();
+    stack_content.push_back("ROOT_GUARD");
+
+    stack.clear();
+    stack.push_back(parameter(*hg, p_stack_guard));
+    // drive dummy symbol on stack through LSTM
+    stack_lstm.add_input(stack.back());
+    is_open_paren.push_back(-1); // corresponds to dummy symbol
+
+    nt_count = 0; // number of times an NT has been introduced
+    nopen_parens = 0;
+    prev_a = '0';
+    termc = 0;
   }
-  cerr << endl;
-}
-   */
+
+  bool is_finished() override {
+    return stack.size() == 2 && termc > 0;
+  }
+
+  vector<unsigned> get_valid_actions() override {
+    vector<unsigned> current_valid_actions;
+    for (auto a: possible_actions) {
+      if (IsActionForbidden_Generative(adict.Convert(a), prev_a, terms.size(), stack.size(), nopen_parens))
+        continue;
+      current_valid_actions.push_back(a);
+    }
+    return current_valid_actions;
+  }
+
+  pair<Expression,Expression> get_action_log_probs_and_cfsm_input(const vector<unsigned>& valid_actions) override {
+    assert (stack.size() == stack_content.size());
+    // get list of possible actions for the current parser state
+    //cerr << "valid actions = " << current_valid_actions.size() << endl;
+
+    //onerep
+    Expression stack_summary = stack_lstm.back();
+    Expression action_summary = (NO_HISTORY) ? Expression() : action_lstm.back();
+    Expression term_summary = (NO_BUFFER) ? Expression() : term_lstm.back();
+    if (apply_dropout) {
+      stack_summary = dropout(stack_summary, DROPOUT);
+      if (!NO_HISTORY) action_summary = dropout(action_summary, DROPOUT);
+      if (!NO_BUFFER) term_summary = dropout(term_summary, DROPOUT);
+    }
+    Expression p_t;
+    if (NO_BUFFER && NO_HISTORY) {
+      p_t = affine_transform({pbias, S, stack_summary});
+    } else if (NO_BUFFER && !NO_HISTORY) {
+      p_t = affine_transform({pbias, S, stack_summary, A, action_summary});
+    } else if (!NO_BUFFER && NO_HISTORY) {
+      p_t = affine_transform({pbias, S, stack_summary, T, term_summary});
+    } else {
+      p_t = affine_transform({pbias, S, stack_summary, A, action_summary, T, term_summary});
+    }
+
+    Expression nlp_t = rectify(p_t);
+    //tworep*
+    //Expression p_t = affine_transform({pbias, S, stack_lstm.back(), A, action_lstm.back()});
+    //Expression nlp_t = rectify(p_t);
+    //if (build_training_graph) nlp_t = dropout(nlp_t, 0.4);
+    // r_t = abias + p2a * nlp
+    Expression r_t = affine_transform({abias, p2a, nlp_t});
+
+    // adist = log_softmax(r_t, current_valid_actions)
+    Expression adiste = log_softmax(r_t, valid_actions);
+    return pair<Expression,Expression>(adiste, nlp_t);
+  }
+
+  void perform_action(const unsigned action, unsigned wordid) override {
+    // possible_wordid should be >= 0 if this is a shift action
+    // add current action to action LSTM
+    Expression actione = lookup(*hg, p_a, action);
+    if (!NO_HISTORY) action_lstm.add_input(actione);
+
+    // do action
+    const string &actionString = adict.Convert(action);
+    //cerr << "ACT: " << actionString << endl;
+    const char ac = actionString[0];
+    const char ac2 = actionString[1];
+
+    bool was_word_completed = false;
+    unsigned word_completed = 0;
+
+    if (ac == 'S' && ac2 == 'H') {  // SHIFT
+      //tworep
+      //Expression p_t = affine_transform({pbias2, S2, stack_lstm.back(), A2, action_lstm.back(), T, term_lstm.back()});
+      //Expression nlp_t = rectify(p_t);
+      //tworep-oneact:
+      //Expression p_t = affine_transform({pbias2, S2, stack_lstm.back(), T, term_lstm.back()});
+      //Expression nlp_t = rectify(p_t);
+      assert (wordid != 0);
+      stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
+      ++termc;
+      Expression word = lookup(*hg, p_w, wordid);
+      terms.push_back(word);
+      if (!NO_BUFFER) term_lstm.add_input(word);
+      stack.push_back(word);
+      stack_lstm.add_input(word);
+      is_open_paren.push_back(-1);
+      if (WORD_COMPLETION_IS_SHIFT) {
+        was_word_completed = (termc < sent_length);
+        word_completed = termc;
+      } else if (prev_a == 'S' || prev_a == 'R') {
+        was_word_completed = true;
+        word_completed = termc - 1;
+      }
+    } else if (ac == 'N') { // NT
+      assert(wordid == 0);
+      ++nopen_parens;
+      auto it = action2NTindex.find(action);
+      assert(it != action2NTindex.end());
+      int nt_index = it->second;
+      nt_count++;
+      stack_content.push_back(ntermdict.Convert(nt_index));
+      Expression nt_embedding = lookup(*hg, p_nt, nt_index);
+      stack.push_back(nt_embedding);
+      stack_lstm.add_input(nt_embedding);
+      is_open_paren.push_back(nt_index);
+      if (!WORD_COMPLETION_IS_SHIFT && (prev_a == 'S' || prev_a == 'R')) {
+        was_word_completed = true;
+        word_completed = termc;
+      }
+    } else { // REDUCE
+      assert(wordid == 0);
+      --nopen_parens;
+      assert(stack.size() > 2); // dummy symbol means > 2 (not >= 2)
+      assert(stack_content.size() > 2 && stack.size() == stack_content.size());
+      // find what paren we are closing
+      int i = is_open_paren.size() - 1; //get the last thing on the stack
+      while (is_open_paren[i] < 0) {
+        --i;
+        assert(i >= 0);
+      } //iteratively decide whether or not it's a non-terminal
+      Expression nonterminal = lookup(*hg, p_ntup, is_open_paren[i]);
+      int nchildren = is_open_paren.size() - i - 1;
+      assert(nchildren > 0);
+      //cerr << "  number of children to reduce: " << nchildren << endl;
+      vector<Expression> children(nchildren);
+      const_lstm_fwd.start_new_sequence();
+      const_lstm_rev.start_new_sequence();
+
+      // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
+      // TO BE COMPOSED INTO A TREE EMBEDDING
+      string curr_word;
+      //cerr << "--------------------------------" << endl;
+      //cerr << "Now printing the children" << endl;
+      //cerr << "--------------------------------" << endl;
+      for (i = 0; i < nchildren; ++i) {
+        assert (stack_content.size() == stack.size());
+        children[i] = stack.back();
+        stack.pop_back();
+        stack_lstm.rewind_one_step();
+        is_open_paren.pop_back();
+        curr_word = stack_content.back();
+        //cerr << "At the back of the stack (supposed to be one of the children): " << curr_word << endl;
+        stack_content.pop_back();
+      }
+      assert (stack_content.size() == stack.size());
+      //cerr << "Doing REDUCE operation" << endl;
+      is_open_paren.pop_back(); // nt symbol
+      stack.pop_back(); // nonterminal dummy
+      stack_lstm.rewind_one_step(); // nt symbol
+      curr_word = stack_content.back();
+      //cerr << "--------------------------------" << endl;
+      //cerr << "At the back of the stack (supposed to be the non-terminal symbol) : " << curr_word << endl;
+      stack_content.pop_back();
+      assert (stack.size() == stack_content.size());
+      //cerr << "Done reducing" << endl;
+
+      // BUILD TREE EMBEDDING USING BIDIR LSTM
+      const_lstm_fwd.add_input(nonterminal);
+      const_lstm_rev.add_input(nonterminal);
+      for (i = 0; i < nchildren; ++i) {
+        const_lstm_fwd.add_input(children[i]);
+        const_lstm_rev.add_input(children[nchildren - i - 1]);
+      }
+      Expression cfwd = const_lstm_fwd.back();
+      Expression crev = const_lstm_rev.back();
+      if (apply_dropout) {
+        cfwd = dropout(cfwd, DROPOUT);
+        crev = dropout(crev, DROPOUT);
+      }
+      Expression c = concatenate({cfwd, crev});
+      Expression composed = rectify(affine_transform({cbias, cW, c}));
+      stack_lstm.add_input(composed);
+      stack.push_back(composed);
+      stack_content.push_back(curr_word);
+      //cerr << curr_word << endl;
+      is_open_paren.push_back(-1); // we just closed a paren at this position
+      if (stack.size() <= 2) {
+        was_word_completed = true;
+        word_completed = termc;
+      }
+    }
+
+    prev_a = ac;
+    /*
+    if (was_word_completed) {
+      Expression e_cum_neglogprob = -sum(log_probs);
+      double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
+      cerr << "gold nlp after " << word_completed << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
+      for (unsigned i = 0; i < log_probs.size(); i++) {
+        cerr << as_scalar(log_probs[i].value()) << " ";
+      }
+      cerr << endl;
+      print_parse(results, sent);
+    }
+    */
+
+  }
+
+  void finish_sentence() override {
+    assert(stack.size() == 2); // guard symbol, root
+  }
+
+  unsigned sample_word(Expression word_params) override {
+    return this_cfsm->sample(word_params);
+  }
+
+  Expression word_neg_log_prob(Expression word_params, unsigned wordid) override {
+    return this_cfsm->neg_log_softmax(word_params, wordid);
+  }
+
+  unsigned term_count() override {
+    return termc;
+  }
 
 // returns parse actions for input sentence (in training just returns the reference)
 // this lets us use pretrained embeddings, when available, for words that were OOV in the
 // parser training data
 // if sent is empty, generate a sentence
-vector<unsigned> log_prob_parser(ComputationGraph* hg,
-                     const parser::Sentence& sent,
-                     const vector<int>& correct_actions,
-                     double *right,
-                     bool is_evaluation) {
+  vector<unsigned> log_prob_parser(ComputationGraph* hg,
+                                   ClassFactoredSoftmaxBuilder* this_cfsm,
+                                   const parser::Sentence& sent,
+                                   const vector<int>& correct_actions,
+                                   double *right,
+                                   bool is_evaluation,
+                                   bool sample) {
     vector<unsigned> results;
     vector<string> stack_content;
     stack_content.push_back("ROOT_GUARD");
-    const bool sample = sent.size() == 0;
-    const bool build_training_graph = correct_actions.size() > 0;
-    assert(sample || build_training_graph);
+    assert(sample || correct_actions.size() > 0);
+    assert(sample == sent.size() == 0);
     bool apply_dropout = (DROPOUT && !is_evaluation);
     if (sample) apply_dropout = false;
 
@@ -331,7 +701,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     if (!NO_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
-    cfsm->new_graph(*hg);
+    this_cfsm->new_graph(*hg);
     if (!NO_BUFFER) term_lstm.start_new_sequence();
     stack_lstm.start_new_sequence();
     if (!NO_HISTORY) action_lstm.start_new_sequence();
@@ -364,7 +734,6 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     vector<int> is_open_paren; // -1 if no nonterminal has a parenthesis open, otherwise index of NT
     is_open_paren.push_back(-1); // corresponds to dummy symbol
     vector<Expression> log_probs;
-    string rootword;
     unsigned action_count = 0;  // incremented at each prediction
     unsigned nt_count = 0; // number of times an NT has been introduced
     vector<unsigned> current_valid_actions;
@@ -465,12 +834,12 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
         //Expression p_t = affine_transform({pbias2, S2, stack_lstm.back(), T, term_lstm.back()});
         //Expression nlp_t = rectify(p_t);
         if (sample) {
-          wordid = cfsm->sample(nlp_t);
+          wordid = this_cfsm->sample(nlp_t);
           cerr << " " << termdict.Convert(wordid);
         } else {
           assert(termc < sent.size());
           wordid = sent.raw[termc];
-          log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
+          log_probs.push_back(-this_cfsm->neg_log_softmax(nlp_t, wordid));
         }
         assert (wordid != 0);
         stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
@@ -603,6 +972,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
   }
 
   vector<unsigned> log_prob_parser_beam(ComputationGraph* hg,
+                                        ClassFactoredSoftmaxBuilder* this_cfsm,
                                         const parser::Sentence& sent,
                                         int beam_size = 1) {
     //vector<unsigned> results;
@@ -620,7 +990,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     if (!NO_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
-    cfsm->new_graph(*hg);
+    this_cfsm->new_graph(*hg);
     if (!NO_BUFFER) term_lstm.start_new_sequence();
     stack_lstm.start_new_sequence();
     if (!NO_HISTORY) action_lstm.start_new_sequence();
@@ -782,11 +1152,11 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
               cerr << endl;
             }
 
-            Expression word_log_prob = -cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]);
+            Expression word_log_prob = -this_cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]);
 
             if (!IGNORE_WORD_IN_GREEDY) {
               score += as_scalar(word_log_prob.value());
-              //score -= as_scalar(cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]).value());
+              //score -= as_scalar(this_cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]).value());
             }
             successor.log_probs.push_back(word_log_prob);
           }
@@ -869,7 +1239,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
             }
             cerr << endl;
           }
-          //successor.log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
+          //successor.log_probs.push_back(-this_cfsm->neg_log_softmax(nlp_t, wordid));
           assert (wordid != 0);
           // stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
           ++successor.termc;
@@ -992,9 +1362,10 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
   }
 
   vector<unsigned> log_prob_parser_beam_within_word(ComputationGraph* hg,
-                                        const parser::Sentence& sent,
-                                        int beam_size = 1,
-                                        int beam_filter_at_word_size = -1) {
+                                                    ClassFactoredSoftmaxBuilder* this_cfsm,
+                                                    const parser::Sentence& sent,
+                                                    int beam_size = 1,
+                                                    int beam_filter_at_word_size = -1) {
     if (beam_filter_at_word_size < 0)
       beam_filter_at_word_size = beam_size;
     //cerr << "beam size: " << beam_size << endl;
@@ -1014,7 +1385,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
     if (!NO_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
-    cfsm->new_graph(*hg);
+    this_cfsm->new_graph(*hg);
     if (!NO_BUFFER) term_lstm.start_new_sequence();
     stack_lstm.start_new_sequence();
     if (!NO_HISTORY) action_lstm.start_new_sequence();
@@ -1131,17 +1502,17 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
             assert(is_shift || is_reduce || is_nt);
             static const unsigned MAX_OPEN_NTS = 100;
             if (is_nt && current.nopen_parens > MAX_OPEN_NTS) {
-                //cerr << "more than max open" << endl;
-                continue;
+              //cerr << "more than max open" << endl;
+              continue;
             }
             if (is_nt && current.cons_nt >= MAX_CONS_NT) {
-                //cerr << "more than max cons: " << current.cons_nt << " " << MAX_CONS_NT << endl;
-                continue;
+              //cerr << "more than max cons: " << current.cons_nt << " " << MAX_CONS_NT << endl;
+              continue;
             }
             bool skipRest = false;
             if (ssize == 1) {
               if (!is_nt) {
-                  continue;
+                continue;
               }
               skipRest = true;
             }
@@ -1188,11 +1559,11 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
                 cerr << endl;
               }
 
-              Expression word_log_prob = -cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]);
+              Expression word_log_prob = -this_cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]);
 
               if (!IGNORE_WORD_IN_GREEDY) {
                 score += as_scalar(word_log_prob.value());
-                //score -= as_scalar(cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]).value());
+                //score -= as_scalar(this_cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]).value());
               }
               successor.log_probs.push_back(word_log_prob);
             }
@@ -1275,7 +1646,7 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
               }
               cerr << endl;
             }
-            //successor.log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
+            //successor.log_probs.push_back(-this_cfsm->neg_log_softmax(nlp_t, wordid));
             assert (wordid != 0);
             // stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
             ++successor.termc;
@@ -1435,9 +1806,9 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
       double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
       unsigned last_termc;
       if (!WORD_COMPLETION_IS_SHIFT && best_completed.prev_a == 'S')
-          last_termc = best_completed.termc - 1;
-      else 
-          last_termc = best_completed.termc;
+        last_termc = best_completed.termc - 1;
+      else
+        last_termc = best_completed.termc;
       /*
       cerr << "best nlp after " << last_termc << "[" << best_completed.log_probs.size() << "]: \t" << cum_neglogprob << endl;
       for (unsigned i = 0; i < best_completed.log_probs.size(); i++) {
@@ -1469,8 +1840,8 @@ vector<unsigned> log_prob_parser(ComputationGraph* hg,
 void signal_callback_handler(int signum) {
   if (signum == SIGINT) {
     if (requested_stop) {
-        cerr << "\nReceived SIGINT again, quitting.\n";
-        _exit(1);
+      cerr << "\nReceived SIGINT again, quitting.\n";
+      _exit(1);
     }
     cerr << "\nReceived SIGINT terminating optimization early...\n";
     requested_stop = true;
@@ -1494,7 +1865,7 @@ int main(int argc, char** argv) {
   signal(SIGSEGV, signal_callback_handler);
   unsigned random_seed = cnn::Initialize(argc, argv);
 
-  cerr << "COMMAND LINE:"; 
+  cerr << "COMMAND LINE:";
   for (unsigned i = 0; i < static_cast<unsigned>(argc); ++i) cerr << ' ' << argv[i];
   cerr << endl;
   unsigned status_every_i_iterations = 100;
@@ -1528,6 +1899,26 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  if (conf.count("train") && conf.count("test_data")) {
+    cerr << "Cannot specify --train with --test-data." << endl;
+    return 1;
+  }
+
+  if (conf.count("train") && conf.count("greedy_decode_dev")) {
+    cerr << "Cannot specify --train with --greedy_decode_dev." << endl;
+    return 1;
+  }
+
+  if (conf.count("train") && conf.count("models")) {
+    cerr << "Cannot specify --train with --models." << endl;
+    return 1;
+  }
+
+  if (conf.count("model") && conf.count("models")) {
+    cerr << "Cannot specify --model and --models." << endl;
+    return 1;
+  }
+
   IGNORE_WORD_IN_GREEDY = conf.count("ignore_word_in_greedy");
 
   WORD_COMPLETION_IS_SHIFT = conf.count("word_completion_is_shift");
@@ -1552,8 +1943,12 @@ int main(int argc, char** argv) {
   bool softlinkCreated = false;
 
   kSOS = termdict.Convert("<s>");
-  Model model;
-  cfsm = new ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
+
+  {
+    Model model;
+    // construct and throw away so that the termdict is correctly updated (for deserializing old models)
+    ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
+  }
 
   parser::TopDownOracleGen corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   parser::TopDownOracleGen dev_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
@@ -1611,25 +2006,24 @@ int main(int argc, char** argv) {
   for (unsigned i = 0; i < adict.size(); ++i)
     possible_actions[i] = i;
 
-  ParserBuilder parser(&model, pretrained);
-
-
-
-  SimpleSGDTrainer sgd(&model);
-  cerr << "using sgd for training" << endl;
-
-  if (conf.count("model")) {
-    ifstream in(conf["model"].as<string>().c_str());
-    assert(in);
-    boost::archive::binary_iarchive ia(in);
-    ia >> model >> sgd;
-    // TODO: figure out deserialization ordering
-    // ia >> termdict >> adict >> ntermdict >> posdict;
-  }
 
   //TRAINING
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
+
+    Model model;
+    ClassFactoredSoftmaxBuilder cfsm = ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
+    ParserBuilder parser(&model, pretrained);
+    SimpleSGDTrainer sgd(&model);
+    cerr << "using sgd for training" << endl;
+
+    if (conf.count("model")) {
+      ifstream in(conf["model"].as<string>().c_str());
+      assert(in);
+      boost::archive::binary_iarchive ia(in);
+      ia >> model >> sgd;
+    }
+
     //AdamTrainer sgd(&model);
     //sgd.eta = 0.01;
     //sgd.eta0 = 0.01;
@@ -1662,7 +2056,7 @@ int main(int argc, char** argv) {
         const vector<int>& actions=corpus.actions[*index_iter];
         {
           ComputationGraph hg;
-          parser.log_prob_parser(&hg, sentence, actions, &right, false);
+          parser.log_prob_parser(&hg, &cfsm, sentence, actions, &right, false, false);
           double lp = as_scalar(hg.incremental_forward());
           if (lp < 0) {
             cerr << "Log prob < 0 on sentence " << *index_iter << ": lp=" << lp << endl;
@@ -1691,7 +2085,7 @@ int main(int argc, char** argv) {
             ComputationGraph cg;
             double x;
             // sample tree and sentence
-            parser.log_prob_parser(&cg, parser::Sentence(), vector<int>(),&x,true);
+            parser.log_prob_parser(&cg, &cfsm, parser::Sentence(), vector<int>(),&x,true, true);
           }
           if (logc % 100 == 0) { // report on dev set
             unsigned dev_size = dev_corpus.size();
@@ -1705,7 +2099,7 @@ int main(int argc, char** argv) {
               const vector<int>& actions=dev_corpus.actions[sii];
               dwords += sentence.size();
               {  ComputationGraph hg;
-                parser.log_prob_parser(&hg,sentence,actions,&right,true);
+                parser.log_prob_parser(&hg,&cfsm,sentence,actions,&right,true, false);
                 double lp = as_scalar(hg.incremental_forward());
                 llh += lp;
               }
@@ -1785,6 +2179,19 @@ int main(int argc, char** argv) {
     }
   } // should do training?
   if (conf.count("greedy_decode_dev")) { // do test evaluation
+    Model model;
+    ClassFactoredSoftmaxBuilder cfsm = ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
+    ParserBuilder parser(&model, pretrained);
+    SimpleSGDTrainer sgd(&model);
+    cerr << "using sgd for training" << endl;
+
+    if (conf.count("model")) {
+      ifstream in(conf["model"].as<string>().c_str());
+      assert(in);
+      boost::archive::binary_iarchive ia(in);
+      ia >> model >> sgd;
+    }
+
     unsigned start_index = 0;
     unsigned stop_index = dev_corpus.size();
     unsigned block_count = conf["block_count"].as<unsigned>();
@@ -1824,7 +2231,7 @@ int main(int argc, char** argv) {
       print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cout);
       {
         ComputationGraph hg;
-        parser.log_prob_parser(&hg, sentence, actions, nullptr, true);
+        parser.log_prob_parser(&hg, &cfsm, sentence, actions, nullptr, true, false);
         double nlp = as_scalar(hg.incremental_forward());
         cout << "gold score:\t" << -nlp << endl;
       }
@@ -1835,11 +2242,12 @@ int main(int argc, char** argv) {
         // greedy predict
         if (conf.count("beam_within_word"))
           pred = parser.log_prob_parser_beam_within_word(&hg,
+                                                         &cfsm,
                                                          sentence,
                                                          conf["decode_beam_size"].as<unsigned>(),
                                                          conf["decode_beam_filter_at_word_size"].as<int>());
         else
-          pred = parser.log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
+          pred = parser.log_prob_parser_beam(&hg, &cfsm, sentence, conf["decode_beam_size"].as<unsigned>());
 
         pred_nlp = as_scalar(hg.incremental_forward());
       }
@@ -1851,7 +2259,7 @@ int main(int argc, char** argv) {
         // rescore, to check for errors in beam search scoring
         ComputationGraph hg;
         // get log likelihood of gold
-        parser.log_prob_parser(&hg, sentence, pred_int, nullptr, true);
+        parser.log_prob_parser(&hg, &cfsm, sentence, pred_int, nullptr, true, false);
         double pred_rescore = -as_scalar(hg.incremental_forward());
         cout << "pred rescore:\t" << pred_rescore << endl;
       }
@@ -1900,6 +2308,19 @@ int main(int argc, char** argv) {
 
   }
   if (test_corpus.size() > 0) {
+    Model model;
+    ClassFactoredSoftmaxBuilder cfsm = ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
+    ParserBuilder parser(&model, pretrained);
+    SimpleSGDTrainer sgd(&model);
+    cerr << "using sgd for training" << endl;
+
+    if (conf.count("model")) {
+      ifstream in(conf["model"].as<string>().c_str());
+      assert(in);
+      boost::archive::binary_iarchive ia(in);
+      ia >> model >> sgd;
+    }
+
     // if rescoring, we may have many repeats, cache them
     unordered_map<vector<int>, unordered_map<vector<int>, double, boost::hash<vector<int>>>, boost::hash<vector<int>>> s2a2p;
     unsigned test_size = test_corpus.size();
@@ -1913,10 +2334,14 @@ int main(int argc, char** argv) {
       double &lp = s2a2p[sentence.raw][actions];
       if (!lp) {
         ComputationGraph hg;
-        parser.log_prob_parser(&hg, sentence, actions, &right, true);
+        //parser.log_prob_parser(&hg, &cfsm, sentence, actions, &right, true, false);
+        parser.abstract_log_prob_parser(&hg, &cfsm, sentence, actions, &right, true, false);
         lp = as_scalar(hg.incremental_forward());
+
+        //parser.log_prob_parser(&hg, &cfsm, sentence, actions, &right, true, false);
+        //double unabs_lp = as_scalar(hg.incremental_forward());
+        //assert(lp == unabs_lp);
       }
-      cout << sentence.size() << '\t' << lp << endl;
       llh += lp;
     }
     cerr << "test     total -llh=" << llh << endl;
