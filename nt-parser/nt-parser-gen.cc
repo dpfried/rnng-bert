@@ -196,7 +196,6 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
 
 struct AbstractParser {
   virtual void new_sentence(ComputationGraph* hg,
-                            ClassFactoredSoftmaxBuilder* this_cfsm,
                             const parser::Sentence& sent,
                             bool is_evaluation,
                             bool apply_dropout) = 0;
@@ -210,7 +209,6 @@ struct AbstractParser {
   virtual unsigned term_count() = 0;
 
   vector<unsigned> abstract_log_prob_parser(ComputationGraph* hg,
-                                            ClassFactoredSoftmaxBuilder* this_cfsm,
                                             const parser::Sentence& sent,
                                             const vector<int>& correct_actions,
                                             double *right,
@@ -226,7 +224,7 @@ struct AbstractParser {
       abort();
     }
 
-    new_sentence(hg, this_cfsm, sent, is_evaluation, apply_dropout);
+    new_sentence(hg, sent, is_evaluation, apply_dropout);
 
     unsigned action_count = 0;  // incremented at each prediction
     vector<Expression> log_probs;
@@ -335,8 +333,9 @@ struct ParserBuilder : public AbstractParser {
   Parameters* p_stack_guard;  // end of stack
 
   Parameters* p_cW;
+  ClassFactoredSoftmaxBuilder* cfsm;
 
-  explicit ParserBuilder(Model* model, const unordered_map<unsigned, vector<float>>& pretrained) :
+  explicit ParserBuilder(Model* model, ClassFactoredSoftmaxBuilder* cfsm, const unordered_map<unsigned, vector<float>>& pretrained) :
           stack_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model),
           term_lstm(LAYERS, INPUT_DIM, HIDDEN_DIM, model),  // sequence of generated terminals
           action_lstm(LAYERS, ACTION_DIM, HIDDEN_DIM, model),
@@ -368,6 +367,7 @@ struct ParserBuilder : public AbstractParser {
       cerr << "Pretrained embeddings not implemented\n";
       abort();
     }
+    this->cfsm = cfsm;
   }
 
 // checks to see if a proposed action is valid in discriminative models
@@ -388,7 +388,6 @@ struct ParserBuilder : public AbstractParser {
   }
 
   ComputationGraph* hg;
-  ClassFactoredSoftmaxBuilder* this_cfsm;
   bool apply_dropout;
   bool is_evaluation;
 
@@ -404,11 +403,10 @@ struct ParserBuilder : public AbstractParser {
   char prev_a = '0';
   unsigned termc = 0;
 
-  void new_sentence(ComputationGraph* hg, ClassFactoredSoftmaxBuilder* this_cfsm, const parser::Sentence& sent, bool is_evaluation, bool apply_dropout) override {
+  void new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool apply_dropout) override {
     this->hg = hg;
     this->apply_dropout = apply_dropout;
     this->is_evaluation = is_evaluation;
-    this->this_cfsm = this_cfsm;
     sent_length = sent.size();
 
     if (apply_dropout) {
@@ -429,7 +427,7 @@ struct ParserBuilder : public AbstractParser {
     if (!NO_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
-    this_cfsm->new_graph(*hg);
+    cfsm->new_graph(*hg);
     if (!NO_BUFFER) term_lstm.start_new_sequence();
     stack_lstm.start_new_sequence();
     if (!NO_HISTORY) action_lstm.start_new_sequence();
@@ -515,7 +513,7 @@ struct ParserBuilder : public AbstractParser {
 
     // adist = log_softmax(r_t, current_valid_actions)
     Expression adiste = log_softmax(r_t, valid_actions);
-    Expression next_word_log_prob = get_next_word ? -this_cfsm->neg_log_softmax(nlp_t, next_word) : input(*hg, 0.0);
+    Expression next_word_log_prob = get_next_word ? -cfsm->neg_log_softmax(nlp_t, next_word) : input(*hg, 0.0);
     return pair<Expression,Expression>(adiste, next_word_log_prob);
   }
 
@@ -668,13 +666,13 @@ struct ParserBuilder : public AbstractParser {
 
   /*
   unsigned sample_word(Expression word_params) override {
-    return this_cfsm->sample(word_params);
+    return cfsm->sample(word_params);
   }
    */
 
   /*
   Expression word_neg_log_prob(Expression word_params, unsigned wordid) override {
-    return this_cfsm->neg_log_softmax(word_params, wordid);
+    return cfsm->neg_log_softmax(word_params, wordid);
   }
    */
 
@@ -687,7 +685,6 @@ struct ParserBuilder : public AbstractParser {
 // parser training data
 // if sent is empty, generate a sentence
   vector<unsigned> log_prob_parser(ComputationGraph* hg,
-                                   ClassFactoredSoftmaxBuilder* this_cfsm,
                                    const parser::Sentence& sent,
                                    const vector<int>& correct_actions,
                                    double *right,
@@ -719,7 +716,7 @@ struct ParserBuilder : public AbstractParser {
     if (!NO_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
-    this_cfsm->new_graph(*hg);
+    cfsm->new_graph(*hg);
     if (!NO_BUFFER) term_lstm.start_new_sequence();
     stack_lstm.start_new_sequence();
     if (!NO_HISTORY) action_lstm.start_new_sequence();
@@ -852,12 +849,12 @@ struct ParserBuilder : public AbstractParser {
         //Expression p_t = affine_transform({pbias2, S2, stack_lstm.back(), T, term_lstm.back()});
         //Expression nlp_t = rectify(p_t);
         if (sample) {
-          wordid = this_cfsm->sample(nlp_t);
+          wordid = cfsm->sample(nlp_t);
           cerr << " " << termdict.Convert(wordid);
         } else {
           assert(termc < sent.size());
           wordid = sent.raw[termc];
-          log_probs.push_back(-this_cfsm->neg_log_softmax(nlp_t, wordid));
+          log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
         }
         assert (wordid != 0);
         stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
@@ -990,7 +987,6 @@ struct ParserBuilder : public AbstractParser {
   }
 
   vector<unsigned> log_prob_parser_beam(ComputationGraph* hg,
-                                        ClassFactoredSoftmaxBuilder* this_cfsm,
                                         const parser::Sentence& sent,
                                         int beam_size = 1) {
     //vector<unsigned> results;
@@ -1008,7 +1004,7 @@ struct ParserBuilder : public AbstractParser {
     if (!NO_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
-    this_cfsm->new_graph(*hg);
+    cfsm->new_graph(*hg);
     if (!NO_BUFFER) term_lstm.start_new_sequence();
     stack_lstm.start_new_sequence();
     if (!NO_HISTORY) action_lstm.start_new_sequence();
@@ -1170,11 +1166,11 @@ struct ParserBuilder : public AbstractParser {
               cerr << endl;
             }
 
-            Expression word_log_prob = -this_cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]);
+            Expression word_log_prob = -cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]);
 
             if (!IGNORE_WORD_IN_GREEDY) {
               score += as_scalar(word_log_prob.value());
-              //score -= as_scalar(this_cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]).value());
+              //score -= as_scalar(cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]).value());
             }
             successor.log_probs.push_back(word_log_prob);
           }
@@ -1257,7 +1253,7 @@ struct ParserBuilder : public AbstractParser {
             }
             cerr << endl;
           }
-          //successor.log_probs.push_back(-this_cfsm->neg_log_softmax(nlp_t, wordid));
+          //successor.log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
           assert (wordid != 0);
           // stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
           ++successor.termc;
@@ -1380,7 +1376,6 @@ struct ParserBuilder : public AbstractParser {
   }
 
   vector<unsigned> log_prob_parser_beam_within_word(ComputationGraph* hg,
-                                                    ClassFactoredSoftmaxBuilder* this_cfsm,
                                                     const parser::Sentence& sent,
                                                     int beam_size = 1,
                                                     int beam_filter_at_word_size = -1) {
@@ -1403,7 +1398,7 @@ struct ParserBuilder : public AbstractParser {
     if (!NO_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
-    this_cfsm->new_graph(*hg);
+    cfsm->new_graph(*hg);
     if (!NO_BUFFER) term_lstm.start_new_sequence();
     stack_lstm.start_new_sequence();
     if (!NO_HISTORY) action_lstm.start_new_sequence();
@@ -1577,11 +1572,11 @@ struct ParserBuilder : public AbstractParser {
                 cerr << endl;
               }
 
-              Expression word_log_prob = -this_cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]);
+              Expression word_log_prob = -cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]);
 
               if (!IGNORE_WORD_IN_GREEDY) {
                 score += as_scalar(word_log_prob.value());
-                //score -= as_scalar(this_cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]).value());
+                //score -= as_scalar(cfsm->neg_log_softmax(nlp_t, sent.raw[current.termc]).value());
               }
               successor.log_probs.push_back(word_log_prob);
             }
@@ -1664,7 +1659,7 @@ struct ParserBuilder : public AbstractParser {
               }
               cerr << endl;
             }
-            //successor.log_probs.push_back(-this_cfsm->neg_log_softmax(nlp_t, wordid));
+            //successor.log_probs.push_back(-cfsm->neg_log_softmax(nlp_t, wordid));
             assert (wordid != 0);
             // stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
             ++successor.termc;
@@ -1855,9 +1850,8 @@ struct ParserBuilder : public AbstractParser {
 
 };
 
-/*
 struct EnsembledParser: public AbstractParser {
-  enum class CombineType { sum, product };
+  enum class CombineType { sum, product, product_unnormed };
 
   vector<ParserBuilder>& parsers;
   CombineType combine_type;
@@ -1867,10 +1861,10 @@ struct EnsembledParser: public AbstractParser {
     assert(!parsers.empty());
   }
 
-  void new_sentence(ComputationGraph *hg, ClassFactoredSoftmaxBuilder *this_cfsm, const parser::Sentence &sent,
+  void new_sentence(ComputationGraph *hg, const parser::Sentence &sent,
                             bool is_evaluation, bool apply_dropout) override {
     for (ParserBuilder& parser : parsers)
-      parser.new_sentence(hg, this_cfsm, sent, is_evaluation, apply_dropout);
+      parser.new_sentence(hg, sent, is_evaluation, apply_dropout);
   }
 
   bool is_finished() override {
@@ -1881,18 +1875,49 @@ struct EnsembledParser: public AbstractParser {
     return parsers.front().get_valid_actions();
   }
 
-  pair<Expression, Expression> get_action_log_probs_and_cfsm_input(const vector<unsigned> &valid_actions) override {
-    return nullptr;
-  }
+  pair<Expression, Expression> get_action_log_probs_and_next_word_log_prob(const vector<unsigned>& valid_actions, unsigned next_word, bool get_next_word) override {
+    vector<Expression> all_log_probs;
+    vector<Expression> all_next_word_log_probs;
+    for (ParserBuilder& parser : parsers) {
+      auto tpl = parser.get_action_log_probs_and_next_word_log_prob(valid_actions, next_word, get_next_word);
+      all_log_probs.push_back(tpl.first);
+      all_next_word_log_probs.push_back(tpl.second);
+    }
+    Expression combined_log_probs;
+    Expression combined_next_word_log_prob;
+    switch (combine_type) {
+      case CombineType::sum:
+        combined_log_probs = log_softmax(logsumexp(all_log_probs), valid_actions);
+        combined_next_word_log_prob = logsumexp(all_next_word_log_probs) - log(parsers.size());
+        break;
+      case CombineType::product:
+        combined_log_probs = log_softmax(sum(all_log_probs), valid_actions);
+        // this does not correspond to correct normalization of the pointwise product of distributions,
+        // but the normalizer is intractable to compute, and this will keep scores invariant in the number of
+        // parsers in the ensemble, which could be desirable
+        combined_next_word_log_prob = (1.0 / parsers.size()) * sum(all_next_word_log_probs);
+        break;
+      case CombineType::product_unnormed:
+        combined_log_probs = sum(all_log_probs);
+        combined_next_word_log_prob = sum(all_next_word_log_probs);
+    }
+    return pair<Expression,Expression>(combined_log_probs, combined_next_word_log_prob);
+  };
 
   void perform_action(const unsigned action, unsigned wordid) override {
     for (ParserBuilder& parser : parsers)
-      parser.perform_action(action);
+      parser.perform_action(action, wordid);
   }
 
+  virtual void finish_sentence() override {
+    for (ParserBuilder& parser : parsers)
+      parser.finish_sentence();
+  }
 
+  virtual unsigned int term_count() override {
+    return parsers.front().term_count();
+  }
 };
-*/
 
 void signal_callback_handler(int signum) {
   if (signum == SIGINT) {
@@ -2070,7 +2095,7 @@ int main(int argc, char** argv) {
 
     Model model;
     ClassFactoredSoftmaxBuilder cfsm = ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
-    ParserBuilder parser(&model, pretrained);
+    ParserBuilder parser(&model, &cfsm, pretrained);
     SimpleSGDTrainer sgd(&model);
     cerr << "using sgd for training" << endl;
 
@@ -2113,7 +2138,7 @@ int main(int argc, char** argv) {
         const vector<int>& actions=corpus.actions[*index_iter];
         {
           ComputationGraph hg;
-          parser.log_prob_parser(&hg, &cfsm, sentence, actions, &right, false, false);
+          parser.log_prob_parser(&hg, sentence, actions, &right, false, false);
           double lp = as_scalar(hg.incremental_forward());
           if (lp < 0) {
             cerr << "Log prob < 0 on sentence " << *index_iter << ": lp=" << lp << endl;
@@ -2142,7 +2167,7 @@ int main(int argc, char** argv) {
             ComputationGraph cg;
             double x;
             // sample tree and sentence
-            parser.log_prob_parser(&cg, &cfsm, parser::Sentence(), vector<int>(),&x,true, true);
+            parser.log_prob_parser(&cg, parser::Sentence(), vector<int>(),&x,true, true);
           }
           if (logc % 100 == 0) { // report on dev set
             unsigned dev_size = dev_corpus.size();
@@ -2156,7 +2181,7 @@ int main(int argc, char** argv) {
               const vector<int>& actions=dev_corpus.actions[sii];
               dwords += sentence.size();
               {  ComputationGraph hg;
-                parser.log_prob_parser(&hg,&cfsm,sentence,actions,&right,true, false);
+                parser.log_prob_parser(&hg,sentence,actions,&right,true, false);
                 double lp = as_scalar(hg.incremental_forward());
                 llh += lp;
               }
@@ -2236,17 +2261,37 @@ int main(int argc, char** argv) {
     }
   } // should do training?
   if (conf.count("greedy_decode_dev")) { // do test evaluation
-    Model model;
-    ClassFactoredSoftmaxBuilder cfsm = ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
-    ParserBuilder parser(&model, pretrained);
-    SimpleSGDTrainer sgd(&model);
-    cerr << "using sgd for training" << endl;
+    vector<Model> models;
+    vector<ParserBuilder> parsers;
+    vector<ClassFactoredSoftmaxBuilder> cfsms;
+    std::shared_ptr<EnsembledParser> ensembled_parser;
+
+    AbstractParser* abstract_parser;
 
     if (conf.count("model")) {
-      ifstream in(conf["model"].as<string>().c_str());
+      models.push_back(Model());
+      cfsms.push_back(ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &models.back()));
+      parsers.push_back(ParserBuilder(&models.back(), &cfsms.back(), pretrained));
+      ifstream in(conf["model"].as<string>());
       assert(in);
       boost::archive::binary_iarchive ia(in);
-      ia >> model >> sgd;
+      ia >> models.back();
+      abstract_parser = &parsers.back();
+    } else {
+      assert(conf.count("models"));
+      vector<string> model_paths = conf["models"].as<vector<string>>();
+      assert(!model_paths.empty());
+      for (const string& path : model_paths) {
+        models.push_back(Model());
+        cfsms.push_back(ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &models.back()));
+        parsers.push_back(ParserBuilder(&models.back(), &cfsms.back(), pretrained));
+        ifstream in(path);
+        assert(in);
+        boost::archive::binary_iarchive ia(in);
+        ia >> models.back();
+      }
+      ensembled_parser = std::make_shared<EnsembledParser>(parsers, EnsembledParser::CombineType::sum);
+      abstract_parser = ensembled_parser.get();
     }
 
     unsigned start_index = 0;
@@ -2288,25 +2333,26 @@ int main(int argc, char** argv) {
       print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cout);
       {
         ComputationGraph hg;
-        parser.log_prob_parser(&hg, &cfsm, sentence, actions, nullptr, true, false);
+        abstract_parser->abstract_log_prob_parser(&hg, sentence, actions, nullptr, true, false);
         double nlp = as_scalar(hg.incremental_forward());
         cout << "gold score:\t" << -nlp << endl;
       }
       vector<unsigned> pred;
       double pred_nlp;
       {
+        /* TODO: beam search
         ComputationGraph hg;
         // greedy predict
         if (conf.count("beam_within_word"))
-          pred = parser.log_prob_parser_beam_within_word(&hg,
-                                                         &cfsm,
+          pred = abstract_parser->log_prob_parser_beam_within_word(&hg,
                                                          sentence,
                                                          conf["decode_beam_size"].as<unsigned>(),
                                                          conf["decode_beam_filter_at_word_size"].as<int>());
         else
-          pred = parser.log_prob_parser_beam(&hg, &cfsm, sentence, conf["decode_beam_size"].as<unsigned>());
+          pred = abstract_parser->log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
 
         pred_nlp = as_scalar(hg.incremental_forward());
+        */
       }
       vector<int> pred_int = vector<int>(pred.begin(), pred.end());
       cout << "pred:\t";
@@ -2316,7 +2362,7 @@ int main(int argc, char** argv) {
         // rescore, to check for errors in beam search scoring
         ComputationGraph hg;
         // get log likelihood of gold
-        parser.log_prob_parser(&hg, &cfsm, sentence, pred_int, nullptr, true, false);
+        abstract_parser->abstract_log_prob_parser(&hg, sentence, pred_int, nullptr, true, false);
         double pred_rescore = -as_scalar(hg.incremental_forward());
         cout << "pred rescore:\t" << pred_rescore << endl;
       }
@@ -2367,7 +2413,7 @@ int main(int argc, char** argv) {
   if (test_corpus.size() > 0) {
     Model model;
     ClassFactoredSoftmaxBuilder cfsm = ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
-    ParserBuilder parser(&model, pretrained);
+    ParserBuilder parser(&model, &cfsm, pretrained);
     SimpleSGDTrainer sgd(&model);
     cerr << "using sgd for training" << endl;
 
@@ -2391,15 +2437,16 @@ int main(int argc, char** argv) {
       double &lp = s2a2p[sentence.raw][actions];
       if (!lp) {
         ComputationGraph hg;
-        //parser.log_prob_parser(&hg, &cfsm, sentence, actions, &right, true, false);
-        parser.abstract_log_prob_parser(&hg, &cfsm, sentence, actions, &right, true, false);
+        //parser.log_prob_parser(&hg, sentence, actions, &right, true, false);
+        parser.abstract_log_prob_parser(&hg, sentence, actions, &right, true, false);
         lp = as_scalar(hg.incremental_forward());
 
         /*
-        parser.log_prob_parser(&hg, &cfsm, sentence, actions, &right, true, false);
+        parser.log_prob_parser(&hg, sentence, actions, &right, true, false);
         double unabs_lp = as_scalar(hg.incremental_forward());
+        cerr << lp << " " << unabs_lp << endl;
         assert(lp == unabs_lp);
-         */
+        */
       }
       llh += lp;
     }
