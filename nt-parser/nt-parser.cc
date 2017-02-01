@@ -1889,7 +1889,7 @@ int main(int argc, char** argv) {
         ia >> *models.back();
       }
       ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type));
-      cerr << "Loaded ensembled parser with combine_type of " << combine_type << ".";
+      cerr << "Loaded ensembled parser with combine_type of " << combine_type << "." << endl;
       abstract_parser = ensembled_parser.get();
     }
 
