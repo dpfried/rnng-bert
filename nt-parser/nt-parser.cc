@@ -1436,7 +1436,10 @@ struct EnsembledParserState : public AbstractParserState {
     switch (parser->combine_type) {
       case EnsembledParser::CombineType::sum: {
         // combined_log_probs = logsumexp(all_log_probs); // numerically unstable
-        Expression cwise_max = max(all_log_probs);
+        // Expression cwise_max = max(all_log_probs); // gives an error despite being correct
+        Expression cwise_max = all_log_probs.front();
+        for (auto it = all_log_probs.begin() + 1; it != all_log_probs.end(); ++it)
+          cwise_max = max(cwise_max, *it);
         vector <Expression> exp_log_probs;
         for (const Expression &log_probs : all_log_probs)
           exp_log_probs.push_back(exp(log_probs) - cwise_max);
