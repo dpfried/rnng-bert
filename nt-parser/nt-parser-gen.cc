@@ -86,6 +86,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("eta_decay,e", po::value<float>(), "Start decaying eta after this many epochs")
         ("model,m", po::value<string>(), "Load saved model from this file")
         ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
+        ("combine_type", po::value<string>(), "Decision-level combination type for ensemble (sum, product, or product_unnormed)")
         ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
         ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
         ("input_dim", po::value<unsigned>()->default_value(32), "input embedding size")
@@ -663,18 +664,6 @@ struct ParserBuilder : public AbstractParser {
   void finish_sentence() override {
     assert(stack.size() == 2); // guard symbol, root
   }
-
-  /*
-  unsigned sample_word(Expression word_params) override {
-    return cfsm->sample(word_params);
-  }
-   */
-
-  /*
-  Expression word_neg_log_prob(Expression word_params, unsigned wordid) override {
-    return cfsm->neg_log_softmax(word_params, wordid);
-  }
-   */
 
   unsigned term_count() override {
     return termc;
@@ -1853,49 +1842,53 @@ struct ParserBuilder : public AbstractParser {
 struct EnsembledParser: public AbstractParser {
   enum class CombineType { sum, product, product_unnormed };
 
-  vector<ParserBuilder>& parsers;
+  vector<std::shared_ptr<ParserBuilder>> parsers;
   CombineType combine_type;
 
-  explicit EnsembledParser(vector<ParserBuilder>& parsers, CombineType combine_type) :
+  explicit EnsembledParser(vector<std::shared_ptr<ParserBuilder>> parsers, CombineType combine_type) :
           parsers(parsers), combine_type(combine_type) {
     assert(!parsers.empty());
   }
 
   void new_sentence(ComputationGraph *hg, const parser::Sentence &sent,
                             bool is_evaluation, bool apply_dropout) override {
-    for (ParserBuilder& parser : parsers)
-      parser.new_sentence(hg, sent, is_evaluation, apply_dropout);
+    for (const std::shared_ptr<ParserBuilder>& parser : parsers)
+      parser->new_sentence(hg, sent, is_evaluation, apply_dropout);
   }
 
   bool is_finished() override {
-    return parsers.front().is_finished();
+    return parsers.front()->is_finished();
   }
 
   vector<unsigned int> get_valid_actions() override {
-    return parsers.front().get_valid_actions();
+    return parsers.front()->get_valid_actions();
   }
 
   pair<Expression, Expression> get_action_log_probs_and_next_word_log_prob(const vector<unsigned>& valid_actions, unsigned next_word, bool get_next_word) override {
     vector<Expression> all_log_probs;
     vector<Expression> all_next_word_log_probs;
-    for (ParserBuilder& parser : parsers) {
-      auto tpl = parser.get_action_log_probs_and_next_word_log_prob(valid_actions, next_word, get_next_word);
+    for (const std::shared_ptr<ParserBuilder>& parser : parsers) {
+      auto tpl = parser->get_action_log_probs_and_next_word_log_prob(valid_actions, next_word, get_next_word);
       all_log_probs.push_back(tpl.first);
       all_next_word_log_probs.push_back(tpl.second);
     }
     Expression combined_log_probs;
     Expression combined_next_word_log_prob;
     switch (combine_type) {
-      case CombineType::sum:
-        combined_log_probs = log_softmax(logsumexp(all_log_probs), valid_actions);
+      case CombineType::sum: {
+        Expression cwise_max = all_log_probs.front();
+        for (auto it = all_log_probs.begin() + 1; it != all_log_probs.end(); ++it)
+          cwise_max = max(cwise_max, *it);
+        vector<Expression> exp_log_probs;
+        for (const Expression& log_probs : all_log_probs)
+          exp_log_probs.push_back(exp(log_probs) - cwise_max);
+        combined_log_probs = log_softmax(log(sum(exp_log_probs)) + cwise_max, valid_actions);
         combined_next_word_log_prob = logsumexp(all_next_word_log_probs) - log(parsers.size());
         break;
+      }
       case CombineType::product:
         combined_log_probs = log_softmax(sum(all_log_probs), valid_actions);
-        // this does not correspond to correct normalization of the pointwise product of distributions,
-        // but the normalizer is intractable to compute, and this will keep scores invariant in the number of
-        // parsers in the ensemble, which could be desirable
-        combined_next_word_log_prob = (1.0 / parsers.size()) * sum(all_next_word_log_probs);
+        combined_next_word_log_prob = sum(all_next_word_log_probs);
         break;
       case CombineType::product_unnormed:
         combined_log_probs = sum(all_log_probs);
@@ -1905,17 +1898,17 @@ struct EnsembledParser: public AbstractParser {
   };
 
   void perform_action(const unsigned action, unsigned wordid) override {
-    for (ParserBuilder& parser : parsers)
-      parser.perform_action(action, wordid);
+    for (const std::shared_ptr<ParserBuilder>& parser : parsers)
+      parser->perform_action(action, wordid);
   }
 
   virtual void finish_sentence() override {
-    for (ParserBuilder& parser : parsers)
-      parser.finish_sentence();
+    for (const std::shared_ptr<ParserBuilder>& parser : parsers)
+      parser->finish_sentence();
   }
 
   virtual unsigned int term_count() override {
-    return parsers.front().term_count();
+    return parsers.front()->term_count();
   }
 };
 
@@ -2261,36 +2254,45 @@ int main(int argc, char** argv) {
     }
   } // should do training?
   if (conf.count("greedy_decode_dev")) { // do test evaluation
-    vector<Model> models;
-    vector<ParserBuilder> parsers;
-    vector<ClassFactoredSoftmaxBuilder> cfsms;
+    vector<std::shared_ptr<Model>> models;
+    vector<std::shared_ptr<ParserBuilder>> parsers;
+    vector<std::shared_ptr<ClassFactoredSoftmaxBuilder>> cfsms;
     std::shared_ptr<EnsembledParser> ensembled_parser;
 
     AbstractParser* abstract_parser;
 
     if (conf.count("model")) {
-      models.push_back(Model());
-      cfsms.push_back(ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &models.back()));
-      parsers.push_back(ParserBuilder(&models.back(), &cfsms.back(), pretrained));
+      models.push_back(std::make_shared<Model>());
+      cfsms.push_back(std::make_shared<ClassFactoredSoftmaxBuilder>(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, models.back().get()));
+      parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), cfsms.back().get(), pretrained));
       ifstream in(conf["model"].as<string>());
       assert(in);
       boost::archive::binary_iarchive ia(in);
-      ia >> models.back();
-      abstract_parser = &parsers.back();
+      ia >> *models.back();
+      abstract_parser = parsers.back().get();
     } else {
+      map<string, EnsembledParser::CombineType> combine_types{
+              {"sum", EnsembledParser::CombineType::sum},
+              {"product", EnsembledParser::CombineType::product},
+              {"product_unnormed", EnsembledParser::CombineType::product_unnormed}
+      };
+      assert(conf.count("combine_type"));
+      string combine_type = conf["combine_type"].as<string>();
+      assert(combine_types.count(combine_type));
+
       assert(conf.count("models"));
       vector<string> model_paths = conf["models"].as<vector<string>>();
       assert(!model_paths.empty());
       for (const string& path : model_paths) {
-        models.push_back(Model());
-        cfsms.push_back(ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &models.back()));
-        parsers.push_back(ParserBuilder(&models.back(), &cfsms.back(), pretrained));
+        models.push_back(std::make_shared<Model>());
+        cfsms.push_back(std::make_shared<ClassFactoredSoftmaxBuilder>(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, models.back().get()));
+        parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), cfsms.back().get(), pretrained));
         ifstream in(path);
         assert(in);
         boost::archive::binary_iarchive ia(in);
-        ia >> models.back();
+        ia >> *models.back();
       }
-      ensembled_parser = std::make_shared<EnsembledParser>(parsers, EnsembledParser::CombineType::sum);
+      ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type));
       abstract_parser = ensembled_parser.get();
     }
 
@@ -2411,17 +2413,46 @@ int main(int argc, char** argv) {
 
   }
   if (test_corpus.size() > 0) {
-    Model model;
-    ClassFactoredSoftmaxBuilder cfsm = ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
-    ParserBuilder parser(&model, &cfsm, pretrained);
-    SimpleSGDTrainer sgd(&model);
-    cerr << "using sgd for training" << endl;
+    vector<std::shared_ptr<Model>> models;
+    vector<std::shared_ptr<ParserBuilder>> parsers;
+    vector<std::shared_ptr<ClassFactoredSoftmaxBuilder>> cfsms;
+    std::shared_ptr<EnsembledParser> ensembled_parser;
+
+    AbstractParser* abstract_parser;
 
     if (conf.count("model")) {
-      ifstream in(conf["model"].as<string>().c_str());
+      models.push_back(std::make_shared<Model>());
+      cfsms.push_back(std::make_shared<ClassFactoredSoftmaxBuilder>(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, models.back().get()));
+      parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), cfsms.back().get(), pretrained));
+      ifstream in(conf["model"].as<string>());
       assert(in);
       boost::archive::binary_iarchive ia(in);
-      ia >> model >> sgd;
+      ia >> *models.back();
+      abstract_parser = parsers.back().get();
+    } else {
+      map<string, EnsembledParser::CombineType> combine_types{
+              {"sum", EnsembledParser::CombineType::sum},
+              {"product", EnsembledParser::CombineType::product},
+              {"product_unnormed", EnsembledParser::CombineType::product_unnormed}
+      };
+      assert(conf.count("combine_type"));
+      string combine_type = conf["combine_type"].as<string>();
+      assert(combine_types.count(combine_type));
+
+      assert(conf.count("models"));
+      vector<string> model_paths = conf["models"].as<vector<string>>();
+      assert(!model_paths.empty());
+      for (const string& path : model_paths) {
+        models.push_back(std::make_shared<Model>());
+        cfsms.push_back(std::make_shared<ClassFactoredSoftmaxBuilder>(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, models.back().get()));
+        parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), cfsms.back().get(), pretrained));
+        ifstream in(path);
+        assert(in);
+        boost::archive::binary_iarchive ia(in);
+        ia >> *models.back();
+      }
+      ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type));
+      abstract_parser = ensembled_parser.get();
     }
 
     // if rescoring, we may have many repeats, cache them
@@ -2438,8 +2469,10 @@ int main(int argc, char** argv) {
       if (!lp) {
         ComputationGraph hg;
         //parser.log_prob_parser(&hg, sentence, actions, &right, true, false);
-        parser.abstract_log_prob_parser(&hg, sentence, actions, &right, true, false);
+        abstract_parser->abstract_log_prob_parser(&hg, sentence, actions, &right, true, false);
         lp = as_scalar(hg.incremental_forward());
+
+        //cerr << lp << endl;
 
         /*
         parser.log_prob_parser(&hg, sentence, actions, &right, true, false);

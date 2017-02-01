@@ -1441,7 +1441,7 @@ struct EnsembledParserState : public AbstractParserState {
         for (auto it = all_log_probs.begin() + 1; it != all_log_probs.end(); ++it)
           cwise_max = max(cwise_max, *it);
         vector <Expression> exp_log_probs;
-        for (const Expression &log_probs : all_log_probs)
+        for (const Expression& log_probs : all_log_probs)
           exp_log_probs.push_back(exp(log_probs) - cwise_max);
         combined_log_probs = log(sum(exp_log_probs)) + cwise_max;
         break;
