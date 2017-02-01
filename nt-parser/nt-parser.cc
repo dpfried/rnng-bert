@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
+#include <functional>
 
 #include <execinfo.h>
 #include <unistd.h>
@@ -35,6 +36,8 @@
 
 // dictionaries
 cnn::Dict termdict, ntermdict, adict, posdict, non_unked_termdict;
+
+const unsigned START_OF_SENTENCE_ACTION = std::numeric_limits<unsigned>::max();
 
 volatile bool requested_stop = false;
 unsigned IMPLICIT_REDUCE_AFTER_SHIFT = 0;
@@ -214,11 +217,11 @@ struct AbstractParser {
       unsigned beam_size
   ) {
     struct BeamItem {
+      explicit BeamItem(std::shared_ptr<AbstractParserState> state, unsigned last_action, double score) :
+              state(state), last_action(last_action), score(score)  {}
       std::shared_ptr<AbstractParserState> state;
+      unsigned last_action;
       double score;
-      bool operator<(const BeamItem &other) const {
-        return score < other.score;
-      }
     };
 
     bool is_evaluation = false;
@@ -227,7 +230,86 @@ struct AbstractParser {
 
     std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
 
-    throw std::runtime_error("Not yet implemented");
+    vector<Expression> log_probs;
+    vector<unsigned> results;
+
+    vector<Stack<BeamItem>> completed;
+    vector<Stack<BeamItem>> beam;
+
+    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, 0.0)));
+
+    unsigned action_count = 0;
+    while (completed.size() < beam_size && !beam.empty()) {
+      action_count += 1;
+      // old beam item, action to be applied, resulting total score
+      vector<std::tuple<Stack<BeamItem>, unsigned, float>> successors;
+
+      while (!beam.empty()) {
+        Stack<BeamItem> current_stack_item = beam.back();
+        beam.pop_back();
+
+        std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
+        vector<unsigned> valid_actions = current_parser_state->get_valid_actions();
+        Expression adiste = current_parser_state->get_action_log_probs(valid_actions);
+        vector<float> adist = as_vector(hg->incremental_forward());
+
+        for (unsigned action: valid_actions) {
+          double action_score = adist[action];
+          double total_score = current_stack_item.back().score + action_score;
+          successors.push_back(
+                  std::tuple<Stack<BeamItem>, unsigned, float>(current_stack_item, action, total_score)
+          );
+        }
+      }
+
+      unsigned num_pruned_successors = std::min(beam_size, static_cast<unsigned>(successors.size()));
+      partial_sort(successors.begin(),
+                   successors.begin() + num_pruned_successors,
+                   successors.end(),
+                   [](std::tuple<Stack<BeamItem>, unsigned, float>& t1, const std::tuple<Stack<BeamItem>, unsigned, float>& t2) {
+                     return get<2>(t1) > get<2>(t2); // sort in descending order by total score
+                   });
+      while (successors.size() > num_pruned_successors)
+        successors.pop_back();
+
+      for (auto& successor : successors) {
+        Stack<BeamItem> current_stack_item = get<0>(successor);
+        std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
+        unsigned action = get<1>(successor);
+        double total_score = get<2>(successor);
+        std::shared_ptr<AbstractParserState> successor_parser_state = current_parser_state->perform_action(action);
+        Stack<BeamItem> successor_stack_item = current_stack_item.push_back(
+                BeamItem(successor_parser_state,
+                         action,
+                         total_score)
+        );
+        if (successor_parser_state->is_finished())
+          completed.push_back(successor_stack_item);
+        else
+          beam.push_back(successor_stack_item);
+      }
+    }
+
+    sort(completed.begin(), completed.end(), [](const Stack<BeamItem>& t1, const Stack<BeamItem>& t2) {
+                     return t1.back().score > t2.back().score; // sort in descending order by total score
+                   });
+
+    vector<pair<vector<unsigned>, double>> completed_actions_and_nlp;
+    for (const auto & completed_stack_item: completed) {
+      completed_stack_item.back().state->finish_sentence();
+
+      Stack<BeamItem> stack_item = completed_stack_item;
+      double nlp = - stack_item.back().score;
+      vector<unsigned> actions;
+      while (stack_item.back().last_action != START_OF_SENTENCE_ACTION) {
+        actions.push_back(stack_item.back().last_action);
+        stack_item = stack_item.pop_back();
+      }
+      reverse(actions.begin(), actions.end());
+      completed_actions_and_nlp.push_back(pair<vector<unsigned>, double>(actions, nlp));
+    }
+
+    return completed_actions_and_nlp;
   }
 };
 
@@ -446,7 +528,7 @@ struct ParserBuilder : public AbstractParser {
     char prev_a = '0';
 
     unsigned action_count = 0;
-    unsigned action = std::numeric_limits<unsigned>::max();
+    unsigned action = START_OF_SENTENCE_ACTION;
 
     return std::static_pointer_cast<AbstractParserState>(
         std::make_shared<ParserState>(
@@ -1976,13 +2058,21 @@ int main(int argc, char** argv) {
       ComputationGraph hg;
       // greedy predict
       pair<vector<unsigned>, double> result_and_nlp;
-      /* if (beam_size > 1) {
-        auto beam_results = parser.log_prob_parser_beam(&hg, sentence, beam_size);
+      /*if (beam_size > 1) {
+        auto beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
         result_and_nlp = beam_results[0];
-      } else */ {
+      } else */{
         vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(), &right, true);
         double nlp = as_scalar(hg.incremental_forward());
         result_and_nlp = pair<vector<unsigned>, double>(result, nlp);
+
+        auto beam_result_and_nlp = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, 1);
+        double beam_nlp = beam_result_and_nlp[0].second;
+        vector<unsigned> beam_result = beam_result_and_nlp[0].first;
+
+        cerr << nlp << " " << beam_nlp << endl;
+        assert(abs(nlp - beam_nlp) < 1e-3);
+        assert(result == beam_result);
       }
       int ti = 0;
       // TODO: convert to use print_parse
