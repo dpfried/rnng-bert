@@ -85,7 +85,6 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("samples_include_gold", "Also include the gold parse in the list of samples output")
         ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
         ("model,m", po::value<string>(), "Load saved model from this file")
-        ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
         ("use_pos_tags,P", "make POS tags visible to parser")
         ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
         ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
@@ -99,6 +98,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("beam_size,b", po::value<unsigned>()->default_value(1), "beam size")
         ("no_stack,S", "Don't encode the stack")
         ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
+        ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
+        ("combine_type", po::value<string>(), "Decision-level combination type for ensemble (sum or product)")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1433,9 +1434,15 @@ struct EnsembledParserState : public AbstractParserState {
       all_log_probs.push_back(state->get_action_log_probs(valid_actions));
     Expression combined_log_probs;
     switch (parser->combine_type) {
-      case EnsembledParser::CombineType::sum:
-        combined_log_probs = logsumexp(all_log_probs);
+      case EnsembledParser::CombineType::sum: {
+        // combined_log_probs = logsumexp(all_log_probs); // numerically unstable
+        Expression cwise_max = max(all_log_probs);
+        vector <Expression> exp_log_probs;
+        for (const Expression &log_probs : all_log_probs)
+          exp_log_probs.push_back(exp(log_probs) - cwise_max);
+        combined_log_probs = log(sum(exp_log_probs)) + cwise_max;
         break;
+      }
       case EnsembledParser::CombineType::product:
         combined_log_probs = sum(all_log_probs);
         break;
@@ -1858,6 +1865,14 @@ int main(int argc, char** argv) {
     }
 
     else {
+      map<string, EnsembledParser::CombineType> combine_types{
+          {"sum", EnsembledParser::CombineType::sum},
+          {"product", EnsembledParser::CombineType::product}
+      };
+      assert(conf.count("combine_type"));
+      string combine_type = conf["combine_type"].as<string>();
+      assert(combine_types.count(combine_type));
+
       assert(conf.count("models"));
       vector<string> model_paths = conf["models"].as<vector<string>>();
       assert(!model_paths.empty());
@@ -1870,7 +1885,8 @@ int main(int argc, char** argv) {
         boost::archive::binary_iarchive ia(in);
         ia >> *models.back();
       }
-      ensembled_parser = std::make_shared<EnsembledParser>(parsers, EnsembledParser::CombineType::product);
+      ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type));
+      cerr << "Loaded ensembled parser with combine_type of " << combine_type << ".";
       abstract_parser = ensembled_parser.get();
     }
 
