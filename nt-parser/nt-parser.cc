@@ -1867,16 +1867,12 @@ int main(int argc, char** argv) {
     }
     unsigned beam_size = conf["beam_size"].as<unsigned>();
     unsigned test_size = test_corpus.size();
-    double llh = 0;
-    double trs = 0;
     double right = 0;
-    double dwords = 0;
     auto t_start = chrono::high_resolution_clock::now();
     const vector<int> actions;
     vector<unsigned> n_distinct_samples;
     for (unsigned sii = 0; sii < test_size; ++sii) {
       const auto& sentence=test_corpus.sents[sii];
-      dwords += sentence.size();
       // TODO: this overrides dynet random seed, but should be ok if we're only sampling
       cnn::rndeng->seed(sii);
       set<vector<unsigned>> samples;
@@ -1936,13 +1932,6 @@ int main(int argc, char** argv) {
     for (unsigned sii = 0; sii < test_size; ++sii) {
       const auto& sentence=test_corpus.sents[sii];
       const vector<int>& actions=test_corpus.actions[sii];
-      dwords += sentence.size();
-      {  ComputationGraph hg;
-        // get log likelihood of gold
-        vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg,sentence,actions,&right,true);
-        double lp = as_scalar(hg.incremental_forward());
-        llh += lp;
-      }
       ComputationGraph hg;
       // greedy predict
       pair<vector<unsigned>, double> result_and_nlp;
@@ -1957,7 +1946,6 @@ int main(int argc, char** argv) {
       int ti = 0;
       // TODO: convert to use print_parse
       for (auto a : result_and_nlp.first) {
-
         if (adict.Convert(a)[0] == 'N') {
           out << '(' << ntermdict.Convert(action2NTindex.find(a)->second) << ' ';
         } else if (adict.Convert(a)[0] == 'S') {
@@ -1974,12 +1962,9 @@ int main(int argc, char** argv) {
         } else out << ") ";
       }
       out << endl;
-      double lp = 0;
-      trs += actions.size();
     }
     auto t_end = chrono::high_resolution_clock::now();
     out.close();
-    double err = (trs - right) / trs;
     cerr << "Test output in " << pfx << endl;
     //parser::EvalBResults res = parser::Evaluate("foo", pfx);
     std::string evaluable_fname = pfx + "_evaluable.txt";
