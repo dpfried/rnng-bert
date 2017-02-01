@@ -2022,10 +2022,9 @@ int main(int argc, char** argv) {
         samples.insert(result);
       }
 
-      /*
       if (output_beam_as_samples) {
         ComputationGraph hg;
-        auto beam_results = parser.log_prob_parser_beam(&hg, sentence, beam_size);
+        auto beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
         if (beam_results.size() < beam_size) {
           cerr << "warning: only " << beam_results.size() << " parses found by beam search for sent " << sii << endl;
         }
@@ -2041,7 +2040,6 @@ int main(int argc, char** argv) {
           samples.insert(result_and_nlp.first);
         }
       }
-      */
 
       n_distinct_samples.push_back(samples.size());
     }
@@ -2058,14 +2056,15 @@ int main(int argc, char** argv) {
       ComputationGraph hg;
       // greedy predict
       pair<vector<unsigned>, double> result_and_nlp;
-      /*if (beam_size > 1) {
+      if (beam_size > 1) {
         auto beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
         result_and_nlp = beam_results[0];
-      } else */{
+      } else {
         vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(), &right, true);
         double nlp = as_scalar(hg.incremental_forward());
         result_and_nlp = pair<vector<unsigned>, double>(result, nlp);
 
+        /*
         auto beam_result_and_nlp = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, 1);
         double beam_nlp = beam_result_and_nlp[0].second;
         vector<unsigned> beam_result = beam_result_and_nlp[0].first;
@@ -2073,6 +2072,7 @@ int main(int argc, char** argv) {
         cerr << nlp << " " << beam_nlp << endl;
         assert(abs(nlp - beam_nlp) < 1e-3);
         assert(result == beam_result);
+         */
       }
       int ti = 0;
       // TODO: convert to use print_parse
