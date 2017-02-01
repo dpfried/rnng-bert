@@ -206,6 +206,28 @@ struct AbstractParser {
     assert(tot_neglogprob.pg != nullptr);
     return results;
   }
+
+  vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam(
+      ComputationGraph* hg,
+      const parser::Sentence& sent,
+      unsigned beam_size
+  ) {
+    struct BeamItem {
+      std::shared_ptr<AbstractParserState> state;
+      double score;
+      bool operator<(const BeamItem &other) const {
+        return score < other.score;
+      }
+    };
+
+    bool is_evaluation = false;
+    bool build_training_graph = false;
+    bool apply_dropout = false;
+
+    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
+
+    throw std::runtime_error("Not yet implemented");
+  }
 };
 
 struct ParserState;
