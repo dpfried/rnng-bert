@@ -1,6 +1,8 @@
 #ifndef STACK_H
 #define STACK_H
 
+#include <algorithm>
+#include <assert.h>
 #include <memory>
 #include <vector>
 
@@ -35,6 +37,17 @@ public:
 
   unsigned size() const {
     return data->size;
+  }
+
+  std::vector<T> values() const {
+    std::vector<T> values;
+    Stack stack(*this);
+    while (stack.data) {
+      values.push_back(stack.back());
+      stack = stack.pop_back();
+    }
+    std::reverse(values.begin(), values.end());
+    return values;
   }
 
 private:
