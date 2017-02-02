@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <assert.h>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 template <class T>
@@ -32,6 +33,8 @@ public:
   }
 
   Stack pop_back() const {
+    if (!data->previous)
+      throw std::runtime_error("Invalid operation: cannot call pop_back() on a stack of size 1.");
     return Stack(data->previous);
   }
 
@@ -41,10 +44,10 @@ public:
 
   std::vector<T> values() const {
     std::vector<T> values;
-    Stack stack(*this);
-    while (stack.data) {
-      values.push_back(stack.back());
-      stack = stack.pop_back();
+    std::shared_ptr<Data> data(this->data);
+    while (data) {
+      values.push_back(data->value);
+      data = data->previous;
     }
     std::reverse(values.begin(), values.end());
     return values;
