@@ -2621,8 +2621,6 @@ int main(int argc, char** argv) {
         abstract_parser->abstract_log_prob_parser(&hg, sentence, actions, &right, true, false);
         lp = as_scalar(hg.incremental_forward());
 
-        cerr << lp << endl;
-
         /*
         parser.log_prob_parser(&hg, sentence, actions, &right, true, false);
         double unabs_lp = as_scalar(hg.incremental_forward());
@@ -2630,6 +2628,7 @@ int main(int argc, char** argv) {
         assert(lp == unabs_lp);
          */
       }
+      cout << sentence.size() << '\t' << lp << endl;
       llh += lp;
     }
     cerr << "test     total -llh=" << llh << endl;
