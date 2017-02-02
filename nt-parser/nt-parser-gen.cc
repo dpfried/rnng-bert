@@ -31,9 +31,12 @@
 #include "nt-parser/pretrained.h"
 #include "nt-parser/compressed-fstream.h"
 #include "nt-parser/eval.h"
+#include "nt-parser/stack.h"
 
 // dictionaries
 cnn::Dict termdict, ntermdict, adict, posdict, non_unked_termdict;
+
+const unsigned START_OF_SENTENCE_ACTION = std::numeric_limits<unsigned>::max();
 
 volatile bool requested_stop = false;
 unsigned kSOS = 0;
@@ -195,19 +198,20 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
   out_stream << endl;
 }
 
-struct AbstractParser {
-  virtual void new_sentence(ComputationGraph* hg,
-                            const parser::Sentence& sent,
-                            bool is_evaluation,
-                            bool apply_dropout) = 0;
+struct AbstractParserState {
   virtual bool is_finished() = 0;
   virtual vector<unsigned> get_valid_actions() = 0;
   virtual pair<Expression, Expression> get_action_log_probs_and_next_word_log_prob(const vector<unsigned>& valid_actions, unsigned next_word, bool get_next_word) = 0;
-  virtual void perform_action(const unsigned action, unsigned wordid) = 0;
+  virtual std::shared_ptr<AbstractParserState> perform_action(const unsigned action, unsigned wordid) = 0;
   virtual void finish_sentence() = 0;
-  //virtual unsigned sample_word(Expression cfsm_input) = 0;
-  //virtual Expression word_neg_log_prob(Expression cfsm_input, unsigned wordid) = 0;
   virtual unsigned term_count() = 0;
+};
+
+struct AbstractParser {
+  virtual std::shared_ptr<AbstractParserState> new_sentence(ComputationGraph* hg,
+                                                            const parser::Sentence& sent,
+                                                            bool is_evaluation,
+                                                            bool apply_dropout) = 0;
 
   vector<unsigned> abstract_log_prob_parser(ComputationGraph* hg,
                                             const parser::Sentence& sent,
@@ -225,19 +229,19 @@ struct AbstractParser {
       abort();
     }
 
-    new_sentence(hg, sent, is_evaluation, apply_dropout);
+    std::shared_ptr<AbstractParserState> state = new_sentence(hg, sent, is_evaluation, apply_dropout);
 
     unsigned action_count = 0;  // incremented at each prediction
     vector<Expression> log_probs;
     vector<unsigned> results;
 
-    while (!is_finished()) {
-      vector<unsigned> current_valid_actions = get_valid_actions();
-      bool has_next_word = term_count() < sent.size();
+    while (!state->is_finished()) {
+      vector<unsigned> current_valid_actions = state->get_valid_actions();
+      bool has_next_word = state->term_count() < sent.size();
       if (has_next_word)
-        assert(sent.raw[term_count()] >= 0); // for int -> unsigned conversion
-      unsigned next_word = has_next_word ? sent.raw[term_count()] : 0;
-      pair<Expression,Expression> adiste_and_next_word_log_prob = get_action_log_probs_and_next_word_log_prob(current_valid_actions, next_word, has_next_word);
+        assert(sent.raw[state->term_count()] >= 0); // for int -> unsigned conversion
+      unsigned next_word = has_next_word ? sent.raw[state->term_count()] : 0;
+      pair<Expression,Expression> adiste_and_next_word_log_prob = state->get_action_log_probs_and_next_word_log_prob(current_valid_actions, next_word, has_next_word);
       Expression adiste = adiste_and_next_word_log_prob.first;
       Expression next_word_log_prob = adiste_and_next_word_log_prob.second;
       unsigned action = 0;
@@ -273,7 +277,7 @@ struct AbstractParser {
           print_parse(vector<unsigned>(correct_actions.begin(), correct_actions.end()), sent, false, cerr);
           cerr << "pred parse:\t";
           print_parse(results, sent, false, cerr);
-          cerr << "is finished:\t" << is_finished() << endl;
+          cerr << "is finished:\t" << state->is_finished() << endl;
           abort();
         }
         assert(correct_actions[action_count] >= 0); // for int -> unsigned conversion
@@ -290,13 +294,13 @@ struct AbstractParser {
         }
       }
       results.push_back(action);
-      perform_action(action, wordid);
+      state = state->perform_action(action, wordid);
     }
     if (action_count != correct_actions.size()) {
       cerr << "Unexecuted actions remain but final state reached!\n";
       abort();
     }
-    finish_sentence();
+    state->finish_sentence();
     if (!sample) {
       Expression tot_neglogprob = -sum(log_probs);
       assert(tot_neglogprob.pg != nullptr);
@@ -305,6 +309,8 @@ struct AbstractParser {
     return results;
   }
 };
+
+struct ParserState;
 
 struct ParserBuilder : public AbstractParser {
   LSTMBuilder stack_lstm; // (layers, input, hidden, trainer)
@@ -395,16 +401,8 @@ struct ParserBuilder : public AbstractParser {
   unsigned sent_length = 0;
 
   Expression pbias, S, A, T, cbias, p2a, abias, action_start, cW;
-  vector<int> is_open_paren; // -1 if no nonterminal has a parenthesis open, otherwise index of NT
-  vector<string> stack_content;
-  vector<Expression> stack;  // variables representing subtree embeddings
-  vector<Expression> terms;
-  unsigned nt_count = 0; // number of times an NT has been introduced
-  int nopen_parens = 0;
-  char prev_a = '0';
-  unsigned termc = 0;
 
-  void new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool apply_dropout) override {
+  std::shared_ptr<AbstractParserState> new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool apply_dropout) override {
     this->hg = hg;
     this->apply_dropout = apply_dropout;
     this->is_evaluation = is_evaluation;
@@ -445,228 +443,49 @@ struct ParserBuilder : public AbstractParser {
 
     if (!NO_HISTORY) action_lstm.add_input(action_start);
 
-    terms.clear();
+    vector<Expression> terms;
     terms.push_back(lookup(*hg, p_w, kSOS));
     if (!NO_BUFFER) term_lstm.add_input(terms.back());
 
-    stack_content.clear();
+    vector<string> stack_content;
     stack_content.push_back("ROOT_GUARD");
 
-    stack.clear();
+    vector<Expression> stack;
     stack.push_back(parameter(*hg, p_stack_guard));
     // drive dummy symbol on stack through LSTM
     stack_lstm.add_input(stack.back());
+
+    vector<int> is_open_paren;
     is_open_paren.push_back(-1); // corresponds to dummy symbol
 
-    nt_count = 0; // number of times an NT has been introduced
-    nopen_parens = 0;
-    prev_a = '0';
-    termc = 0;
-  }
+    unsigned nt_count = 0; // number of times an NT has been introduced
+    unsigned cons_nt_count = 0;
+    int nopen_parens = 0;
+    char prev_a = '0';
+    unsigned termc = 0;
 
-  bool is_finished() override {
-    return stack.size() == 2 && termc > 0;
-  }
+    unsigned action_count = 0;
+    unsigned action = START_OF_SENTENCE_ACTION ;
 
-  vector<unsigned> get_valid_actions() override {
-    vector<unsigned> current_valid_actions;
-    for (auto a: possible_actions) {
-      if (IsActionForbidden_Generative(adict.Convert(a), prev_a, terms.size(), stack.size(), nopen_parens))
-        continue;
-      current_valid_actions.push_back(a);
-    }
-    return current_valid_actions;
-  }
-
-  //pair<Expression,Expression> get_action_log_probs_and_cfsm_input(const vector<unsigned>& valid_actions) override {
-  pair<Expression, Expression> get_action_log_probs_and_next_word_log_prob(const vector<unsigned>& valid_actions, unsigned next_word, bool get_next_word) override {
-    assert (stack.size() == stack_content.size());
-    // get list of possible actions for the current parser state
-    //cerr << "valid actions = " << current_valid_actions.size() << endl;
-
-    //onerep
-    Expression stack_summary = stack_lstm.back();
-    Expression action_summary = (NO_HISTORY) ? Expression() : action_lstm.back();
-    Expression term_summary = (NO_BUFFER) ? Expression() : term_lstm.back();
-    if (apply_dropout) {
-      stack_summary = dropout(stack_summary, DROPOUT);
-      if (!NO_HISTORY) action_summary = dropout(action_summary, DROPOUT);
-      if (!NO_BUFFER) term_summary = dropout(term_summary, DROPOUT);
-    }
-    Expression p_t;
-    if (NO_BUFFER && NO_HISTORY) {
-      p_t = affine_transform({pbias, S, stack_summary});
-    } else if (NO_BUFFER && !NO_HISTORY) {
-      p_t = affine_transform({pbias, S, stack_summary, A, action_summary});
-    } else if (!NO_BUFFER && NO_HISTORY) {
-      p_t = affine_transform({pbias, S, stack_summary, T, term_summary});
-    } else {
-      p_t = affine_transform({pbias, S, stack_summary, A, action_summary, T, term_summary});
-    }
-
-    Expression nlp_t = rectify(p_t);
-    //tworep*
-    //Expression p_t = affine_transform({pbias, S, stack_lstm.back(), A, action_lstm.back()});
-    //Expression nlp_t = rectify(p_t);
-    //if (build_training_graph) nlp_t = dropout(nlp_t, 0.4);
-    // r_t = abias + p2a * nlp
-    Expression r_t = affine_transform({abias, p2a, nlp_t});
-
-    // adist = log_softmax(r_t, current_valid_actions)
-    Expression adiste = log_softmax(r_t, valid_actions);
-    Expression next_word_log_prob = get_next_word ? -cfsm->neg_log_softmax(nlp_t, next_word) : input(*hg, 0.0);
-    return pair<Expression,Expression>(adiste, next_word_log_prob);
-  }
-
-  void perform_action(const unsigned action, unsigned wordid) override {
-    // possible_wordid should be >= 0 if this is a shift action
-    // add current action to action LSTM
-    Expression actione = lookup(*hg, p_a, action);
-    if (!NO_HISTORY) action_lstm.add_input(actione);
-
-    // do action
-    const string &actionString = adict.Convert(action);
-    //cerr << "ACT: " << actionString << endl;
-    const char ac = actionString[0];
-    const char ac2 = actionString[1];
-
-    bool was_word_completed = false;
-    unsigned word_completed = 0;
-
-    if (ac == 'S' && ac2 == 'H') {  // SHIFT
-      //tworep
-      //Expression p_t = affine_transform({pbias2, S2, stack_lstm.back(), A2, action_lstm.back(), T, term_lstm.back()});
-      //Expression nlp_t = rectify(p_t);
-      //tworep-oneact:
-      //Expression p_t = affine_transform({pbias2, S2, stack_lstm.back(), T, term_lstm.back()});
-      //Expression nlp_t = rectify(p_t);
-      assert (wordid != 0);
-      stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
-      ++termc;
-      Expression word = lookup(*hg, p_w, wordid);
-      terms.push_back(word);
-      if (!NO_BUFFER) term_lstm.add_input(word);
-      stack.push_back(word);
-      stack_lstm.add_input(word);
-      is_open_paren.push_back(-1);
-      if (WORD_COMPLETION_IS_SHIFT) {
-        was_word_completed = (termc < sent_length);
-        word_completed = termc;
-      } else if (prev_a == 'S' || prev_a == 'R') {
-        was_word_completed = true;
-        word_completed = termc - 1;
-      }
-    } else if (ac == 'N') { // NT
-      assert(wordid == 0);
-      ++nopen_parens;
-      auto it = action2NTindex.find(action);
-      assert(it != action2NTindex.end());
-      int nt_index = it->second;
-      nt_count++;
-      stack_content.push_back(ntermdict.Convert(nt_index));
-      Expression nt_embedding = lookup(*hg, p_nt, nt_index);
-      stack.push_back(nt_embedding);
-      stack_lstm.add_input(nt_embedding);
-      is_open_paren.push_back(nt_index);
-      if (!WORD_COMPLETION_IS_SHIFT && (prev_a == 'S' || prev_a == 'R')) {
-        was_word_completed = true;
-        word_completed = termc;
-      }
-    } else { // REDUCE
-      assert(wordid == 0);
-      --nopen_parens;
-      assert(stack.size() > 2); // dummy symbol means > 2 (not >= 2)
-      assert(stack_content.size() > 2 && stack.size() == stack_content.size());
-      // find what paren we are closing
-      int i = is_open_paren.size() - 1; //get the last thing on the stack
-      while (is_open_paren[i] < 0) {
-        --i;
-        assert(i >= 0);
-      } //iteratively decide whether or not it's a non-terminal
-      Expression nonterminal = lookup(*hg, p_ntup, is_open_paren[i]);
-      int nchildren = is_open_paren.size() - i - 1;
-      assert(nchildren > 0);
-      //cerr << "  number of children to reduce: " << nchildren << endl;
-      vector<Expression> children(nchildren);
-      const_lstm_fwd.start_new_sequence();
-      const_lstm_rev.start_new_sequence();
-
-      // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
-      // TO BE COMPOSED INTO A TREE EMBEDDING
-      string curr_word;
-      //cerr << "--------------------------------" << endl;
-      //cerr << "Now printing the children" << endl;
-      //cerr << "--------------------------------" << endl;
-      for (i = 0; i < nchildren; ++i) {
-        assert (stack_content.size() == stack.size());
-        children[i] = stack.back();
-        stack.pop_back();
-        stack_lstm.rewind_one_step();
-        is_open_paren.pop_back();
-        curr_word = stack_content.back();
-        //cerr << "At the back of the stack (supposed to be one of the children): " << curr_word << endl;
-        stack_content.pop_back();
-      }
-      assert (stack_content.size() == stack.size());
-      //cerr << "Doing REDUCE operation" << endl;
-      is_open_paren.pop_back(); // nt symbol
-      stack.pop_back(); // nonterminal dummy
-      stack_lstm.rewind_one_step(); // nt symbol
-      curr_word = stack_content.back();
-      //cerr << "--------------------------------" << endl;
-      //cerr << "At the back of the stack (supposed to be the non-terminal symbol) : " << curr_word << endl;
-      stack_content.pop_back();
-      assert (stack.size() == stack_content.size());
-      //cerr << "Done reducing" << endl;
-
-      // BUILD TREE EMBEDDING USING BIDIR LSTM
-      const_lstm_fwd.add_input(nonterminal);
-      const_lstm_rev.add_input(nonterminal);
-      for (i = 0; i < nchildren; ++i) {
-        const_lstm_fwd.add_input(children[i]);
-        const_lstm_rev.add_input(children[nchildren - i - 1]);
-      }
-      Expression cfwd = const_lstm_fwd.back();
-      Expression crev = const_lstm_rev.back();
-      if (apply_dropout) {
-        cfwd = dropout(cfwd, DROPOUT);
-        crev = dropout(crev, DROPOUT);
-      }
-      Expression c = concatenate({cfwd, crev});
-      Expression composed = rectify(affine_transform({cbias, cW, c}));
-      stack_lstm.add_input(composed);
-      stack.push_back(composed);
-      stack_content.push_back(curr_word);
-      //cerr << curr_word << endl;
-      is_open_paren.push_back(-1); // we just closed a paren at this position
-      if (stack.size() <= 2) {
-        was_word_completed = true;
-        word_completed = termc;
-      }
-    }
-
-    prev_a = ac;
-    /*
-    if (was_word_completed) {
-      Expression e_cum_neglogprob = -sum(log_probs);
-      double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
-      cerr << "gold nlp after " << word_completed << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
-      for (unsigned i = 0; i < log_probs.size(); i++) {
-        cerr << as_scalar(log_probs[i].value()) << " ";
-      }
-      cerr << endl;
-      print_parse(results, sent);
-    }
-    */
-
-  }
-
-  void finish_sentence() override {
-    assert(stack.size() == 2); // guard symbol, root
-  }
-
-  unsigned term_count() override {
-    return termc;
+    return std::static_pointer_cast<AbstractParserState>(
+            std::make_shared<ParserState>(
+                    this,
+                    action_lstm.state(),
+                    term_lstm.state(),
+                    stack_lstm.state(),
+                    Stack<Expression>(terms),
+                    Stack<Expression>(stack),
+                    Stack<string>(stack_content),
+                    Stack<int>(is_open_paren),
+                    nt_count,
+                    cons_nt_count,
+                    nopen_parens,
+                    prev_a,
+                    termc,
+                    action_count,
+                    action
+            )
+    );
   }
 
 // returns parse actions for input sentence (in training just returns the reference)
@@ -1839,6 +1658,8 @@ struct ParserBuilder : public AbstractParser {
 
 };
 
+struct EnsembledParserState;
+
 struct EnsembledParser: public AbstractParser {
   enum class CombineType { sum, product, product_unnormed };
 
@@ -1850,32 +1671,358 @@ struct EnsembledParser: public AbstractParser {
     assert(!parsers.empty());
   }
 
-  void new_sentence(ComputationGraph *hg, const parser::Sentence &sent,
-                            bool is_evaluation, bool apply_dropout) override {
+  std::shared_ptr<AbstractParserState> new_sentence(ComputationGraph *hg, const parser::Sentence &sent,
+                                                    bool is_evaluation, bool apply_dropout) override {
+    vector<std::shared_ptr<AbstractParserState>> states;
     for (const std::shared_ptr<ParserBuilder>& parser : parsers)
-      parser->new_sentence(hg, sent, is_evaluation, apply_dropout);
+      states.push_back(parser->new_sentence(hg, sent, is_evaluation, apply_dropout));
+    return std::static_pointer_cast<AbstractParserState>(std::make_shared<EnsembledParserState>(this, states));
+  }
+
+};
+
+struct ParserState : public AbstractParserState {
+  // todo: explicit ?
+  ParserState(
+          ParserBuilder* parser,
+          RNNPointer action_state,
+          RNNPointer term_state,
+          RNNPointer stack_state,
+          Stack<Expression> terms,
+          Stack<Expression> stack,
+          Stack<string> stack_content,
+          Stack<int> is_open_paren,
+          unsigned nt_count,
+          unsigned const_nt_count,
+          int nopen_parens,
+          char prev_a,
+          unsigned termc,
+          unsigned action_count,
+          unsigned action
+  ) : parser(parser),
+      action_state(action_state),
+      term_state(term_state),
+      stack_state(stack_state),
+      terms(terms),
+      stack(stack),
+      stack_content(stack_content),
+      is_open_paren(is_open_paren),
+      nt_count(nt_count),
+      cons_nt_count(cons_nt_count),
+      nopen_parens(nopen_parens),
+      prev_a(prev_a),
+      termc(termc),
+      action_count(action_count),
+      action(action)
+  {}
+
+  ParserBuilder* parser;
+
+  const RNNPointer action_state;
+  const RNNPointer term_state;
+  const RNNPointer stack_state;
+
+  const Stack<Expression> terms;
+  const Stack<Expression> stack;  // variables representing subtree embeddings
+  const Stack<string> stack_content;
+
+  const Stack<int> is_open_paren; // -1 if no nonterminal has a parenthesis open, otherwise index of NT
+
+  const unsigned nt_count = 0; // number of times an NT has been introduced
+  const unsigned cons_nt_count = 0; // number of consecutive NTs with no intervening shifts or reduces
+  const int nopen_parens = 0;
+  const char prev_a = '0';
+  const unsigned termc = 0;
+
+  const unsigned action_count;
+  const unsigned action;
+
+  bool is_finished() override {
+    //cerr << "stack.size() " << stack.size() << endl;
+    //cerr << "termc " << termc << endl;
+    return stack.size() == 2 && termc > 0;
+  }
+
+  vector<unsigned> get_valid_actions() override {
+    vector<unsigned> current_valid_actions;
+    for (auto a: possible_actions) {
+      if (ParserBuilder::IsActionForbidden_Generative(adict.Convert(a), prev_a, terms.size(), stack.size(), nopen_parens))
+        continue;
+      current_valid_actions.push_back(a);
+    }
+    return current_valid_actions;
+  }
+
+  //pair<Expression,Expression> get_action_log_probs_and_cfsm_input(const vector<unsigned>& valid_actions) override {
+  pair<Expression, Expression> get_action_log_probs_and_next_word_log_prob(const vector<unsigned>& valid_actions, unsigned next_word, bool get_next_word) override {
+    assert (stack.size() == stack_content.size());
+    // get list of possible actions for the current parser state
+    //cerr << "valid actions = " << current_valid_actions.size() << endl;
+
+    //onerep
+    Expression stack_summary = parser->stack_lstm.get_h(stack_state).back();
+    Expression action_summary = (NO_HISTORY) ? Expression() : parser->action_lstm.get_h(action_state).back();
+    Expression term_summary = (NO_BUFFER) ? Expression() : parser->term_lstm.get_h(term_state).back();
+    if (parser->apply_dropout) { // TODO: don't the outputs already have dropout applied?
+      stack_summary = dropout(stack_summary, DROPOUT);
+      if (!NO_HISTORY) action_summary = dropout(action_summary, DROPOUT);
+      if (!NO_BUFFER) term_summary = dropout(term_summary, DROPOUT);
+    }
+    Expression p_t;
+    if (NO_BUFFER && NO_HISTORY) {
+      p_t = affine_transform({parser->pbias, parser->S, stack_summary});
+    } else if (NO_BUFFER && !NO_HISTORY) {
+      p_t = affine_transform({parser->pbias, parser->S, stack_summary, parser->A, action_summary});
+    } else if (!NO_BUFFER && NO_HISTORY) {
+      p_t = affine_transform({parser->pbias, parser->S, stack_summary, parser->T, term_summary});
+    } else {
+      p_t = affine_transform({parser->pbias, parser->S, stack_summary, parser->A, action_summary, parser->T, term_summary});
+    }
+
+    Expression nlp_t = rectify(p_t);
+    //tworep*
+    //Expression p_t = affine_transform({pbias, S, stack_lstm.back(), A, action_lstm.back()});
+    //Expression nlp_t = rectify(p_t);
+    //if (build_training_graph) nlp_t = dropout(nlp_t, 0.4);
+    // r_t = abias + p2a * nlp
+    Expression r_t = affine_transform({parser->abias, parser->p2a, nlp_t});
+
+    // adist = log_softmax(r_t, current_valid_actions)
+    Expression adiste = log_softmax(r_t, valid_actions);
+    Expression next_word_log_prob = get_next_word ? -parser->cfsm->neg_log_softmax(nlp_t, next_word) : input(*parser->hg, 0.0);
+    return pair<Expression,Expression>(adiste, next_word_log_prob);
+  }
+
+  std::shared_ptr<AbstractParserState> perform_action(const unsigned action, unsigned wordid) override {
+    // do action
+    const string &actionString = adict.Convert(action);
+    //cerr << "ACT: " << actionString << endl;
+    const char ac = actionString[0];
+    const char ac2 = actionString[1];
+
+    RNNPointer new_action_state = action_state;
+    RNNPointer new_term_state = term_state;
+    RNNPointer new_stack_state = stack_state;
+
+    Stack<Expression> new_terms(terms);
+    Stack<Expression> new_stack(stack);
+    Stack<string> new_stack_content(stack_content);
+
+    Stack<int> new_is_open_paren(is_open_paren);
+
+    unsigned new_nt_count = nt_count;
+    unsigned new_cons_nt_count = cons_nt_count;
+    int new_nopen_parens = nopen_parens;
+    char new_prev_a = prev_a;
+    unsigned new_termc = termc;
+
+    // possible_wordid should be >= 0 if this is a shift action
+    // add current action to action LSTM
+    Expression actione = lookup(*parser->hg, parser->p_a, action);
+    if (!NO_HISTORY) {
+      parser->action_lstm.add_input(new_action_state, actione);
+      new_action_state = parser->action_lstm.state();
+    }
+
+    bool was_word_completed = false;
+    unsigned word_completed = 0;
+
+    if (ac == 'S' && ac2 == 'H') {  // SHIFT
+      //tworep
+      //Expression p_t = affine_transform({pbias2, S2, stack_lstm.back(), A2, action_lstm.back(), T, term_lstm.back()});
+      //Expression nlp_t = rectify(p_t);
+      //tworep-oneact:
+      //Expression p_t = affine_transform({pbias2, S2, stack_lstm.back(), T, term_lstm.back()});
+      //Expression nlp_t = rectify(p_t);
+      assert (wordid != 0);
+      new_stack_content = new_stack_content.push_back(termdict.Convert(wordid)); //add the string of the word to the stack
+      ++new_termc;
+      Expression word = lookup(*parser->hg, parser->p_w, wordid);
+      new_terms = new_terms.push_back(word);
+      if (!NO_BUFFER) {
+        parser->term_lstm.add_input(new_term_state, word);
+        new_term_state = parser->term_lstm.state();
+      }
+      new_stack = new_stack.push_back(word);
+      parser->stack_lstm.add_input(new_stack_state, word);
+      new_stack_state = parser->stack_lstm.state();
+
+      new_is_open_paren = new_is_open_paren.push_back(-1);
+      if (WORD_COMPLETION_IS_SHIFT) {
+        was_word_completed = (new_termc < parser->sent_length);
+        word_completed = new_termc;
+      } else if (new_prev_a == 'S' || new_prev_a == 'R') {
+        was_word_completed = true;
+        word_completed = new_termc - 1;
+      }
+    } else if (ac == 'N') { // NT
+      assert(wordid == 0);
+      ++new_nopen_parens;
+      auto it = action2NTindex.find(action);
+      assert(it != action2NTindex.end());
+      int nt_index = it->second;
+      new_nt_count++;
+      new_stack_content = new_stack_content.push_back(ntermdict.Convert(nt_index));
+      Expression nt_embedding = lookup(*parser->hg, parser->p_nt, nt_index);
+      new_stack = new_stack.push_back(nt_embedding);
+      parser->stack_lstm.add_input(new_stack_state, nt_embedding);
+      new_stack_state = parser->stack_lstm.state();
+      new_is_open_paren = new_is_open_paren.push_back(nt_index);
+      if (!WORD_COMPLETION_IS_SHIFT && (prev_a == 'S' || prev_a == 'R')) {
+        was_word_completed = true;
+        word_completed = new_termc;
+      }
+    } else { // REDUCE
+      assert(wordid == 0);
+      --new_nopen_parens;
+      assert(stack.size() > 2); // dummy symbol means > 2 (not >= 2)
+      assert(stack_content.size() > 2 && stack.size() == stack_content.size());
+      // find what paren we are closing
+      int i = is_open_paren.size() - 1; //get the last thing on the stack
+      vector<int> is_open_paren_v = is_open_paren.values();
+      assert(is_open_paren_v.size() == is_open_paren.size());
+      while (is_open_paren_v[i] < 0) {
+        --i;
+        assert(i >= 0);
+      } //iteratively decide whether or not it's a non-terminal
+      Expression nonterminal = lookup(*parser->hg, parser->p_ntup, is_open_paren_v[i]);
+      int nchildren = is_open_paren_v.size() - i - 1;
+      assert(nchildren > 0);
+      //cerr << "  number of children to reduce: " << nchildren << endl;
+      vector<Expression> children(nchildren);
+      parser->const_lstm_fwd.start_new_sequence();
+      parser->const_lstm_rev.start_new_sequence();
+
+      // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
+      // TO BE COMPOSED INTO A TREE EMBEDDING
+      string curr_word;
+      //cerr << "--------------------------------" << endl;
+      //cerr << "Now printing the children" << endl;
+      //cerr << "--------------------------------" << endl;
+      for (i = 0; i < nchildren; ++i) {
+        assert (new_stack_content.size() == new_stack.size());
+        children[i] = new_stack.back();
+        new_stack = new_stack.pop_back();
+        new_stack_state = parser->stack_lstm.head_of(new_stack_state);
+        new_is_open_paren = new_is_open_paren.pop_back();
+        curr_word = new_stack_content.back();
+        //cerr << "At the back of the stack (supposed to be one of the children): " << curr_word << endl;
+        new_stack_content = new_stack_content.pop_back();
+      }
+      assert (new_stack_content.size() == new_stack.size());
+      //cerr << "Doing REDUCE operation" << endl;
+      new_is_open_paren = new_is_open_paren.pop_back(); // nt symbol
+      new_stack = new_stack.pop_back(); // nonterminal dummy
+      new_stack_state = parser->stack_lstm.head_of(new_stack_state); // nt symbol
+      curr_word = new_stack_content.back();
+      //cerr << "--------------------------------" << endl;
+      //cerr << "At the back of the stack (supposed to be the non-terminal symbol) : " << curr_word << endl;
+      new_stack_content = new_stack_content.pop_back();
+      assert (new_stack.size() == new_stack_content.size());
+      //cerr << "Done reducing" << endl;
+
+      // BUILD TREE EMBEDDING USING BIDIR LSTM
+      parser->const_lstm_fwd.add_input(nonterminal);
+      parser->const_lstm_rev.add_input(nonterminal);
+      for (i = 0; i < nchildren; ++i) {
+        parser->const_lstm_fwd.add_input(children[i]);
+        parser->const_lstm_rev.add_input(children[nchildren - i - 1]);
+      }
+      Expression cfwd = parser->const_lstm_fwd.back();
+      Expression crev = parser->const_lstm_rev.back();
+      if (parser->apply_dropout) {
+        cfwd = dropout(cfwd, DROPOUT);
+        crev = dropout(crev, DROPOUT);
+      }
+      Expression c = concatenate({cfwd, crev});
+      Expression composed = rectify(affine_transform({parser->cbias, parser->cW, c}));
+      parser->stack_lstm.add_input(new_stack_state, composed);
+      new_stack_state = parser->stack_lstm.state();
+      new_stack = new_stack.push_back(composed);
+      new_stack_content = new_stack_content.push_back(curr_word);
+      //cerr << curr_word << endl;
+      new_is_open_paren = new_is_open_paren.push_back(-1); // we just closed a paren at this position
+      if (new_stack.size() <= 2) {
+        was_word_completed = true;
+        word_completed = new_termc;
+      }
+    }
+
+    new_prev_a = ac;
+
+    // todo: check that these arguments are all being updated properly
+    return std::make_shared<ParserState>(
+            parser,
+            new_action_state,
+            new_term_state,
+            new_stack_state,
+            new_terms,
+            new_stack,
+            new_stack_content,
+            new_is_open_paren,
+            new_nt_count,
+            new_cons_nt_count,
+            new_nopen_parens,
+            new_prev_a,
+            new_termc,
+            action_count + 1,
+            action
+    );
+    /*
+    if (was_word_completed) {
+      Expression e_cum_neglogprob = -sum(log_probs);
+      double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
+      cerr << "gold nlp after " << word_completed << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
+      for (unsigned i = 0; i < log_probs.size(); i++) {
+        cerr << as_scalar(log_probs[i].value()) << " ";
+      }
+      cerr << endl;
+      print_parse(results, sent);
+    }
+    */
+
+  }
+
+  void finish_sentence() override {
+    assert(stack.size() == 2); // guard symbol, root
+  }
+
+  unsigned term_count() override {
+    return termc;
+  }
+};
+
+struct EnsembledParserState : public AbstractParserState {
+  const EnsembledParser* parser;
+  const vector<std::shared_ptr<AbstractParserState>> states;
+  unsigned N_parsers;
+
+  explicit EnsembledParserState(const EnsembledParser* parser, vector<std::shared_ptr<AbstractParserState>> states):
+          parser(parser), states(states) {
+    assert(!states.empty());
+    N_parsers = states.size();
   }
 
   bool is_finished() override {
-    return parsers.front()->is_finished();
+    return states.front()->is_finished();
   }
 
   vector<unsigned int> get_valid_actions() override {
-    return parsers.front()->get_valid_actions();
+    return states.front()->get_valid_actions();
   }
 
   pair<Expression, Expression> get_action_log_probs_and_next_word_log_prob(const vector<unsigned>& valid_actions, unsigned next_word, bool get_next_word) override {
     vector<Expression> all_log_probs;
     vector<Expression> all_next_word_log_probs;
-    for (const std::shared_ptr<ParserBuilder>& parser : parsers) {
-      auto tpl = parser->get_action_log_probs_and_next_word_log_prob(valid_actions, next_word, get_next_word);
+    for (const std::shared_ptr<AbstractParserState>& state : states) {
+      auto tpl = state->get_action_log_probs_and_next_word_log_prob(valid_actions, next_word, get_next_word);
       all_log_probs.push_back(tpl.first);
       all_next_word_log_probs.push_back(tpl.second);
     }
     Expression combined_log_probs;
     Expression combined_next_word_log_prob;
-    switch (combine_type) {
-      case CombineType::sum: {
+    switch (parser->combine_type) {
+      case EnsembledParser::CombineType::sum: {
         Expression cwise_max = all_log_probs.front();
         for (auto it = all_log_probs.begin() + 1; it != all_log_probs.end(); ++it)
           cwise_max = max(cwise_max, *it);
@@ -1883,32 +2030,34 @@ struct EnsembledParser: public AbstractParser {
         for (const Expression& log_probs : all_log_probs)
           exp_log_probs.push_back(exp(log_probs) - cwise_max);
         combined_log_probs = log_softmax(log(sum(exp_log_probs)) + cwise_max, valid_actions);
-        combined_next_word_log_prob = logsumexp(all_next_word_log_probs) - log(parsers.size());
+        combined_next_word_log_prob = logsumexp(all_next_word_log_probs) - log(N_parsers);
         break;
       }
-      case CombineType::product:
+      case EnsembledParser::CombineType::product:
         combined_log_probs = log_softmax(sum(all_log_probs), valid_actions);
         combined_next_word_log_prob = sum(all_next_word_log_probs);
         break;
-      case CombineType::product_unnormed:
+      case EnsembledParser::CombineType::product_unnormed:
         combined_log_probs = sum(all_log_probs);
         combined_next_word_log_prob = sum(all_next_word_log_probs);
     }
     return pair<Expression,Expression>(combined_log_probs, combined_next_word_log_prob);
   };
 
-  void perform_action(const unsigned action, unsigned wordid) override {
-    for (const std::shared_ptr<ParserBuilder>& parser : parsers)
-      parser->perform_action(action, wordid);
+  std::shared_ptr<AbstractParserState> perform_action(const unsigned action, unsigned wordid) override {
+    vector<std::shared_ptr<AbstractParserState>> new_states;
+    for (const std::shared_ptr<AbstractParserState>& state : states)
+      new_states.push_back(state->perform_action(action, wordid));
+    return std::make_shared<EnsembledParserState>(parser, new_states);
   }
 
   virtual void finish_sentence() override {
-    for (const std::shared_ptr<ParserBuilder>& parser : parsers)
-      parser->finish_sentence();
+    for (const std::shared_ptr<AbstractParserState>& state : states)
+      state->finish_sentence();
   }
 
   virtual unsigned int term_count() override {
-    return parsers.front()->term_count();
+    return states.front()->term_count();
   }
 };
 
@@ -2472,14 +2621,14 @@ int main(int argc, char** argv) {
         abstract_parser->abstract_log_prob_parser(&hg, sentence, actions, &right, true, false);
         lp = as_scalar(hg.incremental_forward());
 
-        //cerr << lp << endl;
+        cerr << lp << endl;
 
         /*
         parser.log_prob_parser(&hg, sentence, actions, &right, true, false);
         double unabs_lp = as_scalar(hg.incremental_forward());
         cerr << lp << " " << unabs_lp << endl;
         assert(lp == unabs_lp);
-        */
+         */
       }
       llh += lp;
     }
