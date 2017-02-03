@@ -205,6 +205,7 @@ struct AbstractParserState {
   virtual std::shared_ptr<AbstractParserState> perform_action(const unsigned action, unsigned wordid) = 0;
   virtual void finish_sentence() = 0;
   virtual unsigned term_count() = 0;
+  virtual bool word_completed() = 0;
 };
 
 struct AbstractParser {
@@ -452,6 +453,146 @@ struct AbstractParser {
 
     return completed_actions_and_nlp;
   }
+
+  vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam_within_word(
+          ComputationGraph* hg,
+          const parser::Sentence& sent,
+          unsigned beam_size,
+          int beam_filter_at_word_size = -1
+  ) {
+    if (beam_filter_at_word_size < 0)
+      beam_filter_at_word_size = beam_size;
+    //cerr << "beam filter at word size:" << beam_filter_at_word_size << endl;
+    struct BeamItem {
+      explicit BeamItem(std::shared_ptr<AbstractParserState> state, unsigned last_action, double score) :
+              state(state), last_action(last_action), score(score)  {}
+      std::shared_ptr<AbstractParserState> state;
+      unsigned last_action;
+      double score;
+    };
+
+    struct SuccessorItem {
+      explicit SuccessorItem(Stack<BeamItem> stack_item, unsigned action, unsigned word, double total_score) :
+              stack_item(stack_item), action(action), word(word), total_score(total_score) {}
+      Stack<BeamItem> stack_item;
+      unsigned action;
+      unsigned word;
+      double total_score;
+    };
+
+    bool is_evaluation = false;
+    bool build_training_graph = false;
+    bool apply_dropout = false;
+
+    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, is_evaluation, apply_dropout);
+    vector<unsigned> results;
+
+    vector<Stack<BeamItem>> completed;
+    vector<Stack<BeamItem>> beam;
+
+    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, 0.0)));
+
+    for (unsigned current_termc = 0; current_termc < sent.size(); current_termc++) {
+      completed.clear();
+      while (completed.size() < beam_size && !beam.empty()) {
+        // current_stack_item, action, wordid, total_score
+        //vector<tuple<Stack<BeamItem>, unsigned, unsigned, double>> successors;
+        vector<SuccessorItem> successors;
+
+        while (!beam.empty()) {
+          Stack<BeamItem> current_stack_item = beam.back();
+          beam.pop_back();
+
+          std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
+          vector<unsigned> model_valid_actions = current_parser_state->get_valid_actions(false);
+          vector<unsigned> decode_valid_actions = current_parser_state->get_valid_actions(true);
+
+          bool has_next_word = current_parser_state->term_count() < sent.size();
+          if (has_next_word)
+            assert(sent.raw[current_parser_state->term_count()] >= 0);
+          unsigned next_word = has_next_word ? sent.raw[current_parser_state->term_count()] : 0;
+
+          pair<Expression, Expression> adiste_and_next_word_log_prob = current_parser_state->get_action_log_probs_and_next_word_log_prob(
+                  model_valid_actions, next_word, has_next_word);
+          vector<float> adist = as_vector(adiste_and_next_word_log_prob.first.value());
+
+          for (unsigned action: decode_valid_actions) {
+            double action_score = adist[action];
+            //cerr << action << ":";
+
+            const string &a = adict.Convert(action);
+            unsigned wordid = 0;
+            if (a[0] == 'S') {
+              double next_word_log_prob_v = as_scalar(adiste_and_next_word_log_prob.second.value());
+              assert(has_next_word);
+              wordid = next_word;
+              action_score += next_word_log_prob_v;
+            }
+            //cerr << action_score << " ";
+            double total_score = current_stack_item.back().score + action_score;
+            successors.push_back(
+                    SuccessorItem(current_stack_item, action, wordid, total_score)
+                    //tuple<Stack<BeamItem>, unsigned, unsigned, double>(current_stack_item, action, wordid, total_score)
+            );
+          }
+          //cerr << endl;
+        }
+
+        unsigned num_pruned_successors = std::min(beam_size, static_cast<unsigned>(successors.size()));
+        partial_sort(successors.begin(),
+                     successors.begin() + num_pruned_successors,
+                     successors.end(),
+                     [](const SuccessorItem &t1, const SuccessorItem &t2) {
+                       //[](const std::tuple<Stack<BeamItem>, unsigned, unsigned, double>& t1, const std::tuple<Stack<BeamItem>, unsigned, unsigned, double>& t2) {
+                       return t1.total_score > t2.total_score; // sort in descending order by total score
+                       //return get<3>(t1) > get<3>(t2); // sort in descending order by total score
+                     });
+        while (successors.size() > num_pruned_successors)
+          successors.pop_back();
+
+        for (auto &successor : successors) {
+          std::shared_ptr<AbstractParserState> current_parser_state = successor.stack_item.back().state;
+          std::shared_ptr<AbstractParserState> successor_parser_state = current_parser_state->perform_action(
+                  successor.action, successor.word);
+          Stack<BeamItem> successor_stack_item = successor.stack_item.push_back(
+                  BeamItem(successor_parser_state,
+                           successor.action,
+                           successor.total_score)
+          );
+          if (successor_parser_state->word_completed())
+            completed.push_back(successor_stack_item);
+          else
+            beam.push_back(successor_stack_item);
+        }
+      }
+      sort(completed.begin(), completed.end(), [](const Stack<BeamItem>& t1, const Stack<BeamItem>& t2) {
+        return t1.back().score > t2.back().score; // sort in descending order by total score
+      });
+
+      beam.clear();
+      // keep around a larger completion list if we're at the end of the sentence
+      unsigned num_pruned_completion = std::min(current_termc < sent.size() - 1 ? beam_filter_at_word_size : beam_size, static_cast<unsigned>(completed.size()));
+      std::copy(completed.begin(), completed.begin() + std::min(num_pruned_completion, (unsigned) completed.size()), std::back_inserter(beam));
+    }
+
+
+    vector<pair<vector<unsigned>, double>> completed_actions_and_nlp;
+    for (const auto & completed_stack_item: completed) {
+      completed_stack_item.back().state->finish_sentence();
+      Stack<BeamItem> stack_item = completed_stack_item;
+      double nlp = - stack_item.back().score;
+      vector<unsigned> actions;
+      while (stack_item.back().last_action != START_OF_SENTENCE_ACTION) {
+        actions.push_back(stack_item.back().last_action);
+        stack_item = stack_item.pop_back();
+      }
+      reverse(actions.begin(), actions.end());
+      completed_actions_and_nlp.push_back(pair<vector<unsigned>, double>(actions, nlp));
+    }
+
+    return completed_actions_and_nlp;
+  }
+
 };
 
 struct ParserState;
@@ -649,6 +790,8 @@ struct ParserBuilder : public AbstractParser {
     unsigned action_count = 0;
     unsigned action = START_OF_SENTENCE_ACTION ;
 
+    bool was_word_completed = false;
+
     return std::static_pointer_cast<AbstractParserState>(
             std::make_shared<ParserState>(
                     this,
@@ -664,6 +807,7 @@ struct ParserBuilder : public AbstractParser {
                     nopen_parens,
                     prev_a,
                     termc,
+                    was_word_completed,
                     action_count,
                     action
             )
@@ -1879,6 +2023,7 @@ struct ParserState : public AbstractParserState {
           int nopen_parens,
           char prev_a,
           unsigned termc,
+          bool was_word_completed,
           unsigned action_count,
           unsigned action
   ) : parser(parser),
@@ -1894,6 +2039,7 @@ struct ParserState : public AbstractParserState {
       nopen_parens(nopen_parens),
       prev_a(prev_a),
       termc(termc),
+      was_word_completed(was_word_completed),
       action_count(action_count),
       action(action)
   {}
@@ -1916,6 +2062,8 @@ struct ParserState : public AbstractParserState {
   const char prev_a = '0';
   const unsigned termc = 0;
 
+  const bool was_word_completed = false;
+
   const unsigned action_count;
   const unsigned action;
 
@@ -1923,6 +2071,10 @@ struct ParserState : public AbstractParserState {
     //cerr << "stack.size() " << stack.size() << endl;
     //cerr << "termc " << termc << endl;
     return stack.size() == 2 && termc > 0;
+  }
+
+  bool word_completed() override {
+    return was_word_completed;
   }
 
   vector<unsigned> get_valid_actions(bool for_decode) override {
@@ -2044,7 +2196,7 @@ struct ParserState : public AbstractParserState {
       if (WORD_COMPLETION_IS_SHIFT) {
         was_word_completed = (new_termc < parser->sent_length);
         word_completed = new_termc;
-      } else if (new_prev_a == 'S' || new_prev_a == 'R') {
+      } else if (prev_a == 'S' || prev_a == 'R') {
         was_word_completed = true;
         word_completed = new_termc - 1;
       }
@@ -2161,22 +2313,10 @@ struct ParserState : public AbstractParserState {
             new_nopen_parens,
             new_prev_a,
             new_termc,
+            was_word_completed,
             action_count + 1,
             action
     );
-    /*
-    if (was_word_completed) {
-      Expression e_cum_neglogprob = -sum(log_probs);
-      double cum_neglogprob = as_scalar(e_cum_neglogprob.value());
-      cerr << "gold nlp after " << word_completed << "[" << log_probs.size() << "]: \t" << cum_neglogprob << endl;
-      for (unsigned i = 0; i < log_probs.size(); i++) {
-        cerr << as_scalar(log_probs[i].value()) << " ";
-      }
-      cerr << endl;
-      print_parse(results, sent);
-    }
-    */
-
   }
 
   void finish_sentence() override {
@@ -2201,6 +2341,10 @@ struct EnsembledParserState : public AbstractParserState {
 
   bool is_finished() override {
     return states.front()->is_finished();
+  }
+
+  bool word_completed() override {
+    return states.front()->word_completed();
   }
 
   vector<unsigned int> get_valid_actions(bool for_decode) override {
@@ -2689,20 +2833,17 @@ int main(int argc, char** argv) {
       {
         ComputationGraph hg;
         // greedy predict
-        /*
+        vector<pair<vector<unsigned>, double>> beam;
         if (conf.count("beam_within_word"))
-          pred = abstract_parser->log_prob_parser_beam_within_word(&hg,
-                                                         sentence,
-                                                         conf["decode_beam_size"].as<unsigned>(),
-                                                         conf["decode_beam_filter_at_word_size"].as<int>());
+          beam = abstract_parser->abstract_log_prob_parser_beam_within_word(&hg,
+                                                                            sentence,
+                                                                            conf["decode_beam_size"].as<unsigned>(),
+                                                                            conf["decode_beam_filter_at_word_size"].as<int>());
         else
-         */
-        {
-          vector<pair<vector<unsigned>, double>> beam = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
-          cerr << "beam size: " << beam.size() << endl;
-          pred = beam[0].first;
-          pred_nlp = beam[0].second;
-        }
+          beam = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
+        //cerr << "beam size: " << beam.size() << endl;
+        pred = beam[0].first;
+        pred_nlp = beam[0].second;
         //pred_nlp = as_scalar(hg.incremental_forward());
       }
       vector<int> pred_int = vector<int>(pred.begin(), pred.end());

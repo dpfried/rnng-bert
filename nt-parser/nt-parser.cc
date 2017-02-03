@@ -2059,6 +2059,14 @@ int main(int argc, char** argv) {
       if (beam_size > 1) {
         auto beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
         result_and_nlp = beam_results[0];
+        //cerr << beam_results.size() << " ";
+        //cerr << result_and_nlp.second << endl;
+        /*
+        abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(result_and_nlp.first.begin(), result_and_nlp.first.end()), &right, true);
+        double rescore_nlp = as_scalar(hg.incremental_forward());
+        cerr << result_and_nlp.second << " " << rescore_nlp << endl;
+        assert(abs(result_and_nlp.second - rescore_nlp) < 1e-3);
+         */
       } else {
         vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(), &right, true);
         double nlp = as_scalar(hg.incremental_forward());
