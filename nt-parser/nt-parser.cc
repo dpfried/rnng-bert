@@ -1524,7 +1524,7 @@ struct EnsembledParserState : public AbstractParserState {
           cwise_max = max(cwise_max, *it);
         vector <Expression> exp_log_probs;
         for (const Expression& log_probs : all_log_probs)
-          exp_log_probs.push_back(exp(log_probs) - cwise_max);
+          exp_log_probs.push_back(exp(log_probs - cwise_max));
         combined_log_probs = log(sum(exp_log_probs)) + cwise_max;
         break;
       }
@@ -2059,8 +2059,10 @@ int main(int argc, char** argv) {
       if (beam_size > 1) {
         auto beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
         result_and_nlp = beam_results[0];
-        //cerr << beam_results.size() << " ";
-        //cerr << result_and_nlp.second << endl;
+        /*
+        cerr << beam_results.size() << " ";
+        cerr << result_and_nlp.second << endl;
+        */
         /*
         abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(result_and_nlp.first.begin(), result_and_nlp.first.end()), &right, true);
         double rescore_nlp = as_scalar(hg.incremental_forward());

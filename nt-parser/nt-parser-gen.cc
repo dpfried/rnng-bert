@@ -2368,7 +2368,7 @@ struct EnsembledParserState : public AbstractParserState {
           cwise_max = max(cwise_max, *it);
         vector<Expression> exp_log_probs;
         for (const Expression& log_probs : all_log_probs)
-          exp_log_probs.push_back(exp(log_probs) - cwise_max);
+          exp_log_probs.push_back(exp(log_probs - cwise_max));
         combined_log_probs = log_softmax(log(sum(exp_log_probs)) + cwise_max, valid_actions);
         combined_next_word_log_prob = logsumexp(all_next_word_log_probs) - log(N_parsers);
         break;
