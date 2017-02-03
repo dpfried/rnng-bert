@@ -200,7 +200,7 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
 
 struct AbstractParserState {
   virtual bool is_finished() = 0;
-  virtual vector<unsigned> get_valid_actions() = 0;
+  virtual vector<unsigned> get_valid_actions(bool for_decode) = 0;
   virtual pair<Expression, Expression> get_action_log_probs_and_next_word_log_prob(const vector<unsigned>& valid_actions, unsigned next_word, bool get_next_word) = 0;
   virtual std::shared_ptr<AbstractParserState> perform_action(const unsigned action, unsigned wordid) = 0;
   virtual void finish_sentence() = 0;
@@ -236,7 +236,8 @@ struct AbstractParser {
     vector<unsigned> results;
 
     while (!state->is_finished()) {
-      vector<unsigned> current_valid_actions = state->get_valid_actions();
+      // get all generative model valid actions, will later constrain decode
+      vector<unsigned> current_valid_actions = state->get_valid_actions(false);
       bool has_next_word = state->term_count() < sent.size();
       if (has_next_word)
         assert(sent.raw[state->term_count()] >= 0); // for int -> unsigned conversion
@@ -308,6 +309,149 @@ struct AbstractParser {
     if (sample) cerr << "\n";
     return results;
   }
+
+  vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam(
+          ComputationGraph* hg,
+          const parser::Sentence& sent,
+          unsigned beam_size
+  ) {
+    struct BeamItem {
+      explicit BeamItem(std::shared_ptr<AbstractParserState> state, unsigned last_action, double score) :
+              state(state), last_action(last_action), score(score)  {}
+      std::shared_ptr<AbstractParserState> state;
+      unsigned last_action;
+      double score;
+    };
+
+    struct SuccessorItem {
+      explicit SuccessorItem(Stack<BeamItem> stack_item, unsigned action, unsigned word, double total_score) :
+              stack_item(stack_item), action(action), word(word), total_score(total_score) {}
+      Stack<BeamItem> stack_item;
+      unsigned action;
+      unsigned word;
+      double total_score;
+    };
+
+    bool is_evaluation = false;
+    bool build_training_graph = false;
+    bool apply_dropout = false;
+
+    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, is_evaluation, apply_dropout);
+    vector<unsigned> results;
+
+    vector<Stack<BeamItem>> completed;
+    vector<Stack<BeamItem>> beam;
+
+    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, 0.0)));
+
+    unsigned action_count = 0;
+    while (completed.size() < beam_size && !beam.empty()) {
+      action_count += 1;
+      // current_stack_item, action, wordid, total_score
+      //vector<tuple<Stack<BeamItem>, unsigned, unsigned, double>> successors;
+      vector<SuccessorItem> successors;
+
+      while (!beam.empty()) {
+        Stack<BeamItem> current_stack_item = beam.back();
+        beam.pop_back();
+
+        std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
+        vector<unsigned> model_valid_actions = current_parser_state->get_valid_actions(false);
+        vector<unsigned> decode_valid_actions = current_parser_state->get_valid_actions(true);
+        /*
+        cerr << "model: ";
+        for (auto a: model_valid_actions)
+          cerr << a << " ";
+        cerr << endl;
+        cerr << "decode: ";
+        for (auto a: decode_valid_actions)
+          cerr << a << " ";
+        cerr << endl;
+         */
+
+        bool has_next_word = current_parser_state->term_count() < sent.size();
+        if (has_next_word)
+          assert(sent.raw[current_parser_state->term_count()] >= 0);
+        unsigned next_word = has_next_word ? sent.raw[current_parser_state->term_count()] : 0;
+
+        pair<Expression,Expression> adiste_and_next_word_log_prob = current_parser_state->get_action_log_probs_and_next_word_log_prob(model_valid_actions, next_word, has_next_word);
+        vector<float> adist = as_vector(adiste_and_next_word_log_prob.first.value());
+
+        for (unsigned action: decode_valid_actions) {
+          double action_score = adist[action];
+          //cerr << action << ":";
+
+          const string &a = adict.Convert(action);
+          unsigned wordid = 0;
+          if (a[0] == 'S') {
+            double next_word_log_prob_v = as_scalar(adiste_and_next_word_log_prob.second.value());
+            assert(has_next_word);
+            wordid = next_word;
+            action_score += next_word_log_prob_v;
+          }
+          //cerr << action_score << " ";
+          double total_score = current_stack_item.back().score + action_score;
+          successors.push_back(
+                  SuccessorItem(current_stack_item, action, wordid, total_score)
+                  //tuple<Stack<BeamItem>, unsigned, unsigned, double>(current_stack_item, action, wordid, total_score)
+          );
+        }
+        //cerr << endl;
+      }
+
+      unsigned num_pruned_successors = std::min(beam_size, static_cast<unsigned>(successors.size()));
+      partial_sort(successors.begin(),
+                   successors.begin() + num_pruned_successors,
+                   successors.end(),
+                   [](const SuccessorItem& t1, const SuccessorItem& t2) {
+                   //[](const std::tuple<Stack<BeamItem>, unsigned, unsigned, double>& t1, const std::tuple<Stack<BeamItem>, unsigned, unsigned, double>& t2) {
+                     return t1.total_score > t2.total_score; // sort in descending order by total score
+                     //return get<3>(t1) > get<3>(t2); // sort in descending order by total score
+                   });
+      while (successors.size() > num_pruned_successors)
+        successors.pop_back();
+
+      for (auto& successor : successors) {
+        std::shared_ptr<AbstractParserState> current_parser_state = successor.stack_item.back().state;
+        //std::shared_ptr<AbstractParserState> current_parser_state = get<0>(successor).back().state;
+        std::shared_ptr<AbstractParserState> successor_parser_state = current_parser_state->perform_action(successor.action, successor.word);
+        //std::shared_ptr<AbstractParserState> successor_parser_state = current_parser_state->perform_action(get<1>(successor), get<2>(successor));
+        Stack<BeamItem> successor_stack_item = successor.stack_item.push_back(
+        //Stack<BeamItem> successor_stack_item = get<0>(successor).push_back(
+                BeamItem(successor_parser_state,
+                         successor.action,
+                         //get<1>(successor),
+                         successor.total_score)
+                         //get<3>(successor))
+        );
+        if (successor_parser_state->is_finished())
+          completed.push_back(successor_stack_item);
+        else
+          beam.push_back(successor_stack_item);
+      }
+    }
+
+    sort(completed.begin(), completed.end(), [](const Stack<BeamItem>& t1, const Stack<BeamItem>& t2) {
+      return t1.back().score > t2.back().score; // sort in descending order by total score
+    });
+
+    vector<pair<vector<unsigned>, double>> completed_actions_and_nlp;
+    for (const auto & completed_stack_item: completed) {
+      completed_stack_item.back().state->finish_sentence();
+
+      Stack<BeamItem> stack_item = completed_stack_item;
+      double nlp = - stack_item.back().score;
+      vector<unsigned> actions;
+      while (stack_item.back().last_action != START_OF_SENTENCE_ACTION) {
+        actions.push_back(stack_item.back().last_action);
+        stack_item = stack_item.pop_back();
+      }
+      reverse(actions.begin(), actions.end());
+      completed_actions_and_nlp.push_back(pair<vector<unsigned>, double>(actions, nlp));
+    }
+
+    return completed_actions_and_nlp;
+  }
 };
 
 struct ParserState;
@@ -377,13 +521,15 @@ struct ParserBuilder : public AbstractParser {
     this->cfsm = cfsm;
   }
 
+  static const unsigned MAX_OPEN_NTS = 100;
+
 // checks to see if a proposed action is valid in discriminative models
   static bool IsActionForbidden_Generative(const string& a, char prev_a, unsigned tsize, unsigned ssize, unsigned nopen_parens) {
+    //cerr << "Generative " << a << " " << prev_a << " " << tsize << " " << ssize << " " << nopen_parens << endl;
     bool is_shift = (a[0] == 'S' && a[1]=='H');
     bool is_reduce = (a[0] == 'R' && a[1]=='E');
     bool is_nt = (a[0] == 'N');
     assert(is_shift || is_reduce || is_nt);
-    static const unsigned MAX_OPEN_NTS = 100;
     if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
     if (ssize == 1) {
       if (!is_nt) return true;
@@ -394,11 +540,47 @@ struct ParserBuilder : public AbstractParser {
     return false;
   }
 
+  static bool IsActionForbidden_GenerativeDecode(const string& a, char prev_a, unsigned tsize, unsigned ssize, unsigned nopen_parens, unsigned bsize, unsigned ncons_nt) {
+    //cerr << "GenerativeDecode " << a << " " << prev_a << " " << tsize << " " << ssize << " " << nopen_parens << " " << bsize << " " << ncons_nt << endl;
+    bool is_shift = (a[0] == 'S' && a[1]=='H');
+    bool is_reduce = (a[0] == 'R' && a[1]=='E');
+    bool is_nt = (a[0] == 'N');
+    assert(is_shift || is_reduce || is_nt);
+
+    if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
+    if (is_nt && ncons_nt >= MAX_CONS_NT) return true;
+
+    if (ssize == 1) {
+      if (!is_nt) return true;
+      return false;
+    }
+
+    if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+      // if a SHIFT has an implicit REDUCE, then only shift after an NT:
+      if (is_shift && prev_a != 'N') return true;
+    }
+
+    // be careful with top-level parens- you can only close them if you
+    // have fully processed the buffer
+    if (nopen_parens == 1 && bsize > 1) {
+      if (IMPLICIT_REDUCE_AFTER_SHIFT && is_shift) return true;
+      if (is_reduce) return true;
+    }
+
+    // you can't reduce after an NT action
+    if (is_reduce && prev_a == 'N') return true;
+    if (is_nt && bsize == 1) return true;
+    if (is_shift && bsize == 1) return true;
+    if (is_reduce && ssize < 3) return true;
+
+    return false;
+  }
+
   ComputationGraph* hg;
   bool apply_dropout;
   bool is_evaluation;
 
-  unsigned sent_length = 0;
+  unsigned sent_length;
 
   Expression pbias, S, A, T, cbias, p2a, abias, action_start, cW;
 
@@ -406,7 +588,7 @@ struct ParserBuilder : public AbstractParser {
     this->hg = hg;
     this->apply_dropout = apply_dropout;
     this->is_evaluation = is_evaluation;
-    sent_length = sent.size();
+    this->sent_length = sent.size();
 
     if (apply_dropout) {
       stack_lstm.set_dropout(DROPOUT);
@@ -1693,7 +1875,7 @@ struct ParserState : public AbstractParserState {
           Stack<string> stack_content,
           Stack<int> is_open_paren,
           unsigned nt_count,
-          unsigned const_nt_count,
+          unsigned cons_nt_count,
           int nopen_parens,
           char prev_a,
           unsigned termc,
@@ -1743,11 +1925,22 @@ struct ParserState : public AbstractParserState {
     return stack.size() == 2 && termc > 0;
   }
 
-  vector<unsigned> get_valid_actions() override {
+  vector<unsigned> get_valid_actions(bool for_decode) override {
+    unsigned bsize = parser->sent_length + 1 - termc; // pretend we have a buffer guard
+    //cerr << "bsize: " << bsize << endl;
+    //cerr << "for_decode: " << for_decode << endl;
     vector<unsigned> current_valid_actions;
     for (auto a: possible_actions) {
-      if (ParserBuilder::IsActionForbidden_Generative(adict.Convert(a), prev_a, terms.size(), stack.size(), nopen_parens))
-        continue;
+      if (for_decode) {
+        if (ParserBuilder::IsActionForbidden_GenerativeDecode(adict.Convert(a), prev_a, terms.size(), stack.size(),
+                                                        nopen_parens, bsize, cons_nt_count))
+          continue;
+      } else {
+        if (ParserBuilder::IsActionForbidden_Generative(adict.Convert(a), prev_a, terms.size(), stack.size(),
+                                                        nopen_parens))
+          continue;
+
+      }
       current_valid_actions.push_back(a);
     }
     return current_valid_actions;
@@ -1855,6 +2048,7 @@ struct ParserState : public AbstractParserState {
         was_word_completed = true;
         word_completed = new_termc - 1;
       }
+      new_cons_nt_count = 0;
     } else if (ac == 'N') { // NT
       assert(wordid == 0);
       ++new_nopen_parens;
@@ -1872,6 +2066,7 @@ struct ParserState : public AbstractParserState {
         was_word_completed = true;
         word_completed = new_termc;
       }
+      new_cons_nt_count += 1;
     } else { // REDUCE
       assert(wordid == 0);
       --new_nopen_parens;
@@ -1946,6 +2141,7 @@ struct ParserState : public AbstractParserState {
         was_word_completed = true;
         word_completed = new_termc;
       }
+      new_cons_nt_count = 0;
     }
 
     new_prev_a = ac;
@@ -2007,8 +2203,8 @@ struct EnsembledParserState : public AbstractParserState {
     return states.front()->is_finished();
   }
 
-  vector<unsigned int> get_valid_actions() override {
-    return states.front()->get_valid_actions();
+  vector<unsigned int> get_valid_actions(bool for_decode) override {
+    return states.front()->get_valid_actions(for_decode);
   }
 
   pair<Expression, Expression> get_action_log_probs_and_next_word_log_prob(const vector<unsigned>& valid_actions, unsigned next_word, bool get_next_word) override {
@@ -2086,7 +2282,7 @@ void signal_callback_handler(int signum) {
 }
 
 int main(int argc, char** argv) {
-  signal(SIGSEGV, signal_callback_handler);
+  //signal(SIGSEGV, signal_callback_handler);
   unsigned random_seed = cnn::Initialize(argc, argv);
 
   cerr << "COMMAND LINE:";
@@ -2491,19 +2687,23 @@ int main(int argc, char** argv) {
       vector<unsigned> pred;
       double pred_nlp;
       {
-        /* TODO: beam search
         ComputationGraph hg;
         // greedy predict
+        /*
         if (conf.count("beam_within_word"))
           pred = abstract_parser->log_prob_parser_beam_within_word(&hg,
                                                          sentence,
                                                          conf["decode_beam_size"].as<unsigned>(),
                                                          conf["decode_beam_filter_at_word_size"].as<int>());
         else
-          pred = abstract_parser->log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
-
-        pred_nlp = as_scalar(hg.incremental_forward());
-        */
+         */
+        {
+          vector<pair<vector<unsigned>, double>> beam = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
+          cerr << "beam size: " << beam.size() << endl;
+          pred = beam[0].first;
+          pred_nlp = beam[0].second;
+        }
+        //pred_nlp = as_scalar(hg.incremental_forward());
       }
       vector<int> pred_int = vector<int>(pred.begin(), pred.end());
       cout << "pred:\t";
