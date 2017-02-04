@@ -21,6 +21,7 @@ python add_dev_unk.py $train_dictionary $candidate_trees > $candidate_trees_unke
 
 build/nt-parser/nt-parser-gen \
   -x \
+  # todo: change for silver
   -T corpora/train_gen.oracle \
   --clusters clusters-train-berk.txt \
   --input_dim 256 \
