@@ -2973,6 +2973,8 @@ int main(int argc, char** argv) {
     double right = 0;
     double dwords = 0;
     for (unsigned sii = 0; sii < test_size; ++sii) {
+      if (sii % 100 == 0)
+        cerr << "\rrescoring sent " << sii << " / " << test_size;
       const auto &sentence = test_corpus.sents[sii];
       const vector<int> &actions = test_corpus.actions[sii];
       dwords += sentence.size();
@@ -2993,6 +2995,7 @@ int main(int argc, char** argv) {
       cout << sentence.size() << '\t' << lp << endl;
       llh += lp;
     }
+    cerr << "\r";
     cerr << "test     total -llh=" << llh << endl;
     cerr << "test ppl (per word)=" << exp(llh / dwords) << endl;
   }

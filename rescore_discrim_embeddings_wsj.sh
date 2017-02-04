@@ -7,12 +7,16 @@ discrim_oracle=${input_candidate_file}.rnng-discrim-oracle-fmt
 unindexed_output_file=${input_candidate_file}.unindexed-rnng-discrim-scores
 output_file=${input_candidate_file}.rnng-discrim-scores
 
+
 utils/cut-corpus.pl 3 $input_candidate_file > $candidate_trees
+
+# todo: when using silver, won't be train.dictionary
 python get_oracle.py corpora/train.dictionary $candidate_trees > $discrim_oracle
 
 build/nt-parser/nt-parser \
   --cnn-mem 1700 \
   -x \
+  # todo: change for silver
   -T corpora/train.oracle \
   -p $discrim_oracle \
   -C $candidate_trees \
