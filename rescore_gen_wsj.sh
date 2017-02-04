@@ -1,7 +1,9 @@
 #!/bin/bash
 
 input_candidate_file=$1
-gen_model=$2
+
+# epoch 121.761, ppl 106.772
+gen_model=${HOME}/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed3-pid1475.params.bin
 
 candidate_trees=${input_candidate_file}.rnng-gen-trees
 
