@@ -55,7 +55,7 @@ Device_CPU::Device_CPU(int mb_fwd, int mb_bwd, int mb_params, bool shared) :
 
   // this is the big memory allocation: the pools
 
-    cerr << "allocating memory for fwd/bwd/params" << mb_fwd << "/" << mb_bwd << "/" << mb_params << endl;
+    cerr << "allocating memory for fwd/bwd/params: " << mb_fwd << "/" << mb_bwd << "/" << mb_params << endl;
         
   //size_t byte_count = (size_t)mb << 20;
   fxs = new AlignedMemoryPool((size_t)mb_fwd << 20, mem); // memory for node values

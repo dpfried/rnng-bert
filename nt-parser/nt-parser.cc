@@ -1976,166 +1976,184 @@ int main(int argc, char** argv) {
     }
 
     bool sample = conf.count("samples") > 0;
-    ostringstream ptb_os;
-    if (conf.count("ptb_output_file")) {
-      ptb_os << conf["ptb_output_file"].as<string>();
-    } else {
-      ptb_os << "/tmp/parser_ptb_out." << getpid() << ".txt";
-    }
-    ofstream ptb_out(ptb_os.str().c_str());
+    bool output_beam_as_samples = conf.count("output_beam_as_samples") > 0;
+    bool output_candidate_trees = output_beam_as_samples || conf.count("samples_include_gold") || sample;
 
-    bool output_beam_as_samples = conf.count("output_beam_as_samples");
-    if (sample && output_beam_as_samples) {
-      cerr << "warning: outputting samples and the contents of the beam\n";
-    }
     unsigned beam_size = conf["beam_size"].as<unsigned>();
     unsigned test_size = test_corpus.size();
-    double right = 0;
-    auto t_start = chrono::high_resolution_clock::now();
-    const vector<int> actions;
-    vector<unsigned> n_distinct_samples;
-    for (unsigned sii = 0; sii < test_size; ++sii) {
-      const auto& sentence=test_corpus.sents[sii];
-      // TODO: this overrides dynet random seed, but should be ok if we're only sampling
-      cnn::rndeng->seed(sii);
-      set<vector<unsigned>> samples;
-      if (conf.count("samples_include_gold")) {
-        ComputationGraph hg;
-        vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg,sentence, test_corpus.actions[sii],&right,true);
-        double lp = as_scalar(hg.incremental_forward());
-        cout << sii << " ||| " << -lp << " |||";
-        vector<unsigned> converted_actions(test_corpus.actions[sii].begin(), test_corpus.actions[sii].end());
-        print_parse(converted_actions, sentence, false, cout);
-        ptb_out << sii << " ||| " << -lp << " |||";
-        print_parse(converted_actions, sentence, true, ptb_out);
-        samples.insert(converted_actions);
+
+    if (output_candidate_trees) {
+
+      if (sample && output_beam_as_samples) {
+        cerr << "warning: outputting samples and the contents of the beam\n";
       }
 
-      for (unsigned z = 0; z < N_SAMPLES; ++z) {
-        ComputationGraph hg;
-        vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg,sentence,actions,&right,sample,true); // TODO: fix ordering of sample and eval here
-        double lp = as_scalar(hg.incremental_forward());
-        cout << sii << " ||| " << -lp << " |||";
-        print_parse(result, sentence, false, cout);
-        ptb_out << sii << " ||| " << -lp << " |||";
-        print_parse(result, sentence, true, ptb_out);
-        samples.insert(result);
-      }
-
-      if (output_beam_as_samples) {
-        ComputationGraph hg;
-        auto beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
-        if (beam_results.size() < beam_size) {
-          cerr << "warning: only " << beam_results.size() << " parses found by beam search for sent " << sii << endl;
-        }
-        unsigned long num_results = beam_results.size();
-        for (unsigned long i = 0; i < beam_size; i++) {
-          unsigned long ix = std::min(i, num_results - 1);
-          pair<vector<unsigned>, double> result_and_nlp = beam_results[ix];
-          double lp = result_and_nlp.second;
-          cout << sii << " ||| " << -lp << " |||";
-          print_parse(result_and_nlp.first, sentence, false, cout);
-          ptb_out << sii << " ||| " << -lp << " |||";
-          print_parse(result_and_nlp.first, sentence, true, ptb_out);
-          samples.insert(result_and_nlp.first);
-        }
-      }
-
-      n_distinct_samples.push_back(samples.size());
-    }
-    double avg_distinct_samples = accumulate(n_distinct_samples.begin(), n_distinct_samples.end(), 0.0) / (double)  n_distinct_samples.size();
-    cerr << "avg distinct samples: " << avg_distinct_samples << endl;
-    ostringstream os;
-    os << "/tmp/parser_test_eval." << getpid() << ".txt";
-    const string pfx = os.str();
-    ofstream out(pfx.c_str());
-    t_start = chrono::high_resolution_clock::now();
-    for (unsigned sii = 0; sii < test_size; ++sii) {
-      const auto& sentence=test_corpus.sents[sii];
-      const vector<int>& actions=test_corpus.actions[sii];
-      ComputationGraph hg;
-      // greedy predict
-      pair<vector<unsigned>, double> result_and_nlp;
-      if (beam_size > 1) {
-        auto beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
-        result_and_nlp = beam_results[0];
-        /*
-        cerr << beam_results.size() << " ";
-        cerr << result_and_nlp.second << endl;
-        */
-        /*
-        abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(result_and_nlp.first.begin(), result_and_nlp.first.end()), &right, true);
-        double rescore_nlp = as_scalar(hg.incremental_forward());
-        cerr << result_and_nlp.second << " " << rescore_nlp << endl;
-        assert(abs(result_and_nlp.second - rescore_nlp) < 1e-3);
-         */
+      ostringstream ptb_os;
+      if (conf.count("ptb_output_file")) {
+        ptb_os << conf["ptb_output_file"].as<string>();
       } else {
-        vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(), &right, true);
-        double nlp = as_scalar(hg.incremental_forward());
-        result_and_nlp = pair<vector<unsigned>, double>(result, nlp);
-
-        /*
-        auto beam_result_and_nlp = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, 1);
-        double beam_nlp = beam_result_and_nlp[0].second;
-        vector<unsigned> beam_result = beam_result_and_nlp[0].first;
-
-        cerr << nlp << " " << beam_nlp << endl;
-        assert(abs(nlp - beam_nlp) < 1e-3);
-        assert(result == beam_result);
-         */
+        ptb_os << "/tmp/parser_ptb_out." << getpid() << ".txt";
       }
-      int ti = 0;
-      // TODO: convert to use print_parse
-      for (auto a : result_and_nlp.first) {
-        if (adict.Convert(a)[0] == 'N') {
-          out << '(' << ntermdict.Convert(action2NTindex.find(a)->second) << ' ';
-        } else if (adict.Convert(a)[0] == 'S') {
-          if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-            out << termdict.Convert(sentence.raw[ti++]) << ") ";
-          } else {
-            if (true) {
-              string preterminal = "XX";
-              out << '(' << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ") ";
-            } else { // use this branch to surpress preterminals
-              out << termdict.Convert(sentence.raw[ti++]) << ' ';
-            }
+      ofstream ptb_out(ptb_os.str().c_str());
+
+      double right = 0;
+      auto t_start = chrono::high_resolution_clock::now();
+      const vector<int> actions;
+      vector<unsigned> n_distinct_samples;
+      for (unsigned sii = 0; sii < test_size; ++sii) {
+        const auto &sentence = test_corpus.sents[sii];
+        // TODO: this overrides dynet random seed, but should be ok if we're only sampling
+        cnn::rndeng->seed(sii);
+        set<vector<unsigned>> samples;
+        if (conf.count("samples_include_gold")) {
+          ComputationGraph hg;
+          vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, test_corpus.actions[sii],
+                                                                              &right, true);
+          double lp = as_scalar(hg.incremental_forward());
+          cout << sii << " ||| " << -lp << " |||";
+          vector<unsigned> converted_actions(test_corpus.actions[sii].begin(), test_corpus.actions[sii].end());
+          print_parse(converted_actions, sentence, false, cout);
+          ptb_out << sii << " ||| " << -lp << " |||";
+          print_parse(converted_actions, sentence, true, ptb_out);
+          samples.insert(converted_actions);
+        }
+
+        for (unsigned z = 0; z < N_SAMPLES; ++z) {
+          ComputationGraph hg;
+          vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, actions, &right, sample,
+                                                                              true); // TODO: fix ordering of sample and eval here
+          double lp = as_scalar(hg.incremental_forward());
+          cout << sii << " ||| " << -lp << " |||";
+          print_parse(result, sentence, false, cout);
+          ptb_out << sii << " ||| " << -lp << " |||";
+          print_parse(result, sentence, true, ptb_out);
+          samples.insert(result);
+        }
+
+        if (output_beam_as_samples) {
+          ComputationGraph hg;
+          auto beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
+          if (beam_results.size() < beam_size) {
+            cerr << "warning: only " << beam_results.size() << " parses found by beam search for sent " << sii << endl;
           }
-        } else out << ") ";
+          unsigned long num_results = beam_results.size();
+          for (unsigned long i = 0; i < beam_size; i++) {
+            unsigned long ix = std::min(i, num_results - 1);
+            pair<vector<unsigned>, double> result_and_nlp = beam_results[ix];
+            double lp = result_and_nlp.second;
+            cout << sii << " ||| " << -lp << " |||";
+            print_parse(result_and_nlp.first, sentence, false, cout);
+            ptb_out << sii << " ||| " << -lp << " |||";
+            print_parse(result_and_nlp.first, sentence, true, ptb_out);
+            samples.insert(result_and_nlp.first);
+          }
+        }
+
+        n_distinct_samples.push_back(samples.size());
       }
-      out << endl;
-    }
-    auto t_end = chrono::high_resolution_clock::now();
-    out.close();
-    cerr << "Test output in " << pfx << endl;
-    //parser::EvalBResults res = parser::Evaluate("foo", pfx);
-    std::string evaluable_fname = pfx + "_evaluable.txt";
-    std::string evalbout_fname = pfx + "_evalbout.txt";
-	  std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > " + evaluable_fname;
-    const char* cmd=command.c_str();
-    system(cmd);
+      ptb_out.close();
 
-    std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" " + evaluable_fname + " > " + evalbout_fname; 
-    const char* cmd2=command2.c_str();
-
-    system(cmd2);
-
-    std::ifstream evalfile(evalbout_fname);
-    std::string lineS;
-    std::string brackstr="Bracketing FMeasure";
-    double newfmeasure=0.0;
-    std::string strfmeasure="";
-    bool found=0;
-    while (getline(evalfile, lineS) && !newfmeasure){
-      if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
-        //std::cout<<lineS<<"\n";
-        strfmeasure=lineS.substr(lineS.size()-5, lineS.size());
-        std::string::size_type sz;
-        newfmeasure = std::stod (strfmeasure,&sz);
-        //std::cout<<strfmeasure<<"\n";
-      }
+      double avg_distinct_samples = accumulate(n_distinct_samples.begin(), n_distinct_samples.end(), 0.0) /
+                                    (double) n_distinct_samples.size();
+      cerr << "avg distinct samples: " << avg_distinct_samples << endl;
     }
 
-    cerr<<"F1score: "<<newfmeasure<<"\n";
+    // shortcut: only do a test decode if we aren't outputting any candidate trees
+    if (!output_candidate_trees) {
+      ostringstream os;
+      os << "/tmp/parser_test_eval." << getpid() << ".txt";
+      const string pfx = os.str();
+      ofstream out(pfx.c_str());
+      double right = 0;
+      auto t_start = chrono::high_resolution_clock::now();
+      for (unsigned sii = 0; sii < test_size; ++sii) {
+        const auto &sentence = test_corpus.sents[sii];
+        const vector<int> &actions = test_corpus.actions[sii];
+        ComputationGraph hg;
+        // greedy predict
+        pair<vector<unsigned>, double> result_and_nlp;
+        if (beam_size > 1) {
+          auto beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
+          result_and_nlp = beam_results[0];
+          /*
+          cerr << beam_results.size() << " ";
+          cerr << result_and_nlp.second << endl;
+          */
+          /*
+          abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(result_and_nlp.first.begin(), result_and_nlp.first.end()), &right, true);
+          double rescore_nlp = as_scalar(hg.incremental_forward());
+          cerr << result_and_nlp.second << " " << rescore_nlp << endl;
+          assert(abs(result_and_nlp.second - rescore_nlp) < 1e-3);
+           */
+        } else {
+          vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(), &right,
+                                                                              true);
+          double nlp = as_scalar(hg.incremental_forward());
+          result_and_nlp = pair<vector<unsigned>, double>(result, nlp);
 
+          /*
+          auto beam_result_and_nlp = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, 1);
+          double beam_nlp = beam_result_and_nlp[0].second;
+          vector<unsigned> beam_result = beam_result_and_nlp[0].first;
+
+          cerr << nlp << " " << beam_nlp << endl;
+          assert(abs(nlp - beam_nlp) < 1e-3);
+          assert(result == beam_result);
+           */
+        }
+        int ti = 0;
+        // TODO: convert to use print_parse
+        for (auto a : result_and_nlp.first) {
+          if (adict.Convert(a)[0] == 'N') {
+            out << '(' << ntermdict.Convert(action2NTindex.find(a)->second) << ' ';
+          } else if (adict.Convert(a)[0] == 'S') {
+            if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+              out << termdict.Convert(sentence.raw[ti++]) << ") ";
+            } else {
+              if (true) {
+                string preterminal = "XX";
+                out << '(' << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ") ";
+              } else { // use this branch to surpress preterminals
+                out << termdict.Convert(sentence.raw[ti++]) << ' ';
+              }
+            }
+          } else out << ") ";
+        }
+        out << endl;
+      }
+      auto t_end = chrono::high_resolution_clock::now();
+      out.close();
+      cerr << "Test output in " << pfx << endl;
+      //parser::EvalBResults res = parser::Evaluate("foo", pfx);
+      std::string evaluable_fname = pfx + "_evaluable.txt";
+      std::string evalbout_fname = pfx + "_evalbout.txt";
+      std::string command = "python remove_dev_unk.py " + corpus.devdata + " " + pfx + " > " + evaluable_fname;
+      const char *cmd = command.c_str();
+      system(cmd);
+
+      std::string command2 =
+              "EVALB/evalb -p EVALB/COLLINS.prm " + corpus.devdata + " " + evaluable_fname + " > " + evalbout_fname;
+      const char *cmd2 = command2.c_str();
+
+      system(cmd2);
+
+      std::ifstream evalfile(evalbout_fname);
+      std::string lineS;
+      std::string brackstr = "Bracketing FMeasure";
+      double newfmeasure = 0.0;
+      std::string strfmeasure = "";
+      bool found = 0;
+      while (getline(evalfile, lineS) && !newfmeasure) {
+        if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
+          //std::cout<<lineS<<"\n";
+          strfmeasure = lineS.substr(lineS.size() - 5, lineS.size());
+          std::string::size_type sz;
+          newfmeasure = std::stod(strfmeasure, &sz);
+          //std::cout<<strfmeasure<<"\n";
+        }
+      }
+
+      cerr << "F1score: " << newfmeasure << "\n";
+    }
   }
 }

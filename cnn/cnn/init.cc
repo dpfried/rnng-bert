@@ -38,7 +38,7 @@ unsigned Initialize(int& argc, char**& argv, unsigned random_seed, bool shared_p
   cerr << "[cnn] initializing CUDA\n";
   gpudevices = Initialize_GPU(argc, argv);
 #endif
-  string mem_descriptor;
+  string mem_descriptor = "512,512,512";
   //unsigned long num_mb = 512UL;
   int argi = 1;
   while(argi < argc) {

@@ -100,6 +100,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("words,w", po::value<string>(), "Pretrained word embeddings")
         ("greedy_decode_dev,g", "greedy decode")
         ("dev_output_file,O", po::value<string>(), "write decoded parse trees to this file")
+        ("dev_beam_file", po::value<string>(), "write the beam at the end of decoding to this file")
         ("beam_within_word", "greedy decode within word")
         ("ignore_word_in_greedy,i", "greedy decode")
         ("word_completion_is_shift,s", "consider a word completed when it's shifted for beaming and print purposes")
@@ -2813,6 +2814,21 @@ int main(int argc, char** argv) {
     const string pfx = os.str();
     cerr << "writing to " << pfx << endl;
     ofstream out(pfx.c_str());
+
+
+    ostringstream beam_os;
+    if (conf.count("dev_beam_file")) {
+      beam_os << conf["dev_beam_file"].as<string>();
+    } else {
+      beam_os << "/tmp/parser_dev_beam." << getpid() << ".txt";
+    }
+    if (block_count > 0) {
+      beam_os << "_block-" << block_num;
+    }
+    const string beam_pfx = beam_os.str();
+    cerr << "writing beam to " << beam_pfx << endl;
+    ofstream beam_out(beam_pfx.c_str());
+
     auto t_start = chrono::high_resolution_clock::now();
     for (unsigned sii = start_index; sii < stop_index; ++sii) {
       auto t_sentence_start =  chrono::high_resolution_clock::now();
@@ -2830,10 +2846,10 @@ int main(int argc, char** argv) {
       }
       vector<unsigned> pred;
       double pred_nlp;
+      vector<pair<vector<unsigned>, double>> beam;
       {
         ComputationGraph hg;
         // greedy predict
-        vector<pair<vector<unsigned>, double>> beam;
         if (conf.count("beam_within_word"))
           beam = abstract_parser->abstract_log_prob_parser_beam_within_word(&hg,
                                                                             sentence,
@@ -2863,10 +2879,15 @@ int main(int argc, char** argv) {
       cout << chrono::duration_cast<chrono::milliseconds>(t_sentence_end - t_sentence_start).count() / 1000.0 << " seconds" << endl;
       // print decode to file
       print_parse(pred, sentence, true, out);
-      double lp = 0;
+      // print beam to file
+      for (auto beam_pred_nlp: beam) {
+        beam_out << sii << " ||| " << -beam_pred_nlp.second << " ||| ";
+        print_parse(beam_pred_nlp.first, sentence, true, beam_out);
+      }
     }
     auto t_end = chrono::high_resolution_clock::now();
     out.close();
+    beam_out.close();
     if (block_count == 0) { // if we've divided up into blocks, won't have a full list of decodes to compare against
       cerr << "Test output in " << pfx << endl;
       //parser::EvalBResults res = parser::Evaluate("foo", pfx);

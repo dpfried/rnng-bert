@@ -39,6 +39,19 @@ def get_tags_tokens_lowercase(line):
         output_lowercase.append(terminal_split[1].lower())
     return [output_tags, output_tokens, output_lowercase]
 
+def remove_dev_unk(gold_line, sys_line):
+    gold_tags, gold_tokens, gold_lowercase = get_tags_tokens_lowercase(gold_line)
+    sys_tags, sys_tokens, sys_lowercase = get_tags_tokens_lowercase(sys_line)
+    assert len(gold_tokens) == len(gold_tags)
+    assert len(gold_tokens) == len(gold_lowercase)
+    assert len(gold_tokens) == len(sys_tokens)
+    assert len(sys_tokens) == len(sys_tags)
+    assert len(sys_tags) == len(sys_lowercase)
+    output_string = sys_line
+    for gold_token, gold_tag, sys_token in zip(gold_tokens, gold_tags, sys_tokens):
+        output_string = output_string.replace('(XX ' + sys_token + ')', '(' + gold_tag + ' ' + gold_token + ')', 1)
+    return output_string
+
 def main():
     if len(sys.argv) != 3:
         raise NotImplementedError('Program only takes two arguments: the gold dev set and the output file dev set')
@@ -50,16 +63,7 @@ def main():
     sys_file.close()
     assert len(gold_lines) == len(sys_lines)
     for gold_line, sys_line in zip(gold_lines, sys_lines):
-        gold_tags, gold_tokens, gold_lowercase = get_tags_tokens_lowercase(gold_line)
-        sys_tags, sys_tokens, sys_lowercase = get_tags_tokens_lowercase(sys_line)
-        assert len(gold_tokens) == len(gold_tags)
-        assert len(gold_tokens) == len(gold_lowercase)
-        assert len(gold_tokens) == len(sys_tokens)
-        assert len(sys_tokens) == len(sys_tags)
-        assert len(sys_tags) == len(sys_lowercase)
-        output_string = sys_line
-        for gold_token, gold_tag, sys_token in zip(gold_tokens, gold_tags, sys_tokens):
-            output_string = output_string.replace('(XX ' + sys_token + ')', '(' + gold_tag + ' ' + gold_token + ')', 1)
+        output_string = remove_dev_unk(gold_line, sys_line)
         print output_string.rstrip()
 
 if __name__ == '__main__':
