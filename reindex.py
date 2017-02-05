@@ -1,5 +1,7 @@
 import sys
 
+from remove_dev_unk import get_tags_tokens_lowercase
+
 def parse_line(line):
     return line.strip().split(' ||| ')
 
@@ -11,7 +13,10 @@ if __name__ == "__main__":
         for cor, to_upd in zip(f_cor, f_upd):
             cor_toks = parse_line(cor)
             to_upd_toks = parse_line(to_upd)
-            assert(cor_toks[2].strip() == to_upd_toks[2].strip())
+            cor_tags, cor_words, _ = get_tags_tokens_lowercase(cor_toks[2].strip())
+            to_up_tags, to_up_words, _ = get_tags_tokens_lowercase(to_upd_toks[2].strip())
+            assert(cor_tags == to_up_tags)
+            assert(cor_words == to_up_words)
             # correct index, new score, new parse
-            print("%s ||| %s ||| %s" % (cor_toks[0], to_upd_toks[1], to_upd_toks[2]))
+            print("%s ||| %s ||| %s" % (cor_toks[0], to_upd_toks[1], cor_toks[2]))
 
