@@ -19,7 +19,7 @@ stdout=expts/${prefix}.stdout_block-${block_num}
 stderr=expts/${prefix}.stderr_block-${block_num}
 
 build/nt-parser/nt-parser-gen \
-    --cnn-mem 50000,0,500 \
+    --cnn-mem 45000,0,500 \
     -T corpora/train_gen.oracle \
     -d corpora/dev_gen.oracle \
     -C corpora/dev.stripped \
