@@ -17,8 +17,9 @@ train_dictionary=corpora/train.dictionary
 # python add_dev_unk.py $train_dictionary $candidate_trees > $candidate_trees_unked
 
 #for gen_model in /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed1-pid1482.params.bin /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed2-pid1497.params.bin /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed4-pid1478.params.bin
-for gen_model in /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed5-pid1484.params.bin /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed6-pid1487.params.bin 
-#for gen_model in /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed7-pid1476.params.bin /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed8-pid1507.params.bin
+#for gen_model in /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed5-pid1484.params.bin /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed6-pid1487.params.bin 
+#for gen_model in /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed7-pid1476.params.bin 
+for gen_model in /home/ubuntu/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed8-pid1507.params.bin
 do
 
 echo $gen_model
