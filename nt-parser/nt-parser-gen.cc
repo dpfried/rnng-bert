@@ -102,6 +102,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("dev_output_file,O", po::value<string>(), "write decoded parse trees to this file")
         ("dev_beam_file", po::value<string>(), "write the beam at the end of decoding to this file")
         ("beam_within_word", "greedy decode within word")
+        ("factored_ensemble_beam", "do beam search in each model in the ensemble separately, then take the union and rescore with the entire ensemble")
         ("ignore_word_in_greedy,i", "greedy decode")
         ("word_completion_is_shift,s", "consider a word completed when it's shifted for beaming and print purposes")
         ("decode_beam_size,b", po::value<unsigned>()->default_value(1), "size of beam to use in decode")
@@ -312,11 +313,12 @@ struct AbstractParser {
     return results;
   }
 
-  vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam(
-          ComputationGraph* hg,
+  virtual vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam(
+          //ComputationGraph* hg,
           const parser::Sentence& sent,
           unsigned beam_size
   ) {
+    ComputationGraph hg;
     struct BeamItem {
       explicit BeamItem(std::shared_ptr<AbstractParserState> state, unsigned last_action, double score) :
               state(state), last_action(last_action), score(score)  {}
@@ -338,7 +340,7 @@ struct AbstractParser {
     bool build_training_graph = false;
     bool apply_dropout = false;
 
-    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, is_evaluation, apply_dropout);
+    std::shared_ptr<AbstractParserState> initial_state = new_sentence(&hg, sent, is_evaluation, apply_dropout);
     vector<unsigned> results;
 
     vector<Stack<BeamItem>> completed;
@@ -455,12 +457,13 @@ struct AbstractParser {
     return completed_actions_and_nlp;
   }
 
-  vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam_within_word(
-          ComputationGraph* hg,
+  virtual vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam_within_word(
+          //ComputationGraph* hg,
           const parser::Sentence& sent,
           unsigned beam_size,
-          int beam_filter_at_word_size = -1
+          int beam_filter_at_word_size
   ) {
+    ComputationGraph hg;
     if (beam_filter_at_word_size < 0)
       beam_filter_at_word_size = beam_size;
     //cerr << "beam filter at word size:" << beam_filter_at_word_size << endl;
@@ -485,7 +488,7 @@ struct AbstractParser {
     bool build_training_graph = false;
     bool apply_dropout = false;
 
-    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, is_evaluation, apply_dropout);
+    std::shared_ptr<AbstractParserState> initial_state = new_sentence(&hg, sent, is_evaluation, apply_dropout);
     vector<unsigned> results;
 
     vector<Stack<BeamItem>> completed;
@@ -1992,9 +1995,10 @@ struct EnsembledParser: public AbstractParser {
 
   vector<std::shared_ptr<ParserBuilder>> parsers;
   CombineType combine_type;
+  bool factored_beam;
 
-  explicit EnsembledParser(vector<std::shared_ptr<ParserBuilder>> parsers, CombineType combine_type) :
-          parsers(parsers), combine_type(combine_type) {
+  explicit EnsembledParser(vector<std::shared_ptr<ParserBuilder>> parsers, CombineType combine_type, bool factored_beam) :
+          parsers(parsers), combine_type(combine_type), factored_beam(factored_beam) {
     assert(!parsers.empty());
   }
 
@@ -2004,6 +2008,73 @@ struct EnsembledParser: public AbstractParser {
     for (const std::shared_ptr<ParserBuilder>& parser : parsers)
       states.push_back(parser->new_sentence(hg, sent, is_evaluation, apply_dropout));
     return std::static_pointer_cast<AbstractParserState>(std::make_shared<EnsembledParserState>(this, states));
+  }
+
+  vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam(
+          //ComputationGraph* hg,
+          const parser::Sentence& sent,
+          unsigned beam_size
+  ) {
+    if (factored_beam) {
+      set<vector<unsigned>> all_candidates;
+      for (const std::shared_ptr<ParserBuilder>& parser : parsers) {
+        auto this_beam = parser->abstract_log_prob_parser_beam(sent, beam_size);
+        for (auto results : this_beam) {
+          all_candidates.insert(results.first);
+        }
+      }
+      vector<pair<vector<unsigned>, double>> candidates_and_nlps;
+      for (vector<unsigned> candidate : all_candidates) {
+        ComputationGraph hg;
+        double right;
+        abstract_log_prob_parser(&hg, sent, vector<int>(candidate.begin(), candidate.end()), &right, true, false);
+        double ensemble_nlp = as_scalar(hg.incremental_forward());
+        candidates_and_nlps.push_back(pair<vector<unsigned>, double>(candidate, ensemble_nlp));
+      }
+      sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](std::pair<vector<unsigned>, double>& t1, const std::pair<vector<unsigned>, double>& t2) {
+        return t1.second < t2.second; // sort by ascending nlp
+      });
+      while (candidates_and_nlps.size() > beam_size)
+        candidates_and_nlps.pop_back();
+      return candidates_and_nlps;
+
+    } else {
+      return AbstractParser::abstract_log_prob_parser_beam(sent, beam_size);
+    }
+  }
+
+  vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam_within_word(
+          //ComputationGraph* hg,
+          const parser::Sentence& sent,
+          unsigned beam_size,
+          int beam_filter_at_word_size
+  ) {
+    if (factored_beam) {
+      set<vector<unsigned>> all_candidates;
+      for (const std::shared_ptr<ParserBuilder>& parser : parsers) {
+        auto this_beam = parser->abstract_log_prob_parser_beam_within_word(sent, beam_size, beam_filter_at_word_size);
+        for (auto results : this_beam) {
+          all_candidates.insert(results.first);
+        }
+      }
+      vector<pair<vector<unsigned>, double>> candidates_and_nlps;
+      for (vector<unsigned> candidate : all_candidates) {
+        ComputationGraph hg;
+        double right;
+        abstract_log_prob_parser(&hg, sent, vector<int>(candidate.begin(), candidate.end()), &right, true, false);
+        double ensemble_nlp = as_scalar(hg.incremental_forward());
+        candidates_and_nlps.push_back(pair<vector<unsigned>, double>(candidate, ensemble_nlp));
+      }
+      sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](std::pair<vector<unsigned>, double>& t1, const std::pair<vector<unsigned>, double>& t2) {
+        return t1.second < t2.second; // sort by ascending nlp
+      });
+      while (candidates_and_nlps.size() > beam_size)
+        candidates_and_nlps.pop_back();
+      return candidates_and_nlps;
+
+    } else {
+      return AbstractParser::abstract_log_prob_parser_beam_within_word(sent, beam_size, beam_filter_at_word_size);
+    }
   }
 
 };
@@ -2571,6 +2642,7 @@ int main(int argc, char** argv) {
   for (unsigned i = 0; i < adict.size(); ++i)
     possible_actions[i] = i;
 
+  bool factored_ensemble_beam = conf.count("factored_ensemble_beam") > 0;
 
   //TRAINING
   if (conf.count("train")) {
@@ -2782,7 +2854,7 @@ int main(int argc, char** argv) {
         boost::archive::binary_iarchive ia(in);
         ia >> *models.back();
       }
-      ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type));
+      ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type), factored_ensemble_beam);
       abstract_parser = ensembled_parser.get();
     }
 
@@ -2848,15 +2920,13 @@ int main(int argc, char** argv) {
       double pred_nlp;
       vector<pair<vector<unsigned>, double>> beam;
       {
-        ComputationGraph hg;
         // greedy predict
         if (conf.count("beam_within_word"))
-          beam = abstract_parser->abstract_log_prob_parser_beam_within_word(&hg,
-                                                                            sentence,
+          beam = abstract_parser->abstract_log_prob_parser_beam_within_word(sentence,
                                                                             conf["decode_beam_size"].as<unsigned>(),
                                                                             conf["decode_beam_filter_at_word_size"].as<int>());
         else
-          beam = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, conf["decode_beam_size"].as<unsigned>());
+          beam = abstract_parser->abstract_log_prob_parser_beam(sentence, conf["decode_beam_size"].as<unsigned>());
         //cerr << "beam size: " << beam.size() << endl;
         pred = beam[0].first;
         pred_nlp = beam[0].second;
@@ -2962,7 +3032,7 @@ int main(int argc, char** argv) {
         boost::archive::binary_iarchive ia(in);
         ia >> *models.back();
       }
-      ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type));
+      ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type), factored_ensemble_beam);
       abstract_parser = ensembled_parser.get();
     }
 
