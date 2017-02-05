@@ -1,7 +1,10 @@
 #!/bin/bash
 
 # epoch 121.761, perplexity = 106.772
-model_file=ntparse_gen_D0.3_2_256_256_16_256-seed3-pid1475.params.bin
+#model_file=ntparse_gen_D0.3_2_256_256_16_256-seed3-pid1475.params.bin
+
+# epoch 104, perplexity = 108.05
+model_file=ntparse_gen_D0.3_2_256_256_16_256-seed5-pid1484.params.bin
 
 if [ "$#" -ne 3 ]; then
     echo "args: beam_size beam_size_at_word block_num"
