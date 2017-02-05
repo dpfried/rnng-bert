@@ -2,15 +2,14 @@
 
 input_candidate_file=$1
 
-# epoch 121.761, ppl 106.772
-gen_model=${HOME}/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed3-pid1475.params.bin
+gen_model=${HOME}/snapshots/gen_wsj_1-31/models/ntparse_gen_D0.3_2_256_256_16_256-seed5-pid1484.params.bin
 
-candidate_trees=${input_candidate_file}.rnng-gen-trees
+candidate_trees=${input_candidate_file}.rnng-gen-wsj-trees
 
-candidate_trees_unked=${input_candidate_file}.rnng-gen-trees-unked
+candidate_trees_unked=${input_candidate_file}.rnng-gen-wsj-trees-unked
 
-score_output_file=${input_candidate_file}.raw-rnng-gen-scores
-output_file=${input_candidate_file}.rnng-gen-scores
+score_output_file=${input_candidate_file}.raw-rnng-gen-wsj-scores
+output_file=${input_candidate_file}.rnng-gen-wsj-scores
 
 # TODO: modify this for silver
 train_dictionary=corpora/train.dictionary

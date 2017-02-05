@@ -5,7 +5,7 @@ dataset=$1
 beam_size=$2
 
 # epoch=92.9554, 92.09 dev f1
-model_file=$HOME/snapshots/discrim_wsj_embeddings_1-31/models/ntparse_pos_pretrained_0_2_32_128_16_128-seed1-pid2336.params.bin
+model_file=$HOME/snapshots/discrim_wsj_embeddings_1-31/models/ntparse_pos_pretrained_0_2_32_128_16_128-seed3-pid7347.params.bin
 
 name=rnng-discrim-embeddings-wsj
 
