@@ -16,6 +16,8 @@
 
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
+#include <boost/archive/text_oarchive.hpp>
+#include <boost/archive/text_iarchive.hpp>
 #include <boost/program_options.hpp>
 
 #include "cnn/init.h"
@@ -100,6 +102,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("words,w", po::value<string>(), "Pretrained word embeddings")
         ("beam_size,b", po::value<unsigned>()->default_value(1), "beam size")
         ("no_stack,S", "Don't encode the stack")
+        ("text_format", "serialize models in text")
         ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
         ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
         ("combine_type", po::value<string>(), "Decision-level combination type for ensemble (sum or product)")
@@ -1726,8 +1729,13 @@ int main(int argc, char** argv) {
 
     if (conf.count("model")) {
       ifstream in(conf["model"].as<string>().c_str());
-      boost::archive::binary_iarchive ia(in);
-      ia >> model >> sgd;
+      if (conf.count("text_format")) {
+        boost::archive::text_iarchive ia(in);
+        ia >> model >> sgd;
+      } else {
+        boost::archive::binary_iarchive ia(in);
+        ia >> model >> sgd;
+      }
     }
 
     //AdamTrainer sgd(&model);
@@ -1865,10 +1873,17 @@ int main(int argc, char** argv) {
               best_dev_err = err;
               bestf1=newfmeasure;
               ofstream out(fname + ".bin");
-              boost::archive::binary_oarchive oa(out);
-              // oa << model;
-              oa << model << sgd;
-              oa << termdict << adict << ntermdict << posdict;
+              if (conf.count("text_format")) {
+                  boost::archive::text_oarchive oa(out);
+                  // oa << model;
+                  oa << model << sgd;
+                  oa << termdict << adict << ntermdict << posdict;
+              } else {
+                  boost::archive::binary_oarchive oa(out);
+                  // oa << model;
+                  oa << model << sgd;
+                  oa << termdict << adict << ntermdict << posdict;
+              }
               system((string("cp ") + pfx + string(" ") + pfx + string(".best")).c_str());
               // Create a soft link to the most recent model in order to make it
               // easier to refer to it in a shell script.
@@ -1944,8 +1959,13 @@ int main(int argc, char** argv) {
       string path(conf["model"].as<string>());
       cerr << "Loading single parser from " << path << "..." << endl;
       ifstream in(path);
-      boost::archive::binary_iarchive ia(in);
-      ia >> *models.back();
+      if (conf.count("text_format")) {
+        boost::archive::text_iarchive ia(in);
+        ia >> *models.back();
+      } else {
+        boost::archive::binary_iarchive ia(in);
+        ia >> *models.back();
+      }
       abstract_parser = parsers.back().get();
     }
 
@@ -1967,8 +1987,13 @@ int main(int argc, char** argv) {
         parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), pretrained));
         cerr << "Loading parser from " << path << "..." << endl;
         ifstream in(path);
-        boost::archive::binary_iarchive ia(in);
-        ia >> *models.back();
+        if (conf.count("text_format")) {
+            boost::archive::text_iarchive ia(in);
+            ia >> *models.back();
+        } else {
+            boost::archive::binary_iarchive ia(in);
+            ia >> *models.back();
+        }
       }
       ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type));
       cerr << "Loaded ensembled parser with combine_type of " << combine_type << "." << endl;

@@ -13,6 +13,8 @@
 #include <signal.h>
 
 #include <boost/functional/hash.hpp>
+#include <boost/archive/text_oarchive.hpp>
+#include <boost/archive/text_iarchive.hpp>
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/program_options.hpp>
@@ -103,6 +105,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("dev_beam_file", po::value<string>(), "write the beam at the end of decoding to this file")
         ("beam_within_word", "greedy decode within word")
         ("ignore_word_in_greedy,i", "greedy decode")
+        ("text_format", "serialize models in text format")
         ("word_completion_is_shift,s", "consider a word completed when it's shifted for beaming and print purposes")
         ("decode_beam_size,b", po::value<unsigned>()->default_value(1), "size of beam to use in decode")
         ("decode_beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
@@ -2585,8 +2588,13 @@ int main(int argc, char** argv) {
     if (conf.count("model")) {
       ifstream in(conf["model"].as<string>().c_str());
       assert(in);
-      boost::archive::binary_iarchive ia(in);
-      ia >> model >> sgd;
+      if (conf.count("text_format")) {
+          boost::archive::text_iarchive ia(in);
+          ia >> model >> sgd;
+      } else {
+          boost::archive::binary_iarchive ia(in);
+          ia >> model >> sgd;
+      }
     }
 
     //AdamTrainer sgd(&model);
@@ -2679,9 +2687,16 @@ int main(int argc, char** argv) {
               cerr << "  new best...writing model to " << fname << ".bin ...\n";
               best_dev_llh = llh;
               ofstream out(fname + ".bin");
-              boost::archive::binary_oarchive oa(out);
-              oa << model << sgd;
-              oa << termdict << adict << ntermdict << posdict;
+
+              if (conf.count("text_format")) {
+                  boost::archive::text_oarchive oa(out);
+                  oa << model << sgd;
+                  oa << termdict << adict << ntermdict << posdict;
+              } else {
+                  boost::archive::binary_oarchive oa(out);
+                  oa << model << sgd;
+                  oa << termdict << adict << ntermdict << posdict;
+              }
               // oa << model;
               // Create a soft link to the most recent model in order to make it
               // easier to refer to it in a shell script.
@@ -2735,7 +2750,7 @@ int main(int argc, char** argv) {
       const string epoch_fname = epoch_os.str();
       cerr << "epoch " << epoch << " of " << sentence_count << " sentences, writing to "  << epoch_fname << endl;
       ofstream out(epoch_fname);
-      boost::archive::binary_oarchive oa(out);
+      boost::archive::text_oarchive oa(out);
       oa << model << sgd;
       oa << termdict << adict << ntermdict << posdict;
       */
@@ -2757,8 +2772,13 @@ int main(int argc, char** argv) {
       parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), cfsms.back().get(), pretrained));
       ifstream in(conf["model"].as<string>());
       assert(in);
-      boost::archive::binary_iarchive ia(in);
-      ia >> *models.back();
+      if (conf.count("text_format")) {
+          boost::archive::text_iarchive ia(in);
+          ia >> *models.back();
+      } else {
+          boost::archive::binary_iarchive ia(in);
+          ia >> *models.back();
+      }
       abstract_parser = parsers.back().get();
     } else {
       map<string, EnsembledParser::CombineType> combine_types{
@@ -2779,8 +2799,13 @@ int main(int argc, char** argv) {
         parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), cfsms.back().get(), pretrained));
         ifstream in(path);
         assert(in);
-        boost::archive::binary_iarchive ia(in);
-        ia >> *models.back();
+        if (conf.count("text_format")) {
+            boost::archive::text_iarchive ia(in);
+            ia >> *models.back();
+        } else {
+            boost::archive::binary_iarchive ia(in);
+            ia >> *models.back();
+        }
       }
       ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type));
       abstract_parser = ensembled_parser.get();
@@ -2937,8 +2962,13 @@ int main(int argc, char** argv) {
       parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), cfsms.back().get(), pretrained));
       ifstream in(conf["model"].as<string>());
       assert(in);
-      boost::archive::binary_iarchive ia(in);
-      ia >> *models.back();
+      if (conf.count("text_format")) {
+          boost::archive::text_iarchive ia(in);
+          ia >> *models.back();
+      } else {
+          boost::archive::binary_iarchive ia(in);
+          ia >> *models.back();
+      }
       abstract_parser = parsers.back().get();
     } else {
       map<string, EnsembledParser::CombineType> combine_types{
@@ -2959,8 +2989,13 @@ int main(int argc, char** argv) {
         parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), cfsms.back().get(), pretrained));
         ifstream in(path);
         assert(in);
-        boost::archive::binary_iarchive ia(in);
-        ia >> *models.back();
+        if (conf.count("text_format")) {
+            boost::archive::text_iarchive ia(in);
+            ia >> *models.back();
+        } else {
+            boost::archive::binary_iarchive ia(in);
+            ia >> *models.back();
+        }
       }
       ensembled_parser = std::make_shared<EnsembledParser>(parsers, combine_types.at(combine_type));
       abstract_parser = ensembled_parser.get();
