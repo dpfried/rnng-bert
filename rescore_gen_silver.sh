@@ -19,7 +19,7 @@ utils/cut-corpus.pl 3 $input_candidate_file > $candidate_trees
 python add_dev_unk.py $train_dictionary $candidate_trees > $candidate_trees_unked
 
 build/nt-parser/nt-parser-gen \
-    --cnn-mem 3000,0,4000 \
+    --cnn-mem 25000,0,8000 \
   -x \
   -T corpora/silver_train_gen.oracle \
   --gold_training_data corpora/silver_wsj-train_gen.oracle \
