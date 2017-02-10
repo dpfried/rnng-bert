@@ -15,7 +15,7 @@ utils/cut-corpus.pl 3 $input_candidate_file > $candidate_trees
 python get_oracle.py corpora/silver_train.dictionary $candidate_trees > $discrim_oracle
 
 build/nt-parser/nt-parser \
-  --cnn-mem 3000,0,4000 \
+  --cnn-mem 20000,0,6000 \
   -x \
   -T corpora/silver_train.oracle \
   --gold_training_data corpora/silver_wsj-train.oracle \
