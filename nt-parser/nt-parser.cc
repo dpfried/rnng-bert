@@ -271,7 +271,7 @@ struct AbstractParser {
       partial_sort(successors.begin(),
                    successors.begin() + num_pruned_successors,
                    successors.end(),
-                   [](std::tuple<Stack<BeamItem>, unsigned, float>& t1, const std::tuple<Stack<BeamItem>, unsigned, float>& t2) {
+                   [](const std::tuple<Stack<BeamItem>, unsigned, float>& t1, const std::tuple<Stack<BeamItem>, unsigned, float>& t2) {
                      return get<2>(t1) > get<2>(t2); // sort in descending order by total score
                    });
       while (successors.size() > num_pruned_successors)
@@ -1270,7 +1270,7 @@ struct EnsembledParser : public AbstractParser {
         double ensemble_nlp = as_scalar(hg.incremental_forward());
         candidates_and_nlps.push_back(pair<vector<unsigned>, double>(candidate, ensemble_nlp));
       }
-      sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](std::pair<vector<unsigned>, double>& t1, const std::pair<vector<unsigned>, double>& t2) {
+      sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](const std::pair<vector<unsigned>, double>& t1, const std::pair<vector<unsigned>, double>& t2) {
         return t1.second < t2.second; // sort by ascending nlp
       });
       while (candidates_and_nlps.size() > beam_size)

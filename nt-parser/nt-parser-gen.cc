@@ -2034,7 +2034,7 @@ struct EnsembledParser: public AbstractParser {
         double ensemble_nlp = as_scalar(hg.incremental_forward());
         candidates_and_nlps.push_back(pair<vector<unsigned>, double>(candidate, ensemble_nlp));
       }
-      sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](std::pair<vector<unsigned>, double>& t1, const std::pair<vector<unsigned>, double>& t2) {
+      sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](const std::pair<vector<unsigned>, double>& t1, const std::pair<vector<unsigned>, double>& t2) {
         return t1.second < t2.second; // sort by ascending nlp
       });
       while (candidates_and_nlps.size() > beam_size)
@@ -2068,7 +2068,7 @@ struct EnsembledParser: public AbstractParser {
         double ensemble_nlp = as_scalar(hg.incremental_forward());
         candidates_and_nlps.push_back(pair<vector<unsigned>, double>(candidate, ensemble_nlp));
       }
-      sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](std::pair<vector<unsigned>, double>& t1, const std::pair<vector<unsigned>, double>& t2) {
+      sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](const std::pair<vector<unsigned>, double>& t1, const std::pair<vector<unsigned>, double>& t2) {
         return t1.second < t2.second; // sort by ascending nlp
       });
       while (candidates_and_nlps.size() > beam_size)
