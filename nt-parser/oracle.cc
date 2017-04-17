@@ -65,6 +65,8 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
     }
     if (!discard_sentences)
       sents.resize(sents.size() + 1);
+    if (discard_sentences)
+        blank_sent = Sentence();
     auto& cur_sent = discard_sentences ? blank_sent : sents.back();
     if (is_training) {  // at training time, we load both "UNKified" versions of the data, and raw versions
       ReadSentenceView(line, pd, &cur_sent.pos);
