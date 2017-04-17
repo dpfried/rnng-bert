@@ -109,6 +109,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
         ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
         ("combine_type", po::value<string>(), "Decision-level combination type for ensemble (sum or product)")
+          ("block_count", po::value<unsigned>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
+          ("block_num", po::value<unsigned>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -2189,6 +2191,19 @@ int main(int argc, char** argv) {
     unsigned beam_size = conf["beam_size"].as<unsigned>();
     unsigned test_size = test_corpus.size();
 
+    unsigned start_index = 0;
+    unsigned stop_index = test_corpus.size();
+    unsigned block_count = conf["block_count"].as<unsigned>();
+    unsigned block_num = conf["block_num"].as<unsigned>();
+
+    if (block_count > 0) {
+      assert(block_num < block_count);
+      unsigned q = test_corpus.size() / block_count;
+      unsigned r = test_corpus.size() % block_count;
+      start_index = q * block_num + min(block_num, r);
+      stop_index = q * (block_num + 1) + min(block_num + 1, r);
+    }
+
     if (output_candidate_trees) {
 
       if (sample && output_beam_as_samples) {
@@ -2201,13 +2216,18 @@ int main(int argc, char** argv) {
       } else {
         ptb_os << "/tmp/parser_ptb_out." << getpid() << ".txt";
       }
+
+      if (block_count > 0) {
+        ptb_os << "_block-" << block_num;
+      }
+
       ofstream ptb_out(ptb_os.str().c_str());
 
       double right = 0;
       auto t_start = chrono::high_resolution_clock::now();
       const vector<int> actions;
       vector<unsigned> n_distinct_samples;
-      for (unsigned sii = 0; sii < test_size; ++sii) {
+      for (unsigned sii = start_index; sii < stop_index; ++sii) {
         const auto &sentence = test_corpus.sents[sii];
         // TODO: this overrides dynet random seed, but should be ok if we're only sampling
         cnn::rndeng->seed(sii);
