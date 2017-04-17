@@ -63,10 +63,10 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
     if (sent_count % 1000 == 0) {
       cerr << "\rsent " << sent_count;
     }
-    if (!discard_sentences)
-      sents.resize(sents.size() + 1);
     if (discard_sentences)
-        blank_sent = Sentence();
+      blank_sent = Sentence();
+    else
+      sents.resize(sents.size() + 1);
     auto& cur_sent = discard_sentences ? blank_sent : sents.back();
     if (is_training) {  // at training time, we load both "UNKified" versions of the data, and raw versions
       ReadSentenceView(line, pd, &cur_sent.pos);
@@ -135,7 +135,7 @@ void TopDownOracleGen::load_bdata(const string& file) {
   devdata=file;
 }
 
-void TopDownOracleGen::load_oracle(const string& file) {
+void TopDownOracleGen::load_oracle(const string& file, bool discard_sentences) {
   cerr << "Loading top-down generative oracle from " << file << endl;
   cnn::compressed_ifstream in(file.c_str());
   assert(in);
@@ -146,13 +146,17 @@ void TopDownOracleGen::load_oracle(const string& file) {
   int lc = 0;
   string line;
   vector<int> cur_acts;
+  Sentence blank_sent;
   while(getline(in, line)) {
     ++lc;
     //cerr << "line number = " << lc << endl;
     cur_acts.clear();
     if (line.size() == 0 || line[0] == '#') continue;
-    sents.resize(sents.size() + 1);
-    auto& cur_sent = sents.back();
+    if (discard_sentences)
+      blank_sent = Sentence();
+    else
+      sents.resize(sents.size() + 1);
+    auto& cur_sent = discard_sentences ? blank_sent : sents.back();
     ReadSentenceView(line, nud, &cur_sent.non_unked_raw);
     getline(in, line);
     ReadSentenceView(line, d, &cur_sent.raw);
@@ -187,10 +191,11 @@ void TopDownOracleGen::load_oracle(const string& file) {
         abort();
       }
     }
-    actions.push_back(cur_acts);
-    if (termc != sents.back().size()) {
+    if (!discard_sentences)
+      actions.push_back(cur_acts);
+    if (termc != cur_sent.size()) {
       cerr << "Mismatched number of tokens and SHIFTs in oracle before line " << lc << endl;
-      cerr << "num tokens: " << sents.back().size() << endl;
+      cerr << "num tokens: " << cur_sent.size() << endl;
       cerr << "num shifts: " << termc << endl;
       abort();
     }

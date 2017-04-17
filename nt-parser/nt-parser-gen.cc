@@ -2589,11 +2589,13 @@ int main(int argc, char** argv) {
     ClassFactoredSoftmaxBuilder(HIDDEN_DIM, conf["clusters"].as<string>(), &termdict, &model);
   }
 
+  bool discard_train_sents = (conf.count("train") == 0);
+
   parser::TopDownOracleGen corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   parser::TopDownOracleGen dev_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   parser::TopDownOracleGen2 test_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   parser::TopDownOracleGen gold_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
-  corpus.load_oracle(conf["training_data"].as<string>());
+  corpus.load_oracle(conf["training_data"].as<string>(), discard_train_sents);
   if (conf.count("bracketing_dev_data")) {
     corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
   }
@@ -2601,7 +2603,7 @@ int main(int argc, char** argv) {
   bool has_gold_training_data = false;
 
   if (conf.count("gold_training_data")) {
-    gold_corpus.load_oracle(conf["gold_training_data"].as<string>());
+    gold_corpus.load_oracle(conf["gold_training_data"].as<string>(), discard_train_sents);
     if (conf.count("bracketing_dev_data")) {
       gold_corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
     }
@@ -2619,7 +2621,7 @@ int main(int argc, char** argv) {
 
   if (conf.count("dev_data")) {
     cerr << "Loading validation set\n";
-    dev_corpus.load_oracle(conf["dev_data"].as<string>());
+    dev_corpus.load_oracle(conf["dev_data"].as<string>(), false);
   }
 
   if (conf.count("test_data")) {
