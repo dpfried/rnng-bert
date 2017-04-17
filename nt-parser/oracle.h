@@ -4,6 +4,7 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 namespace cnn { class Dict; }
 
@@ -29,6 +30,7 @@ struct Oracle {
   std::string devdata;
   std::vector<Sentence> sents;
   std::vector<std::vector<int>> actions;
+  std::unordered_map<unsigned, unsigned> raw_term_counts;
  protected:
   static void ReadSentenceView(const std::string& line, cnn::Dict* dict, std::vector<int>* sent);
 };
@@ -46,7 +48,7 @@ class TopDownOracle : public Oracle {
   // will be read, and both will be available. if false, then only the mapped
   // tokens will be available
   void load_bdata(const std::string& file);
-  void load_oracle(const std::string& file, bool is_training);
+  void load_oracle(const std::string& file, bool is_training, bool discard_sentences);
   cnn::Dict* nd; // dictionary of nonterminal types
 };
 

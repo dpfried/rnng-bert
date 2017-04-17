@@ -41,7 +41,7 @@ void TopDownOracle::load_bdata(const string& file) {
    devdata=file;
 }
 
-void TopDownOracle::load_oracle(const string& file, bool is_training) {
+void TopDownOracle::load_oracle(const string& file, bool is_training, bool discard_sentences) {
   cerr << "Loading top-down oracle from " << file << " [" << (is_training ? "training" : "non-training") << "] ...\n";
   cnn::compressed_ifstream in(file.c_str());
   assert(in);
@@ -53,6 +53,7 @@ void TopDownOracle::load_oracle(const string& file, bool is_training) {
   string line;
   vector<int> cur_acts;
   int sent_count = 0;
+  Sentence blank_sent;
   while(getline(in, line)) {
     ++lc;
     //cerr << "line number = " << lc << endl;
@@ -62,8 +63,9 @@ void TopDownOracle::load_oracle(const string& file, bool is_training) {
     if (sent_count % 1000 == 0) {
       cerr << "\rsent " << sent_count;
     }
-    sents.resize(sents.size() + 1);
-    auto& cur_sent = sents.back();
+    if (!discard_sentences)
+      sents.resize(sents.size() + 1);
+    auto& cur_sent = discard_sentences ? blank_sent : sents.back();
     if (is_training) {  // at training time, we load both "UNKified" versions of the data, and raw versions
       ReadSentenceView(line, pd, &cur_sent.pos);
       getline(in, line);
@@ -83,6 +85,7 @@ void TopDownOracle::load_oracle(const string& file, bool is_training) {
       ReadSentenceView(line, d, &cur_sent.unk);
       cur_sent.raw = cur_sent.unk;
     }
+    for (auto word : cur_sent.raw) raw_term_counts[word]++;
     lc += 3;
     if (!cur_sent.SizesMatch()) {
       cerr << "Mismatched lengths of input strings in oracle before line " << lc << endl;
@@ -109,10 +112,11 @@ void TopDownOracle::load_oracle(const string& file, bool is_training) {
         abort();
       }
     }
-    actions.push_back(cur_acts);
-    if (termc != sents.back().size()) {
+    if (!discard_sentences)
+      actions.push_back(cur_acts);
+    if (termc != cur_sent.size()) {
       cerr << "Mismatched number of tokens and SHIFTs in oracle before line " << lc << endl;
-      cerr << "num tokens: " << sents.back().size() << endl;
+      cerr << "num tokens: " << cur_sent.size() << endl;
       cerr << "num shifts: " << termc << endl;
       abort();
     }
