@@ -212,6 +212,7 @@ struct AbstractParserState {
   virtual void finish_sentence() = 0;
   virtual unsigned term_count() = 0;
   virtual bool word_completed() = 0;
+  virtual unsigned open_paren_count() = 0;
 };
 
 struct AbstractParser {
@@ -466,8 +467,12 @@ struct AbstractParser {
           const parser::Sentence& sent,
           unsigned beam_size,
           int beam_filter_at_word_size,
-          int shift_size
+          unsigned shift_size
   ) {
+    if (shift_size > 0) {
+      assert(WORD_COMPLETION_IS_SHIFT);
+    }
+
     ComputationGraph hg;
     if (beam_filter_at_word_size < 0)
       beam_filter_at_word_size = beam_size;
@@ -481,13 +486,13 @@ struct AbstractParser {
     };
 
     struct SuccessorItem {
-      explicit SuccessorItem(Stack<BeamItem> stack_item, unsigned action, unsigned word, double total_score, bool is_shift) :
-              stack_item(stack_item), action(action), word(word), total_score(total_score), is_shift(is_shift) {}
+      explicit SuccessorItem(Stack<BeamItem> stack_item, unsigned action, unsigned word, double total_score, bool is_complete) :
+              stack_item(stack_item), action(action), word(word), total_score(total_score), is_complete(is_complete) {}
       Stack<BeamItem> stack_item;
       unsigned action;
       unsigned word;
       double total_score;
-      bool is_shift;
+      bool is_complete;
     };
 
     auto compare_successors = [](const SuccessorItem &t1, const SuccessorItem &t2) {
@@ -508,11 +513,12 @@ struct AbstractParser {
 
     for (unsigned current_termc = 0; current_termc < sent.size(); current_termc++) {
       completed.clear();
-      while (completed.size() < beam_size && !beam.empty()) {
+      int forced_completions = 0;
+      while (completed.size() - forced_completions < beam_size && !beam.empty()) {
         // current_stack_item, action, wordid, total_score
         //vector<tuple<Stack<BeamItem>, unsigned, unsigned, double>> successors;
         vector<SuccessorItem> successors;
-        vector<SuccessorItem> shift_successors;
+        vector<SuccessorItem> forced_completion_successors;
 
         while (!beam.empty()) {
           Stack<BeamItem> current_stack_item = beam.back();
@@ -536,22 +542,24 @@ struct AbstractParser {
             //cerr << action << ":";
 
             const string &a = adict.Convert(action);
-            bool is_shift = false;
+            bool is_complete = false;
             unsigned wordid = 0;
             if (a[0] == 'S') {
-              is_shift = true;
+              is_complete = current_termc < sent.size() - 1;
               double next_word_log_prob_v = as_scalar(adiste_and_next_word_log_prob.second.value());
               assert(has_next_word);
               wordid = next_word;
               action_score += next_word_log_prob_v;
+            } else if (a[0] == 'R') {
+              is_complete = current_termc == sent.size() - 1 && current_stack_item.back().state->open_paren_count() == 1;
             }
             //cerr << action_score << " ";
             double total_score = current_stack_item.back().score + action_score;
-            auto succ =  SuccessorItem(current_stack_item, action, wordid, total_score, is_shift);
+            auto succ =  SuccessorItem(current_stack_item, action, wordid, total_score, is_complete);
             successors.push_back(succ);
                     //tuple<Stack<BeamItem>, unsigned, unsigned, double>(current_stack_item, action, wordid, total_score)
-            if (is_shift) {
-              shift_successors.push_back(succ);
+            if (is_complete) {
+              forced_completion_successors.push_back(succ);
             }
           }
           //cerr << endl;
@@ -564,21 +572,24 @@ struct AbstractParser {
                      successors.end(),
                      compare_successors);
 
-        int num_remaining_shift_successors = shift_successors.size();
+        int num_remaining_fc_successors = forced_completion_successors.size();
         while (successors.size() > num_pruned_successors) {
-          if (successors.back().is_shift) {
-            num_remaining_shift_successors--;
-            assert(num_remaining_shift_successors >= 0);
+          if (successors.back().is_complete) {
+            num_remaining_fc_successors--;
+            assert(num_remaining_fc_successors >= 0);
           }
           successors.pop_back();
         }
-        if (shift_size > 0 && shift_size > num_remaining_shift_successors) {
-          partial_sort(shift_successors.begin(),
-                       shift_successors.begin() + shift_size,
-                       shift_successors.end(),
+        if (shift_size > 0 && shift_size > num_remaining_fc_successors) {
+          unsigned fc_to_take = min(shift_size, (unsigned) forced_completion_successors.size());
+          partial_sort(forced_completion_successors.begin(),
+                       forced_completion_successors.begin() + fc_to_take,
+                       forced_completion_successors.end(),
                        compare_successors);
-          for (auto it = shift_successors.begin() + num_remaining_shift_successors; (it < shift_successors.end() && it < shift_successors.begin() + shift_size); it++) {
-            successors.push_back(*it);
+          for (int index = num_remaining_fc_successors; index < fc_to_take; index++) {
+            auto &succ = forced_completion_successors[index];
+            successors.push_back(succ);
+            forced_completions++;
           }
         }
 
@@ -605,6 +616,10 @@ struct AbstractParser {
       // keep around a larger completion list if we're at the end of the sentence
       unsigned num_pruned_completion = std::min(current_termc < sent.size() - 1 ? beam_filter_at_word_size : beam_size, static_cast<unsigned>(completed.size()));
       std::copy(completed.begin(), completed.begin() + std::min(num_pruned_completion, (unsigned) completed.size()), std::back_inserter(beam));
+      cout << "current_termc: " << current_termc << endl;
+      cout << "continuing beam size: " << beam.size() << endl;
+      cout << "completed size: " << completed.size() << endl;
+      cout << "word forced completions: " << forced_completions << endl;
     }
 
 
@@ -2076,7 +2091,7 @@ struct EnsembledParser: public AbstractParser {
           const parser::Sentence& sent,
           unsigned beam_size,
           int beam_filter_at_word_size,
-          int shift_size
+          unsigned shift_size
   ) {
     if (factored_beam) {
       set<vector<unsigned>> all_candidates;
@@ -2176,6 +2191,10 @@ struct ParserState : public AbstractParserState {
 
   bool word_completed() override {
     return was_word_completed;
+  }
+
+  unsigned open_paren_count() override {
+      return nopen_parens;
   }
 
   vector<unsigned> get_valid_actions(bool for_decode) override {
@@ -2296,9 +2315,11 @@ struct ParserState : public AbstractParserState {
       new_is_open_paren = new_is_open_paren.push_back(-1);
       if (WORD_COMPLETION_IS_SHIFT) {
         was_word_completed = (new_termc < parser->sent_length);
+        //cerr << "was word completed: " << was_word_completed << " termc " << new_termc << " sent length " << parser->sent_length << endl;
         word_completed = new_termc;
       } else if (prev_a == 'S' || prev_a == 'R') {
         was_word_completed = true;
+        //cerr << "was word completed: " << was_word_completed << endl;
         word_completed = new_termc - 1;
       }
       new_cons_nt_count = 0;
@@ -2448,6 +2469,10 @@ struct EnsembledParserState : public AbstractParserState {
     return states.front()->word_completed();
   }
 
+  unsigned open_paren_count() override {
+    return states.front()->open_paren_count();
+  }
+
   vector<unsigned int> get_valid_actions(bool for_decode) override {
     return states.front()->get_valid_actions(for_decode);
   }
@@ -2590,6 +2615,10 @@ int main(int argc, char** argv) {
 
   NO_HISTORY = conf.count("no_history");
   NO_BUFFER = conf.count("no_buffer");
+
+  if (conf["decode_shift_size"].as<unsigned>() > 0) {
+    assert(WORD_COMPLETION_IS_SHIFT);
+  }
 
   ostringstream os;
   os << "ntparse_gen"
@@ -2978,7 +3007,7 @@ int main(int argc, char** argv) {
           beam = abstract_parser->abstract_log_prob_parser_beam_within_word(sentence,
                                                                             conf["decode_beam_size"].as<unsigned>(),
                                                                             conf["decode_beam_filter_at_word_size"].as<int>(),
-                                                                            conf["decode_shift_size"].as<int>());
+                                                                            conf["decode_shift_size"].as<unsigned>());
         else
           beam = abstract_parser->abstract_log_prob_parser_beam(sentence, conf["decode_beam_size"].as<unsigned>());
         //cerr << "beam size: " << beam.size() << endl;
