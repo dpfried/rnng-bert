@@ -110,6 +110,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("word_completion_is_shift,s", "consider a word completed when it's shifted for beaming and print purposes")
         ("decode_beam_size,b", po::value<unsigned>()->default_value(1), "size of beam to use in decode")
         ("decode_beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
+        ("decode_shift_size", po::value<unsigned>()->default_value(0), "fast-forward this many shift candidates")
         ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
         ("no_history", "Don't encode the history")
         ("no_buffer", "Don't encode the buffer")
@@ -464,7 +465,8 @@ struct AbstractParser {
           //ComputationGraph* hg,
           const parser::Sentence& sent,
           unsigned beam_size,
-          int beam_filter_at_word_size
+          int beam_filter_at_word_size,
+          int shift_size
   ) {
     ComputationGraph hg;
     if (beam_filter_at_word_size < 0)
@@ -479,12 +481,17 @@ struct AbstractParser {
     };
 
     struct SuccessorItem {
-      explicit SuccessorItem(Stack<BeamItem> stack_item, unsigned action, unsigned word, double total_score) :
-              stack_item(stack_item), action(action), word(word), total_score(total_score) {}
+      explicit SuccessorItem(Stack<BeamItem> stack_item, unsigned action, unsigned word, double total_score, bool is_shift) :
+              stack_item(stack_item), action(action), word(word), total_score(total_score), is_shift(is_shift) {}
       Stack<BeamItem> stack_item;
       unsigned action;
       unsigned word;
       double total_score;
+      bool is_shift;
+    };
+
+    auto compare_successors = [](const SuccessorItem &t1, const SuccessorItem &t2) {
+        return t1.total_score > t2.total_score; // sort in descending order by total score
     };
 
     bool is_evaluation = false;
@@ -505,6 +512,7 @@ struct AbstractParser {
         // current_stack_item, action, wordid, total_score
         //vector<tuple<Stack<BeamItem>, unsigned, unsigned, double>> successors;
         vector<SuccessorItem> successors;
+        vector<SuccessorItem> shift_successors;
 
         while (!beam.empty()) {
           Stack<BeamItem> current_stack_item = beam.back();
@@ -528,8 +536,10 @@ struct AbstractParser {
             //cerr << action << ":";
 
             const string &a = adict.Convert(action);
+            bool is_shift = false;
             unsigned wordid = 0;
             if (a[0] == 'S') {
+              is_shift = true;
               double next_word_log_prob_v = as_scalar(adiste_and_next_word_log_prob.second.value());
               assert(has_next_word);
               wordid = next_word;
@@ -537,25 +547,40 @@ struct AbstractParser {
             }
             //cerr << action_score << " ";
             double total_score = current_stack_item.back().score + action_score;
-            successors.push_back(
-                    SuccessorItem(current_stack_item, action, wordid, total_score)
+            auto succ =  SuccessorItem(current_stack_item, action, wordid, total_score, is_shift);
+            successors.push_back(succ);
                     //tuple<Stack<BeamItem>, unsigned, unsigned, double>(current_stack_item, action, wordid, total_score)
-            );
+            if (is_shift) {
+              shift_successors.push_back(succ);
+            }
           }
           //cerr << endl;
         }
+
 
         unsigned num_pruned_successors = std::min(beam_size, static_cast<unsigned>(successors.size()));
         partial_sort(successors.begin(),
                      successors.begin() + num_pruned_successors,
                      successors.end(),
-                     [](const SuccessorItem &t1, const SuccessorItem &t2) {
-                       //[](const std::tuple<Stack<BeamItem>, unsigned, unsigned, double>& t1, const std::tuple<Stack<BeamItem>, unsigned, unsigned, double>& t2) {
-                       return t1.total_score > t2.total_score; // sort in descending order by total score
-                       //return get<3>(t1) > get<3>(t2); // sort in descending order by total score
-                     });
-        while (successors.size() > num_pruned_successors)
+                     compare_successors);
+
+        int num_remaining_shift_successors = shift_successors.size();
+        while (successors.size() > num_pruned_successors) {
+          if (successors.back().is_shift) {
+            num_remaining_shift_successors--;
+            assert(num_remaining_shift_successors >= 0);
+          }
           successors.pop_back();
+        }
+        if (shift_size > 0 && shift_size > num_remaining_shift_successors) {
+          partial_sort(shift_successors.begin(),
+                       shift_successors.begin() + shift_size,
+                       shift_successors.end(),
+                       compare_successors);
+          for (auto it = shift_successors.begin() + num_remaining_shift_successors; (it < shift_successors.end() && it < shift_successors.begin() + shift_size); it++) {
+            successors.push_back(*it);
+          }
+        }
 
         for (auto &successor : successors) {
           std::shared_ptr<AbstractParserState> current_parser_state = successor.stack_item.back().state;
@@ -2050,12 +2075,13 @@ struct EnsembledParser: public AbstractParser {
           //ComputationGraph* hg,
           const parser::Sentence& sent,
           unsigned beam_size,
-          int beam_filter_at_word_size
+          int beam_filter_at_word_size,
+          int shift_size
   ) {
     if (factored_beam) {
       set<vector<unsigned>> all_candidates;
       for (const std::shared_ptr<ParserBuilder>& parser : parsers) {
-        auto this_beam = parser->abstract_log_prob_parser_beam_within_word(sent, beam_size, beam_filter_at_word_size);
+        auto this_beam = parser->abstract_log_prob_parser_beam_within_word(sent, beam_size, beam_filter_at_word_size, shift_size);
         for (auto results : this_beam) {
           all_candidates.insert(results.first);
         }
@@ -2076,7 +2102,7 @@ struct EnsembledParser: public AbstractParser {
       return candidates_and_nlps;
 
     } else {
-      return AbstractParser::abstract_log_prob_parser_beam_within_word(sent, beam_size, beam_filter_at_word_size);
+      return AbstractParser::abstract_log_prob_parser_beam_within_word(sent, beam_size, beam_filter_at_word_size, shift_size);
     }
   }
 
@@ -2951,7 +2977,8 @@ int main(int argc, char** argv) {
         if (conf.count("beam_within_word"))
           beam = abstract_parser->abstract_log_prob_parser_beam_within_word(sentence,
                                                                             conf["decode_beam_size"].as<unsigned>(),
-                                                                            conf["decode_beam_filter_at_word_size"].as<int>());
+                                                                            conf["decode_beam_filter_at_word_size"].as<int>(),
+                                                                            conf["decode_shift_size"].as<int>());
         else
           beam = abstract_parser->abstract_log_prob_parser_beam(sentence, conf["decode_beam_size"].as<unsigned>());
         //cerr << "beam size: " << beam.size() << endl;
