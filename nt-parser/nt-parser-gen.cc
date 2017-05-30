@@ -616,10 +616,10 @@ struct AbstractParser {
       // keep around a larger completion list if we're at the end of the sentence
       unsigned num_pruned_completion = std::min(current_termc < sent.size() - 1 ? beam_filter_at_word_size : beam_size, static_cast<unsigned>(completed.size()));
       std::copy(completed.begin(), completed.begin() + std::min(num_pruned_completion, (unsigned) completed.size()), std::back_inserter(beam));
-      cout << "current_termc: " << current_termc << endl;
-      cout << "continuing beam size: " << beam.size() << endl;
-      cout << "completed size: " << completed.size() << endl;
-      cout << "word forced completions: " << forced_completions << endl;
+//      cout << "current_termc: " << current_termc << endl;
+//      cout << "continuing beam size: " << beam.size() << endl;
+//      cout << "completed size: " << completed.size() << endl;
+//      cout << "word forced completions: " << forced_completions << endl;
     }
 
 
