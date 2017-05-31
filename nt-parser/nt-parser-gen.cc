@@ -1,10 +1,12 @@
 #include <cstdlib>
 #include <iostream>
 #include <vector>
+#include <deque>
 #include <fstream>
 #include <cmath>
 #include <chrono>
 #include <ctime>
+#include <queue>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -111,6 +113,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("decode_beam_size,b", po::value<unsigned>()->default_value(1), "size of beam to use in decode")
         ("decode_beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
         ("decode_shift_size", po::value<unsigned>()->default_value(0), "fast-forward this many shift candidates")
+        ("decode_word_action_sig_length", po::value<int>()->default_value(-1))
         ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
         ("no_history", "Don't encode the history")
         ("no_buffer", "Don't encode the buffer")
@@ -616,6 +619,267 @@ struct AbstractParser {
       // keep around a larger completion list if we're at the end of the sentence
       unsigned num_pruned_completion = std::min(current_termc < sent.size() - 1 ? beam_filter_at_word_size : beam_size, static_cast<unsigned>(completed.size()));
       std::copy(completed.begin(), completed.begin() + std::min(num_pruned_completion, (unsigned) completed.size()), std::back_inserter(beam));
+//      cout << "current_termc: " << current_termc << endl;
+//      cout << "continuing beam size: " << beam.size() << endl;
+//      cout << "completed size: " << completed.size() << endl;
+//      cout << "word forced completions: " << forced_completions << endl;
+    }
+
+
+    vector<pair<vector<unsigned>, double>> completed_actions_and_nlp;
+    for (const auto & completed_stack_item: completed) {
+      completed_stack_item.back().state->finish_sentence();
+      Stack<BeamItem> stack_item = completed_stack_item;
+      double nlp = - stack_item.back().score;
+      vector<unsigned> actions;
+      while (stack_item.back().last_action != START_OF_SENTENCE_ACTION) {
+        actions.push_back(stack_item.back().last_action);
+        stack_item = stack_item.pop_back();
+      }
+      reverse(actions.begin(), actions.end());
+      completed_actions_and_nlp.push_back(pair<vector<unsigned>, double>(actions, nlp));
+    }
+
+    return completed_actions_and_nlp;
+  }
+
+  virtual vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam_within_word_action_sigs(
+          //ComputationGraph* hg,
+          const parser::Sentence& sent,
+          unsigned beam_size,
+          int beam_filter_at_word_size,
+          unsigned shift_size,
+          unsigned signature_context_length,
+          unsigned bin_size,
+          bool separate_word_level_signatures
+  ) {
+    if (shift_size > 0) {
+      assert(WORD_COMPLETION_IS_SHIFT);
+    }
+
+//    cerr << "signature_context_length: " << signature_context_length << endl;
+//    cerr << "bin_size: " << bin_size << endl;
+//    cerr << "separate_word_level_signatures: " << separate_word_level_signatures << endl;
+
+    ComputationGraph hg;
+    if (beam_filter_at_word_size < 0)
+      beam_filter_at_word_size = beam_size;
+    //cerr << "beam filter at word size:" << beam_filter_at_word_size << endl;
+    struct BeamItem {
+      explicit BeamItem(std::shared_ptr<AbstractParserState> state, unsigned last_action, double score) :
+              state(state), last_action(last_action), score(score)  {}
+      std::shared_ptr<AbstractParserState> state;
+      unsigned last_action;
+      double score;
+    };
+
+    struct SuccessorItem {
+      explicit SuccessorItem(Stack<BeamItem> stack_item, unsigned action, unsigned word, double total_score, bool is_complete, unsigned long key) :
+              stack_item(stack_item), action(action), word(word), total_score(total_score), is_complete(is_complete), key(key) {}
+      Stack<BeamItem> stack_item;
+      unsigned action;
+      unsigned word;
+      double total_score;
+      bool is_complete;
+      unsigned long key;
+    };
+
+    // used to determine which successors will be binned together
+    struct Signature {
+      explicit Signature(int index, deque<unsigned> history) :
+              index(index), history(history) {}
+      int index;
+      deque<unsigned> history;
+
+      bool operator<( const Signature& rhs ) const
+      {
+        if (index < rhs.index)
+          return true;
+        else if (index == rhs.index)
+          return history < rhs.history;
+        else
+          return false;
+      }
+    };
+
+    auto compare_successors = [](const SuccessorItem &t1, const SuccessorItem &t2) {
+        return t1.total_score > t2.total_score; // sort in descending order by total score
+    };
+
+    auto compare_successors_and_sigs = [](const pair<SuccessorItem,Signature> &t1, const pair<SuccessorItem,Signature> &t2) {
+        return t1.first.total_score > t2.first.total_score;
+    };
+
+    bool is_evaluation = false;
+    bool build_training_graph = false;
+    bool apply_dropout = false;
+
+    std::shared_ptr<AbstractParserState> initial_state = new_sentence(&hg, sent, is_evaluation, apply_dropout);
+    vector<unsigned> results;
+
+    vector<Stack<BeamItem>> completed;
+    vector<pair<Stack<BeamItem>, Signature>> beam;
+
+    auto initial_beam_item = pair<Stack<BeamItem>, Signature>(
+            Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, 0.0)),
+            Signature(0, deque<unsigned>())
+    );
+    beam.push_back(initial_beam_item);
+
+    for (unsigned current_termc = 0; current_termc < sent.size(); current_termc++) {
+      completed.clear();
+      int forced_completions = 0;
+      while (completed.size() - forced_completions < beam_size && !beam.empty()) {
+
+        // for fast-tracking successors (and their signatures) that shifted
+        vector<pair<SuccessorItem,Signature>> forced_completion_successors;
+
+        // store all successors in here, and then filter down to top bin_size per signature later
+        map<Signature, vector<SuccessorItem>> successors_by_signature;
+
+        unsigned long successor_key = 0;
+
+        while (!beam.empty()) {
+          Stack<BeamItem> current_stack_item = beam.back().first;
+          Signature current_stack_signature = beam.back().second;
+          beam.pop_back();
+
+          std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
+          vector<unsigned> model_valid_actions = current_parser_state->get_valid_actions(false);
+          vector<unsigned> decode_valid_actions = current_parser_state->get_valid_actions(true);
+
+          bool has_next_word = current_parser_state->term_count() < sent.size();
+          if (has_next_word)
+            assert(sent.raw[current_parser_state->term_count()] >= 0);
+          unsigned next_word = has_next_word ? sent.raw[current_parser_state->term_count()] : 0;
+
+          pair<Expression, Expression> adiste_and_next_word_log_prob = current_parser_state->get_action_log_probs_and_next_word_log_prob(
+                  model_valid_actions, next_word, has_next_word);
+          vector<float> adist = as_vector(adiste_and_next_word_log_prob.first.value());
+
+          for (unsigned action: decode_valid_actions) {
+            double action_score = adist[action];
+            //cerr << action << ":";
+
+            const string &a = adict.Convert(action);
+            bool is_complete = false;
+            unsigned wordid = 0;
+            if (a[0] == 'S') {
+              is_complete = current_termc < sent.size() - 1;
+              double next_word_log_prob_v = as_scalar(adiste_and_next_word_log_prob.second.value());
+              assert(has_next_word);
+              wordid = next_word;
+              action_score += next_word_log_prob_v;
+            } else if (a[0] == 'R') {
+              is_complete = current_termc == sent.size() - 1 && current_stack_item.back().state->open_paren_count() == 1;
+            }
+            //cerr << action_score << " ";
+            double total_score = current_stack_item.back().score + action_score;
+
+            auto succ =  SuccessorItem(current_stack_item, action, wordid, total_score, is_complete, successor_key++);
+            auto new_signature = Signature(current_stack_signature.index, current_stack_signature.history);
+            if (new_signature.history.size() >= signature_context_length) {
+              new_signature.history.pop_back();
+            }
+            new_signature.history.push_front(action);
+            assert(new_signature.history.size() <= signature_context_length);
+
+            // instead of keeping a successor list, put it into the proper bin by its signature
+            if (!successors_by_signature.count(new_signature)) {
+              successors_by_signature[new_signature] = vector<SuccessorItem>();
+            }
+            successors_by_signature[new_signature].push_back(succ);
+            if (is_complete) {
+              forced_completion_successors.push_back(pair<SuccessorItem,Signature>(succ,new_signature));
+            }
+          }
+          //cerr << endl;
+        }
+
+
+        // build successors here, filtering down to the top bin_size per signature
+        // maintain a count of the number of items in forced_completion_successors that are also in successors_and_sigs
+        // right now, everything that's in successors_by_sigs that's complete should be in forced_completion_successors, so just count as we build
+        vector<pair<SuccessorItem,Signature>> successors_and_sigs;
+        for (auto &kvp: successors_by_signature) {
+          vector<SuccessorItem> &this_successors = kvp.second;
+          unsigned num_to_take = std::min(bin_size, static_cast<unsigned>(this_successors.size()));
+          partial_sort(this_successors.begin(),
+                       this_successors.begin() + num_to_take,
+                       this_successors.end(),
+                       compare_successors);
+          for (auto it = this_successors.begin(); it < this_successors.begin() + num_to_take; it++) {
+            successors_and_sigs.push_back(pair<SuccessorItem,Signature>(*it, kvp.first));
+//            if (it->is_complete) { // should already be in forced_completion_successors list
+//              num_remaining_fc_successors++;
+//            }
+          }
+        }
+
+        set<unsigned long> successor_keys;
+        unsigned num_pruned_successors = std::min(beam_size, static_cast<unsigned>(successors_and_sigs.size()));
+        partial_sort(successors_and_sigs.begin(),
+                     successors_and_sigs.begin() + num_pruned_successors,
+                     successors_and_sigs.end(),
+                     compare_successors_and_sigs);
+
+        while (successors_and_sigs.size() > num_pruned_successors) {
+//          if (successors_and_sigs.back().first.is_complete) {
+//            num_remaining_fc_successors--;
+//            assert(num_remaining_fc_successors >= 0);
+//          }
+          successors_and_sigs.pop_back();
+        }
+
+        for (auto succ_and_sig: successors_and_sigs) {
+          successor_keys.insert(succ_and_sig.first.key);
+        }
+
+        if (shift_size > 0) {
+          unsigned fc_to_take = min(shift_size, (unsigned) forced_completion_successors.size());
+          partial_sort(forced_completion_successors.begin(),
+                       forced_completion_successors.begin() + fc_to_take,
+                       forced_completion_successors.end(),
+                       compare_successors_and_sigs);
+          for (auto it = forced_completion_successors.begin(); it < forced_completion_successors.begin() + fc_to_take; it++) {
+            if (!successor_keys.count(it->first.key)) {
+              successors_and_sigs.push_back(*it);
+              forced_completions++;
+
+            }
+          }
+        }
+
+        for (auto &successor_and_sig : successors_and_sigs) {
+          SuccessorItem &successor = successor_and_sig.first;
+          Signature &sig = successor_and_sig.second;
+          std::shared_ptr<AbstractParserState> current_parser_state = successor.stack_item.back().state;
+          std::shared_ptr<AbstractParserState> successor_parser_state = current_parser_state->perform_action(
+                  successor.action, successor.word);
+          Stack<BeamItem> successor_stack_item = successor.stack_item.push_back(
+                  BeamItem(successor_parser_state,
+                           successor.action,
+                           successor.total_score)
+          );
+          if (successor_parser_state->word_completed())
+            completed.push_back(successor_stack_item);
+          else {
+            beam.push_back(pair<Stack<BeamItem>,Signature>(successor_stack_item, sig));
+          }
+        }
+      }
+      sort(completed.begin(), completed.end(), [](const Stack<BeamItem>& t1, const Stack<BeamItem>& t2) {
+          return t1.back().score > t2.back().score; // sort in descending order by total score
+      });
+
+      beam.clear();
+      // keep around a larger completion list if we're at the end of the sentence
+      unsigned num_pruned_completion = std::min(current_termc < sent.size() - 1 ? beam_filter_at_word_size : beam_size, static_cast<unsigned>(completed.size()));
+      //std::copy(completed.begin(), completed.begin() + std::min(num_pruned_completion, (unsigned) completed.size()), std::back_inserter(beam));
+      for (auto it = completed.begin(); it < completed.begin() + std::min(num_pruned_completion, (unsigned) completed.size()); it++) {
+        Signature sig = Signature(separate_word_level_signatures ? beam.size() : 0, deque<unsigned>());
+        beam.push_back(pair<Stack<BeamItem>,Signature>(*it, sig));
+      }
 //      cout << "current_termc: " << current_termc << endl;
 //      cout << "continuing beam size: " << beam.size() << endl;
 //      cout << "completed size: " << completed.size() << endl;
@@ -3002,14 +3266,30 @@ int main(int argc, char** argv) {
       double pred_nlp;
       vector<pair<vector<unsigned>, double>> beam;
       {
+        unsigned beam_size = conf["decode_beam_size"].as<unsigned>();
         // greedy predict
-        if (conf.count("beam_within_word"))
-          beam = abstract_parser->abstract_log_prob_parser_beam_within_word(sentence,
-                                                                            conf["decode_beam_size"].as<unsigned>(),
-                                                                            conf["decode_beam_filter_at_word_size"].as<int>(),
-                                                                            conf["decode_shift_size"].as<unsigned>());
-        else
-          beam = abstract_parser->abstract_log_prob_parser_beam(sentence, conf["decode_beam_size"].as<unsigned>());
+        if (conf.count("beam_within_word")) {
+          int beam_filter_at_word_size = conf["decode_beam_filter_at_word_size"].as<int>();
+          unsigned shift_size = conf["decode_shift_size"].as<unsigned>();
+          int decode_word_action_sig_length = conf["decode_word_action_sig_length"].as<int>();
+          if (decode_word_action_sig_length < 0) {
+            beam = abstract_parser->abstract_log_prob_parser_beam_within_word(sentence,
+                                                                              beam_size,
+                                                                              beam_filter_at_word_size,
+                                                                              shift_size);
+          } else {
+            beam = abstract_parser->abstract_log_prob_parser_beam_within_word_action_sigs(sentence,
+                                                                                          beam_size,
+                                                                                          beam_filter_at_word_size,
+                                                                                          shift_size,
+                                                                                          (unsigned) decode_word_action_sig_length,
+                                                                                          1,
+                                                                                          true);
+
+          }
+        } else {
+          beam = abstract_parser->abstract_log_prob_parser_beam(sentence, beam_size);
+        }
         //cerr << "beam size: " << beam.size() << endl;
         pred = beam[0].first;
         pred_nlp = beam[0].second;
