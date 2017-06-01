@@ -42,10 +42,12 @@ public:
     return data->size;
   }
 
-  std::vector<T> values() const {
+  std::vector<T> values(int limit = -1) const {
+    unsigned to_take = (limit >= 0) ? (unsigned) limit : size();
     std::vector<T> values;
     std::shared_ptr<Data> data(this->data);
-    while (data) {
+    while (data && to_take > 0) {
+      to_take--;
       values.push_back(data->value);
       data = data->previous;
     }
