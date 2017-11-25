@@ -1,0 +1,166 @@
+//
+// Created by dfried on 11/24/17.
+// mostly a port of https://github.com/jhcross/span-parser/blob/master/src/phrase_tree.py
+//
+
+#include <assert.h>
+#include <stdio.h>
+#include <string>
+#include <set>
+#include <map>
+#include "nt-parser/eval.h"
+
+#ifndef CNN_TREE_H
+#define CNN_TREE_H
+
+using namespace std;
+
+typedef map<tuple<string, unsigned, unsigned>, unsigned> BracketCounts;
+
+const set<string> PUNCTUATION = {",", ".", ":", "``", "''", "PU"};
+
+class Tree {
+public:
+
+  Tree(const string& symbol, const vector<Tree>& children, int leaf_index):
+          symbol(symbol), children(children), leaf_index(leaf_index) {}
+
+  unsigned left_span() {
+      if (_left_span >= 0) return (unsigned) _left_span;
+
+      if (leaf_index >= 0) {
+          _left_span = leaf_index;
+      } else {
+          _left_span = children.front().left_span();
+      }
+      return (unsigned) _left_span;
+  }
+
+  unsigned right_span() {
+      if (_right_span >= 0) return (unsigned) _right_span;
+
+      if (leaf_index >= 0) {
+          _right_span = leaf_index;
+      } else {
+          _right_span = children.back().right_span();
+      }
+      return (unsigned) _right_span;
+  }
+
+  BracketCounts brackets(bool advp_prt=true) {
+      BracketCounts bracket_counts;
+      update_bracket_counts(bracket_counts, advp_prt);
+      return bracket_counts;
+  }
+
+  void update_bracket_counts(BracketCounts& bracket_counts, bool advp_prt=true) {
+      if (leaf_index >= 0) return;
+
+      string nonterm = symbol;
+      if (advp_prt and nonterm == "(PRT")
+          nonterm = "(ADVP";
+
+      unsigned left = left_span();
+      unsigned right = right_span();
+
+      /*
+      while(left < right_span() && PUNCTUATION.find(sentence[left]) != PUNCTUATION.end()) {
+          left++;
+      }
+      while(right > left_span() && PUNCTUATION.find(sentence[right]) != PUNCTUATION.end()) {
+          right--;
+      }
+       */
+
+      if (left <= right && nonterm != "(TOP") {
+          auto key = tuple<string, unsigned, unsigned>(nonterm, left, right);
+          bracket_counts[key]++;
+      }
+      for (auto child: children) {
+          child.update_bracket_counts(bracket_counts, advp_prt);
+      }
+  }
+
+  MatchCounts compare(Tree& gold, bool advp_prt=true) {
+      BracketCounts predicted_brackets = brackets(advp_prt);
+      BracketCounts gold_brackets = gold.brackets(advp_prt);
+
+      /*
+      cout << "predicted" << endl;
+      for (auto& pair: predicted_brackets) {
+          cout << get<0>(pair.first) << "-" << get<1>(pair.first) << "-" << get<2>(pair.first) << " " << pair.second << "\t";
+      }
+      cout << endl;
+      cout << "gold" << endl;
+      for (auto& pair: gold_brackets) {
+          cout << get<0>(pair.first) << "-" << get<1>(pair.first) << "-" << get<2>(pair.first) << " " << pair.second << "\t";
+      }
+      cout << endl;
+       */
+
+      MatchCounts match_counts;
+      for (const auto& pair: gold_brackets) {
+          match_counts.gold += pair.second;
+          if (predicted_brackets.count(pair.first) > 0)
+              match_counts.correct += predicted_brackets[pair.first];
+      }
+
+      for (const auto& pair: predicted_brackets) {
+          match_counts.predicted += pair.second;
+      }
+
+      return match_counts;
+  }
+
+  /*
+  void set_sentence(vector<string>& sent) {
+      sentence = sent;
+      for (auto& child: children) {
+          child.set_sentence(sent);
+      }
+  }
+  */
+
+private:
+  string symbol;
+  vector<Tree> children;
+  int leaf_index = -1;
+  int _left_span = -1;
+  int _right_span = -1;
+};
+
+tuple<Tree, unsigned, unsigned> parse_linearized_helper(const vector<string>& linearized_tree_tokens, unsigned start_pos, unsigned leaf_index, bool drop_punct) {
+    unsigned pos = start_pos;
+    assert(pos < linearized_tree_tokens.size());
+    string symbol = linearized_tree_tokens[pos];
+    assert(symbol[0] == '(');
+
+    vector<Tree> children;
+    while(true) {
+        pos += 1;
+        assert(pos < linearized_tree_tokens.size());
+        string next_symbol = linearized_tree_tokens[pos];
+        if (next_symbol[0] == '(') {
+            auto parsed = parse_linearized_helper(linearized_tree_tokens, pos, leaf_index, drop_punct);
+            Tree subtree = get<0>(parsed);
+            children.push_back(subtree);
+            pos = get<1>(parsed);
+            leaf_index = get<2>(parsed);
+        } else if (next_symbol[0] == ')') {
+            break;
+        } else {
+            if (!drop_punct || PUNCTUATION.find(next_symbol) == PUNCTUATION.end()) {
+                vector<string> child_leaves;
+                children.push_back(Tree(next_symbol, vector<Tree>(), leaf_index));
+                leaf_index++;
+            }
+        }
+    }
+    return tuple<Tree, unsigned, unsigned> (Tree(symbol, children, -1), pos, leaf_index);
+};
+
+Tree parse_linearized(const vector<string>& linearized_tree_tokens, bool drop_punct) {
+    return get<0>(parse_linearized_helper(linearized_tree_tokens, 0, 0, drop_punct));
+}
+
+#endif //CNN_TREE_H

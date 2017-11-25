@@ -35,6 +35,7 @@
 #include "nt-parser/compressed-fstream.h"
 #include "nt-parser/eval.h"
 #include "nt-parser/stack.h"
+#include "nt-parser/tree.h"
 
 // dictionaries
 cnn::Dict termdict, ntermdict, adict, posdict, non_unked_termdict;
@@ -137,7 +138,7 @@ struct AbstractParserState {
 struct AbstractParser {
   virtual std::shared_ptr<AbstractParserState> new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) = 0;
 
-  vector<unsigned> abstract_log_prob_parser(
+  pair<vector<unsigned>, Expression> abstract_log_prob_parser(
       ComputationGraph* hg,
       const parser::Sentence& sent,
       const vector<int>& correct_actions,
@@ -217,21 +218,21 @@ struct AbstractParser {
 
     Expression tot_neglogprob = -sum(log_probs);
     assert(tot_neglogprob.pg != nullptr);
-    return results;
+    return pair<vector<unsigned>, Expression>(results, tot_neglogprob);
   }
 
-  virtual vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam(
+  virtual vector<pair<vector<unsigned>, Expression>> abstract_log_prob_parser_beam(
       //ComputationGraph* hg,
       const parser::Sentence& sent,
       unsigned beam_size
   ) {
     ComputationGraph hg;
     struct BeamItem {
-      explicit BeamItem(std::shared_ptr<AbstractParserState> state, unsigned last_action, double score) :
+      explicit BeamItem(std::shared_ptr<AbstractParserState> state, unsigned last_action, Expression score) :
               state(state), last_action(last_action), score(score)  {}
       std::shared_ptr<AbstractParserState> state;
       unsigned last_action;
-      double score;
+      Expression score;
     };
 
     bool is_evaluation = false;
@@ -246,13 +247,13 @@ struct AbstractParser {
     vector<Stack<BeamItem>> completed;
     vector<Stack<BeamItem>> beam;
 
-    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, 0.0)));
+    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, input(hg, 0.0))));
 
     unsigned action_count = 0;
     while (completed.size() < beam_size && !beam.empty()) {
       action_count += 1;
       // old beam item, action to be applied, resulting total score
-      vector<std::tuple<Stack<BeamItem>, unsigned, float>> successors;
+      vector<std::tuple<Stack<BeamItem>, unsigned, Expression>> successors;
 
       while (!beam.empty()) {
         Stack<BeamItem> current_stack_item = beam.back();
@@ -264,10 +265,10 @@ struct AbstractParser {
         vector<float> adist = as_vector(hg.incremental_forward());
 
         for (unsigned action: valid_actions) {
-          double action_score = adist[action];
-          double total_score = current_stack_item.back().score + action_score;
+          Expression action_score = pick(adiste, action);
+          Expression total_score = current_stack_item.back().score + action_score;
           successors.push_back(
-                  std::tuple<Stack<BeamItem>, unsigned, float>(current_stack_item, action, total_score)
+                  std::tuple<Stack<BeamItem>, unsigned, Expression>(current_stack_item, action, total_score)
           );
         }
       }
@@ -276,8 +277,8 @@ struct AbstractParser {
       partial_sort(successors.begin(),
                    successors.begin() + num_pruned_successors,
                    successors.end(),
-                   [](const std::tuple<Stack<BeamItem>, unsigned, float>& t1, const std::tuple<Stack<BeamItem>, unsigned, float>& t2) {
-                     return get<2>(t1) > get<2>(t2); // sort in descending order by total score
+                   [](const std::tuple<Stack<BeamItem>, unsigned, Expression>& t1, const std::tuple<Stack<BeamItem>, unsigned, Expression>& t2) {
+                     return as_scalar(get<2>(t1).value()) > as_scalar(get<2>(t2).value()); // sort in descending order by total score
                    });
       while (successors.size() > num_pruned_successors)
         successors.pop_back();
@@ -286,7 +287,7 @@ struct AbstractParser {
         Stack<BeamItem> current_stack_item = get<0>(successor);
         std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
         unsigned action = get<1>(successor);
-        double total_score = get<2>(successor);
+        Expression total_score = get<2>(successor);
         std::shared_ptr<AbstractParserState> successor_parser_state = current_parser_state->perform_action(action);
         Stack<BeamItem> successor_stack_item = current_stack_item.push_back(
                 BeamItem(successor_parser_state,
@@ -301,28 +302,28 @@ struct AbstractParser {
     }
 
     sort(completed.begin(), completed.end(), [](const Stack<BeamItem>& t1, const Stack<BeamItem>& t2) {
-                     return t1.back().score > t2.back().score; // sort in descending order by total score
+                     return as_scalar(t1.back().score.value()) > as_scalar(t2.back().score.value()); // sort in descending order by total score
                    });
 
-    vector<pair<vector<unsigned>, double>> completed_actions_and_nlp;
+    vector<pair<vector<unsigned>, Expression>> completed_actions_and_nlp;
     for (const auto & completed_stack_item: completed) {
       completed_stack_item.back().state->finish_sentence();
 
       Stack<BeamItem> stack_item = completed_stack_item;
-      double nlp = - stack_item.back().score;
+      Expression nlp = -1 *  stack_item.back().score;
       vector<unsigned> actions;
       while (stack_item.back().last_action != START_OF_SENTENCE_ACTION) {
         actions.push_back(stack_item.back().last_action);
         stack_item = stack_item.pop_back();
       }
       reverse(actions.begin(), actions.end());
-      completed_actions_and_nlp.push_back(pair<vector<unsigned>, double>(actions, nlp));
+      completed_actions_and_nlp.push_back(pair<vector<unsigned>, Expression>(actions, nlp));
     }
 
     return completed_actions_and_nlp;
   }
 
-  virtual vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam_within_word(
+  virtual vector<pair<vector<unsigned>, Expression>> abstract_log_prob_parser_beam_within_word(
           //ComputationGraph* hg,
           const parser::Sentence& sent,
           unsigned beam_size,
@@ -333,11 +334,11 @@ struct AbstractParser {
         beam_filter_at_word_size = beam_size;
 
     struct BeamItem {
-      explicit BeamItem(std::shared_ptr<AbstractParserState> state, unsigned last_action, double score) :
+      explicit BeamItem(std::shared_ptr<AbstractParserState> state, unsigned last_action, Expression score) :
               state(state), last_action(last_action), score(score)  {}
       std::shared_ptr<AbstractParserState> state;
       unsigned last_action;
-      double score;
+      Expression score;
     };
 
     bool is_evaluation = false;
@@ -351,13 +352,13 @@ struct AbstractParser {
     vector<Stack<BeamItem>> completed;
     vector<Stack<BeamItem>> beam;
 
-    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, 0.0)));
+    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, input(hg, 0.0))));
 
     for (unsigned current_termc = 0; current_termc < sent.size(); current_termc++) {
       completed.clear();
       while (completed.size() < beam_size && !beam.empty()) {
         // old beam item, action to be applied, resulting total score
-        vector<std::tuple<Stack<BeamItem>, unsigned, float>> successors;
+        vector<std::tuple<Stack<BeamItem>, unsigned, Expression>> successors;
 
         while (!beam.empty()) {
           Stack<BeamItem> current_stack_item = beam.back();
@@ -369,10 +370,10 @@ struct AbstractParser {
           vector<float> adist = as_vector(hg.incremental_forward());
 
           for (unsigned action: valid_actions) {
-            double action_score = adist[action];
-            double total_score = current_stack_item.back().score + action_score;
+            Expression action_score = pick(adiste, action);
+            Expression total_score = current_stack_item.back().score + action_score;
             successors.push_back(
-                    std::tuple<Stack<BeamItem>, unsigned, float>(current_stack_item, action, total_score)
+                    std::tuple<Stack<BeamItem>, unsigned, Expression>(current_stack_item, action, total_score)
             );
           }
         }
@@ -381,9 +382,9 @@ struct AbstractParser {
         partial_sort(successors.begin(),
                      successors.begin() + num_pruned_successors,
                      successors.end(),
-                     [](const std::tuple<Stack<BeamItem>, unsigned, float> &t1,
-                        const std::tuple<Stack<BeamItem>, unsigned, float> &t2) {
-                         return get<2>(t1) > get<2>(t2); // sort in descending order by total score
+                     [](const std::tuple<Stack<BeamItem>, unsigned, Expression> &t1,
+                        const std::tuple<Stack<BeamItem>, unsigned, Expression> &t2) {
+                         return as_scalar(get<2>(t1).value()) > as_scalar(get<2>(t2).value()); // sort in descending order by total score
                      });
         while (successors.size() > num_pruned_successors)
           successors.pop_back();
@@ -392,7 +393,7 @@ struct AbstractParser {
           Stack<BeamItem> current_stack_item = get<0>(successor);
           std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
           unsigned action = get<1>(successor);
-          double total_score = get<2>(successor);
+          Expression total_score = get<2>(successor);
           std::shared_ptr<AbstractParserState> successor_parser_state = current_parser_state->perform_action(action);
           Stack<BeamItem> successor_stack_item = current_stack_item.push_back(
                   BeamItem(successor_parser_state,
@@ -407,7 +408,7 @@ struct AbstractParser {
       }
 
       sort(completed.begin(), completed.end(), [](const Stack<BeamItem> &t1, const Stack<BeamItem> &t2) {
-          return t1.back().score > t2.back().score; // sort in descending order by total score
+          return as_scalar(t1.back().score.value()) > as_scalar(t2.back().score.value()); // sort in descending order by total score
       });
 
       beam.clear();
@@ -416,19 +417,19 @@ struct AbstractParser {
       std::copy(completed.begin(), completed.begin() + std::min(num_pruned_completion, (unsigned) completed.size()), std::back_inserter(beam));
     }
 
-    vector<pair<vector<unsigned>, double>> completed_actions_and_nlp;
+    vector<pair<vector<unsigned>, Expression>> completed_actions_and_nlp;
     for (const auto & completed_stack_item: completed) {
       completed_stack_item.back().state->finish_sentence();
 
       Stack<BeamItem> stack_item = completed_stack_item;
-      double nlp = - stack_item.back().score;
+      Expression nlp = -1 * stack_item.back().score;
       vector<unsigned> actions;
       while (stack_item.back().last_action != START_OF_SENTENCE_ACTION) {
         actions.push_back(stack_item.back().last_action);
         stack_item = stack_item.pop_back();
       }
       reverse(actions.begin(), actions.end());
-      completed_actions_and_nlp.push_back(pair<vector<unsigned>, double>(actions, nlp));
+      completed_actions_and_nlp.push_back(pair<vector<unsigned>, Expression>(actions, nlp));
     }
 
     return completed_actions_and_nlp;
@@ -1371,7 +1372,7 @@ struct EnsembledParser : public AbstractParser {
     return std::static_pointer_cast<AbstractParserState>(std::make_shared<EnsembledParserState>(this, states));
   }
 
-  vector<pair<vector<unsigned>, double>> abstract_log_prob_parser_beam(
+  vector<pair<vector<unsigned>, Expression>> abstract_log_prob_parser_beam(
           //ComputationGraph* hg,
           const parser::Sentence& sent,
           unsigned beam_size
@@ -1384,16 +1385,15 @@ struct EnsembledParser : public AbstractParser {
           all_candidates.insert(results.first);
         }
       }
-      vector<pair<vector<unsigned>, double>> candidates_and_nlps;
+      vector<pair<vector<unsigned>, Expression>> candidates_and_nlps;
       for (vector<unsigned> candidate : all_candidates) {
         ComputationGraph hg;
         double right;
-        abstract_log_prob_parser(&hg, sent, vector<int>(candidate.begin(), candidate.end()), &right, true, false);
-        double ensemble_nlp = as_scalar(hg.incremental_forward());
-        candidates_and_nlps.push_back(pair<vector<unsigned>, double>(candidate, ensemble_nlp));
+        auto candidate_and_ensemble_nlp = abstract_log_prob_parser(&hg, sent, vector<int>(candidate.begin(), candidate.end()), &right, true, false);
+        candidates_and_nlps.push_back(candidate_and_ensemble_nlp);
       }
-      sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](const std::pair<vector<unsigned>, double>& t1, const std::pair<vector<unsigned>, double>& t2) {
-        return t1.second < t2.second; // sort by ascending nlp
+      sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](const std::pair<vector<unsigned>, Expression>& t1, const std::pair<vector<unsigned>, Expression>& t2) {
+        return as_scalar(t1.second.value()) < as_scalar(t2.second.value()); // sort by ascending nlp
       });
       while (candidates_and_nlps.size() > beam_size)
         candidates_and_nlps.pop_back();
@@ -1760,6 +1760,30 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
   out_stream << endl;
 }
 
+Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence, bool drop_punct) {
+  vector<string> linearized;
+  unsigned ti = 0;
+  for (int a: actions) {
+    string token;
+    if (adict.Convert(a)[0] == 'N') {
+      linearized.push_back("(" + ntermdict.Convert(action2NTindex.find(a)->second));
+    }
+    else if (adict.Convert(a)[0] == 'S') {
+      linearized.push_back(termdict.Convert(sentence.raw[ti++]));
+      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+        linearized.push_back(")");
+      }
+    } else {
+      linearized.push_back(")");
+    }
+  }
+    /*
+  for (auto& sym: linearized) cout << sym << " ";
+  cout << endl;
+     */
+  return parse_linearized(linearized, drop_punct);
+}
+
 int main(int argc, char** argv) {
   unsigned random_seed = cnn::Initialize(argc, argv);
 
@@ -1988,74 +2012,29 @@ int main(int argc, char** argv) {
               const auto& sentence=dev_corpus.sents[sii];
               const vector<int>& actions=dev_corpus.actions[sii];
               dwords += sentence.size();
-              {  ComputationGraph hg;
+              {
+                ComputationGraph hg;
                 parser.log_prob_parser(&hg,sentence,actions,&right,true);
                 double lp = as_scalar(hg.incremental_forward());
                 llh += lp;
               }
               ComputationGraph hg;
               vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,vector<int>(),&right,true);
-              int ti = 0;
-              for (auto a : pred) {
-                if (adict.Convert(a)[0] == 'N') {
-                  out << '(' << ntermdict.Convert(action2NTindex.find(a)->second) << ' ';
-                } else if (adict.Convert(a)[0] == 'S') {
-                  if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-                    out << termdict.Convert(sentence.raw[ti++]) << ") ";
-                  } else {
-                    if (true) {
-                      string preterminal = "XX";
-                      out << '(' << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ") ";
-                    } else { // use this branch to surpress preterminals
-                      out << termdict.Convert(sentence.raw[ti++]) << ' ';
-                    }
-                  }
-                } else out << ") ";
-              }
-              out << endl;
-              double lp = 0;
+              print_parse(pred, sentence, true, out);
               trs += actions.size();
             }
             auto t_end = chrono::high_resolution_clock::now();
             out.close();
             double err = (trs - right) / trs;
             cerr << "Dev output in " << pfx << endl;
-            //parser::EvalBResults res = parser::Evaluate("foo", pfx);
-            std::string evaluable_fname = pfx + "_evaluable.txt";
-            std::string evalbout_fname = pfx + "_evalbout.txt";
-            std::string command="python remove_dev_unk.py "+ corpus.devdata +" "+pfx+" > " + evaluable_fname;
-            const char* cmd=command.c_str();
-            system(cmd);
+            pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(corpus.devdata, pfx, pfx + "_evalbout.txt");
+            Metrics metrics = results.first;
 
-            std::string command2="EVALB/evalb -p EVALB/COLLINS.prm "+corpus.devdata+" " + evaluable_fname + " > " + evalbout_fname;
-            const char* cmd2=command2.c_str();
-
-            system(cmd2);
-
-            std::ifstream evalfile(evalbout_fname);
-            std::string lineS;
-            std::string brackstr="Bracketing FMeasure";
-            double newfmeasure=0.0;
-            std::string strfmeasure="";
-            bool found=0;
-            while (getline(evalfile, lineS) && !newfmeasure){
-              if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
-                //std::cout<<lineS<<"\n";
-                strfmeasure=lineS.substr(lineS.size()-5, lineS.size());
-                std::string::size_type sz;     // alias of size_t
-
-                newfmeasure = std::stod (strfmeasure,&sz);
-                //std::cout<<strfmeasure<<"\n";
-              }
-            }
-
-
-
-            cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << newfmeasure << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
-            if (newfmeasure>bestf1) {
+            cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
+            if (metrics.f1>bestf1) {
               cerr << "  new best...writing model to " << fname << ".bin ...\n";
               best_dev_err = err;
-              bestf1=newfmeasure;
+              bestf1=metrics.f1;
               ofstream out(fname + ".bin");
               if (conf.count("text_format")) {
                   boost::archive::text_oarchive oa(out);
@@ -2234,32 +2213,33 @@ int main(int argc, char** argv) {
         set<vector<unsigned>> samples;
         if (conf.count("samples_include_gold")) {
           ComputationGraph hg;
-          vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, test_corpus.actions[sii],
+          auto result_and_nlp = abstract_parser->abstract_log_prob_parser(&hg, sentence, test_corpus.actions[sii],
                                                                               &right, true);
-          double lp = as_scalar(hg.incremental_forward());
-          cout << sii << " ||| " << -lp << " |||";
+          vector<unsigned> result = result_and_nlp.first;
+          double nlp = as_scalar(result_and_nlp.second.value());
+          cout << sii << " ||| " << -nlp << " |||";
           vector<unsigned> converted_actions(test_corpus.actions[sii].begin(), test_corpus.actions[sii].end());
           print_parse(converted_actions, sentence, false, cout);
-          ptb_out << sii << " ||| " << -lp << " |||";
+          ptb_out << sii << " ||| " << -nlp << " |||";
           print_parse(converted_actions, sentence, true, ptb_out);
           samples.insert(converted_actions);
         }
 
         for (unsigned z = 0; z < N_SAMPLES; ++z) {
           ComputationGraph hg;
-          vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, actions, &right, sample,
+          pair<vector<unsigned>, Expression> result_and_nlp = abstract_parser->abstract_log_prob_parser(&hg, sentence, actions, &right, sample,
                                                                               true); // TODO: fix ordering of sample and eval here
-          double lp = as_scalar(hg.incremental_forward());
+          double lp = as_scalar(result_and_nlp.second.value());
           cout << sii << " ||| " << -lp << " |||";
-          print_parse(result, sentence, false, cout);
+          print_parse(result_and_nlp.first, sentence, false, cout);
           ptb_out << sii << " ||| " << -lp << " |||";
-          print_parse(result, sentence, true, ptb_out);
-          samples.insert(result);
+          print_parse(result_and_nlp.first, sentence, true, ptb_out);
+          samples.insert(result_and_nlp.first);
         }
 
         if (output_beam_as_samples) {
           //ComputationGraph hg;
-          vector<pair<vector<unsigned>, double>> beam_results;
+          vector<pair<vector<unsigned>, Expression>> beam_results;
           if (conf.count("beam_within_word")) {
             beam_results = abstract_parser->abstract_log_prob_parser_beam_within_word(sentence,
                                                                                       beam_size,
@@ -2273,11 +2253,11 @@ int main(int argc, char** argv) {
           unsigned long num_results = beam_results.size();
           for (unsigned long i = 0; i < beam_size; i++) {
             unsigned long ix = std::min(i, num_results - 1);
-            pair<vector<unsigned>, double> result_and_nlp = beam_results[ix];
-            double lp = result_and_nlp.second;
-            cout << sii << " ||| " << -lp << " |||";
+            pair<vector<unsigned>, Expression> result_and_nlp = beam_results[ix];
+            double nlp = as_scalar(result_and_nlp.second.value());
+            cout << sii << " ||| " << -nlp << " |||";
             print_parse(result_and_nlp.first, sentence, false, cout);
-            ptb_out << sii << " ||| " << -lp << " |||";
+            ptb_out << sii << " ||| " << -nlp << " |||";
             print_parse(result_and_nlp.first, sentence, true, ptb_out);
             samples.insert(result_and_nlp.first);
           }
@@ -2300,13 +2280,16 @@ int main(int argc, char** argv) {
       ofstream out(pfx.c_str());
       double right = 0;
       auto t_start = chrono::high_resolution_clock::now();
+      MatchCounts match_counts;
+      vector<MatchCounts> all_match_counts;
       for (unsigned sii = 0; sii < test_size; ++sii) {
         const auto &sentence = test_corpus.sents[sii];
         const vector<int> &actions = test_corpus.actions[sii];
+        Tree gold_tree = to_tree(actions, sentence, true);
         // greedy predict
-        pair<vector<unsigned>, double> result_and_nlp;
+        pair<vector<unsigned>, Expression> result_and_nlp;
         if (beam_size > 1 || conf.count("beam_within_word")) {
-          vector<pair<vector<unsigned>, double>> beam_results;
+          vector<pair<vector<unsigned>, Expression>> beam_results;
           if (conf.count("beam_within_word")) {
             beam_results = abstract_parser->abstract_log_prob_parser_beam_within_word(sentence,
                                                                                       beam_size,
@@ -2327,10 +2310,8 @@ int main(int argc, char** argv) {
            */
         } else {
           ComputationGraph hg;
-          vector<unsigned> result = abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(), &right,
+          result_and_nlp = abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(), &right,
                                                                               true);
-          double nlp = as_scalar(hg.incremental_forward());
-          result_and_nlp = pair<vector<unsigned>, double>(result, nlp);
 
           /*
           auto beam_result_and_nlp = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, 1);
@@ -2342,59 +2323,30 @@ int main(int argc, char** argv) {
           assert(result == beam_result);
            */
         }
-        int ti = 0;
-        // TODO: convert to use print_parse
-        for (auto a : result_and_nlp.first) {
-          if (adict.Convert(a)[0] == 'N') {
-            out << '(' << ntermdict.Convert(action2NTindex.find(a)->second) << ' ';
-          } else if (adict.Convert(a)[0] == 'S') {
-            if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-              out << termdict.Convert(sentence.raw[ti++]) << ") ";
-            } else {
-              if (true) {
-                string preterminal = "XX";
-                out << '(' << preterminal << ' ' << termdict.Convert(sentence.raw[ti++]) << ") ";
-              } else { // use this branch to surpress preterminals
-                out << termdict.Convert(sentence.raw[ti++]) << ' ';
-              }
-            }
-          } else out << ") ";
-        }
-        out << endl;
+        Tree predicted_tree = to_tree(vector<int>(result_and_nlp.first.begin(), result_and_nlp.first.end()), sentence, true);
+        MatchCounts this_counts = predicted_tree.compare(gold_tree, true);
+        all_match_counts.push_back(this_counts);
+        //cout << (sii+1) << "\tcorrect " << this_counts.correct << "\tgold " << this_counts.gold << "\tpred " << this_counts.predicted << endl;
+        match_counts += this_counts;
+        print_parse(result_and_nlp.first, sentence, true, out);
       }
       auto t_end = chrono::high_resolution_clock::now();
       out.close();
       cerr << "Test output in " << pfx << endl;
-      //parser::EvalBResults res = parser::Evaluate("foo", pfx);
-      std::string evaluable_fname = pfx + "_evaluable.txt";
-      std::string evalbout_fname = pfx + "_evalbout.txt";
-      std::string command = "python remove_dev_unk.py " + corpus.devdata + " " + pfx + " > " + evaluable_fname;
-      const char *cmd = command.c_str();
-      system(cmd);
-
-      std::string command2 =
-              "EVALB/evalb -p EVALB/COLLINS.prm " + corpus.devdata + " " + evaluable_fname + " > " + evalbout_fname;
-      const char *cmd2 = command2.c_str();
-
-      system(cmd2);
-
-      std::ifstream evalfile(evalbout_fname);
-      std::string lineS;
-      std::string brackstr = "Bracketing FMeasure";
-      double newfmeasure = 0.0;
-      std::string strfmeasure = "";
-      bool found = 0;
-      while (getline(evalfile, lineS) && !newfmeasure) {
-        if (lineS.compare(0, brackstr.length(), brackstr) == 0) {
-          //std::cout<<lineS<<"\n";
-          strfmeasure = lineS.substr(lineS.size() - 5, lineS.size());
-          std::string::size_type sz;
-          newfmeasure = std::stod(strfmeasure, &sz);
-          //std::cout<<strfmeasure<<"\n";
+      pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(corpus.devdata, pfx, pfx + "_evalbout.txt");
+      Metrics metrics = results.first;
+        /*
+         * TODO: fix punct dropping?
+      for (unsigned i = 0; i < all_match_counts.size(); i++) {
+        if (all_match_counts[i] != results.second[i]) {
+          cout << "mismatch for " << (i+1) << endl;
+          cout << all_match_counts[i].correct << " " << all_match_counts[i].gold << " " << all_match_counts[i].predicted << endl;
+          cout << results.second[i].correct << " " << results.second[i].gold << " " << results.second[i].predicted << endl;
         }
       }
-
-      cerr << "F1score: " << newfmeasure << "\n";
+         */
+      //cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << "\n";
+      cerr << "recall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
     }
   }
 }
