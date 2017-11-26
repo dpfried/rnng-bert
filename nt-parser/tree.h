@@ -22,8 +22,8 @@ const set<string> PUNCTUATION = {",", ".", ":", "``", "''", "PU"};
 class Tree {
 public:
 
-  Tree(const string& symbol, const vector<Tree>& children, int leaf_index):
-          symbol(symbol), children(children), leaf_index(leaf_index) {}
+  Tree(const string& symbol, const vector<Tree>& children, shared_ptr<vector<string>> sentence, int leaf_index):
+          symbol(symbol), children(children), sentence(sentence), leaf_index(leaf_index) {}
 
   unsigned left_span() {
       if (_left_span >= 0) return (unsigned) _left_span;
@@ -63,14 +63,12 @@ public:
       unsigned left = left_span();
       unsigned right = right_span();
 
-      /*
-      while(left < right_span() && PUNCTUATION.find(sentence[left]) != PUNCTUATION.end()) {
+      while(left < right_span() && PUNCTUATION.find((*sentence)[left]) != PUNCTUATION.end()) {
           left++;
       }
-      while(right > left_span() && PUNCTUATION.find(sentence[right]) != PUNCTUATION.end()) {
+      while(right > left_span() && PUNCTUATION.find((*sentence)[right]) != PUNCTUATION.end()) {
           right--;
       }
-       */
 
       if (left <= right && nonterm != "(TOP") {
           auto key = tuple<string, unsigned, unsigned>(nonterm, left, right);
@@ -124,24 +122,26 @@ public:
 private:
   string symbol;
   vector<Tree> children;
+  shared_ptr<vector<string>> sentence;
   int leaf_index = -1;
   int _left_span = -1;
   int _right_span = -1;
 };
 
-tuple<Tree, unsigned, unsigned> parse_linearized_helper(const vector<string>& linearized_tree_tokens, unsigned start_pos, unsigned leaf_index, bool drop_punct) {
+tuple<Tree, unsigned, unsigned> parse_linearized_helper(const vector<string>& linearized_tree_tokens, shared_ptr<vector<string>> sentence, unsigned start_pos, unsigned leaf_index) {
     unsigned pos = start_pos;
     assert(pos < linearized_tree_tokens.size());
     string symbol = linearized_tree_tokens[pos];
     assert(symbol[0] == '(');
 
     vector<Tree> children;
+
     while(true) {
         pos += 1;
         assert(pos < linearized_tree_tokens.size());
         string next_symbol = linearized_tree_tokens[pos];
         if (next_symbol[0] == '(') {
-            auto parsed = parse_linearized_helper(linearized_tree_tokens, pos, leaf_index, drop_punct);
+            auto parsed = parse_linearized_helper(linearized_tree_tokens, sentence, pos, leaf_index);
             Tree subtree = get<0>(parsed);
             children.push_back(subtree);
             pos = get<1>(parsed);
@@ -149,18 +149,18 @@ tuple<Tree, unsigned, unsigned> parse_linearized_helper(const vector<string>& li
         } else if (next_symbol[0] == ')') {
             break;
         } else {
-            if (!drop_punct || PUNCTUATION.find(next_symbol) == PUNCTUATION.end()) {
-                vector<string> child_leaves;
-                children.push_back(Tree(next_symbol, vector<Tree>(), leaf_index));
-                leaf_index++;
-            }
+            vector<string> child_leaves;
+            sentence->push_back(next_symbol);
+            children.push_back(Tree(next_symbol, vector<Tree>(), sentence, leaf_index));
+            leaf_index++;
         }
     }
-    return tuple<Tree, unsigned, unsigned> (Tree(symbol, children, -1), pos, leaf_index);
+    return tuple<Tree, unsigned, unsigned> (Tree(symbol, children, sentence, -1), pos, leaf_index);
 };
 
-Tree parse_linearized(const vector<string>& linearized_tree_tokens, bool drop_punct) {
-    return get<0>(parse_linearized_helper(linearized_tree_tokens, 0, 0, drop_punct));
+Tree parse_linearized(const vector<string>& linearized_tree_tokens) {
+    shared_ptr<vector<string>> sentence = make_shared<vector<string>>();
+    return get<0>(parse_linearized_helper(linearized_tree_tokens, sentence, 0, 0));
 }
 
 #endif //CNN_TREE_H

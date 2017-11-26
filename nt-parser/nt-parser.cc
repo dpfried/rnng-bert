@@ -78,40 +78,42 @@ vector<bool> singletons; // used during training
 void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   po::options_description opts("Configuration options");
   opts.add_options()
-        ("training_data,T", po::value<string>(), "List of Transitions - Training corpus")
-        ("explicit_terminal_reduce,x", "[recommended] If set, the parser must explicitly process a REDUCE operation to complete a preterminal constituent")
-        ("dev_data,d", po::value<string>(), "Development corpus")
-        ("bracketing_dev_data,C", po::value<string>(), "Development bracketed corpus")
-        ("gold_training_data", po::value<string>(), "List of Transitions - smaller corpus (e.g. wsj in a wsj+silver experiment)")
-        ("silver_blocks_per_gold", po::value<unsigned>()->default_value(10), "How many same-sized blocks of the silver data should be sampled and trained, between every train on the entire gold set?")
-        ("test_data,p", po::value<string>(), "Test corpus")
-        ("dropout,D", po::value<float>(), "Dropout rate")
-        ("samples,s", po::value<unsigned>(), "Sample N trees for each test sentence instead of greedy max decoding")
-        ("output_beam_as_samples", "Print the items in the beam in the same format as samples")
-        ("samples_include_gold", "Also include the gold parse in the list of samples output")
-        ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
-        ("model,m", po::value<string>(), "Load saved model from this file")
-        ("use_pos_tags,P", "make POS tags visible to parser")
-        ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
-        ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
-        ("pos_dim", po::value<unsigned>()->default_value(12), "POS dimension")
-        ("input_dim", po::value<unsigned>()->default_value(32), "input embedding size")
-        ("hidden_dim", po::value<unsigned>()->default_value(64), "hidden dimension")
-        ("pretrained_dim", po::value<unsigned>()->default_value(50), "pretrained input dimension")
-        ("lstm_input_dim", po::value<unsigned>()->default_value(60), "LSTM input dimension")
-        ("train,t", "Should training be run?")
-        ("words,w", po::value<string>(), "Pretrained word embeddings")
-        ("beam_size,b", po::value<unsigned>()->default_value(1), "beam size")
-        ("beam_within_word", "greedy decode within word")
-        ("beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
-        ("no_stack,S", "Don't encode the stack")
-        ("text_format", "serialize models in text")
-        ("factored_ensemble_beam", "do beam search in each model in the ensemble separately, then take the union and rescore with the entire ensemble")
-        ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
-        ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
-        ("combine_type", po::value<string>(), "Decision-level combination type for ensemble (sum or product)")
+          ("training_data,T", po::value<string>(), "List of Transitions - Training corpus")
+          ("explicit_terminal_reduce,x", "[recommended] If set, the parser must explicitly process a REDUCE operation to complete a preterminal constituent")
+          ("dev_data,d", po::value<string>(), "Development corpus")
+          ("bracketing_dev_data,C", po::value<string>(), "Development bracketed corpus")
+          ("gold_training_data", po::value<string>(), "List of Transitions - smaller corpus (e.g. wsj in a wsj+silver experiment)")
+          ("silver_blocks_per_gold", po::value<unsigned>()->default_value(10), "How many same-sized blocks of the silver data should be sampled and trained, between every train on the entire gold set?")
+          ("test_data,p", po::value<string>(), "Test corpus")
+          ("dropout,D", po::value<float>(), "Dropout rate")
+          ("samples,s", po::value<unsigned>(), "Sample N trees for each test sentence instead of greedy max decoding")
+          ("output_beam_as_samples", "Print the items in the beam in the same format as samples")
+          ("samples_include_gold", "Also include the gold parse in the list of samples output")
+          ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
+          ("model,m", po::value<string>(), "Load saved model from this file")
+          ("use_pos_tags,P", "make POS tags visible to parser")
+          ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
+          ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
+          ("pos_dim", po::value<unsigned>()->default_value(12), "POS dimension")
+          ("input_dim", po::value<unsigned>()->default_value(32), "input embedding size")
+          ("hidden_dim", po::value<unsigned>()->default_value(64), "hidden dimension")
+          ("pretrained_dim", po::value<unsigned>()->default_value(50), "pretrained input dimension")
+          ("lstm_input_dim", po::value<unsigned>()->default_value(60), "LSTM input dimension")
+          ("train,t", "Should training be run?")
+          ("words,w", po::value<string>(), "Pretrained word embeddings")
+          ("beam_size,b", po::value<unsigned>()->default_value(1), "beam size")
+          ("beam_within_word", "greedy decode within word")
+          ("beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
+          ("no_stack,S", "Don't encode the stack")
+          ("text_format", "serialize models in text")
+          ("factored_ensemble_beam", "do beam search in each model in the ensemble separately, then take the union and rescore with the entire ensemble")
+          ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
+          ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
+          ("combine_type", po::value<string>(), "Decision-level combination type for ensemble (sum or product)")
           ("block_count", po::value<unsigned>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
           ("block_num", po::value<unsigned>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
+          ("min_risk_training", "min risk training (default F1)")
+          ("min_risk_samples", po::value<unsigned>()->default_value(10), "min risk number of samples")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1760,7 +1762,7 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
   out_stream << endl;
 }
 
-Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence, bool drop_punct) {
+Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence) {
   vector<string> linearized;
   unsigned ti = 0;
   for (int a: actions) {
@@ -1781,7 +1783,7 @@ Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence, bool 
   for (auto& sym: linearized) cout << sym << " ";
   cout << endl;
      */
-  return parse_linearized(linearized, drop_punct);
+  return parse_linearized(linearized);
 }
 
 int main(int argc, char** argv) {
@@ -1807,6 +1809,7 @@ int main(int argc, char** argv) {
   POS_DIM = conf["pos_dim"].as<unsigned>();
   USE_PRETRAINED = conf.count("words");
   NO_STACK = conf.count("no_stack");
+
 
   SILVER_BLOCKS_PER_GOLD = conf["silver_blocks_per_gold"].as<unsigned>();
 
@@ -1957,6 +1960,52 @@ int main(int argc, char** argv) {
     double best_dev_err = 9e99;
     double bestf1=0.0;
 
+    bool min_risk_training = conf.count("min_risk_training") > 0;
+    unsigned min_risk_samples = conf["min_risk_samples"].as<unsigned>();
+    assert(min_risk_samples > 0);
+
+    vector<double> sampled_f1s;
+
+    auto train_sentence = [&](const parser::Sentence& sentence, const vector<int>& actions, double* right) -> double {
+        ComputationGraph hg;
+        double loss_v;
+        if (conf.count("min_risk_training")) {
+          Expression loss = input(hg, 0.0);
+          Tree gold_tree = to_tree(actions, sentence);
+          /*
+          cerr << "gold ";
+          print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cerr);
+          cerr << endl;
+          */
+          for (int i = 0; i < min_risk_samples; i++) {
+            double blank;
+            auto sample_and_nlp = parser.abstract_log_prob_parser(&hg, sentence, vector<int>(), &blank, false, true);
+            /*
+            cerr << " " << i;
+            print_parse(sample_and_nlp.first, sentence, true, cerr);
+            cerr << endl;
+            */
+            Tree pred_tree = to_tree(vector<int>(sample_and_nlp.first.begin(), sample_and_nlp.first.end()), sentence);
+            double scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0;
+            sampled_f1s.push_back(scaled_f1);
+            loss = loss + (sample_and_nlp.second * input(hg, scaled_f1));
+          }
+          loss = loss * input(hg, 1.0 / min_risk_samples);
+          loss_v = as_scalar(hg.incremental_forward());
+          hg.backward();
+        } else {
+          auto result_and_nlp = parser.abstract_log_prob_parser(&hg, sentence, actions, right, false);
+          //auto result_and_nlp = parser.log_prob_parser(&hg, sentence, actions, right, false);
+          //parser.log_prob_parser(&hg, sentence, actions, right, false);
+          loss_v = as_scalar(hg.incremental_forward());
+          hg.backward();
+
+          //loss_v = as_scalar(result_and_nlp.second.value());
+        }
+        sgd.update(1.0);
+        return loss_v;
+    };
+
     auto train_block = [&](const parser::TopDownOracle& corpus, vector<unsigned>::iterator indices_begin, vector<unsigned>::iterator indices_end, int epoch_size) {
       unsigned sentence_count = std::distance(indices_begin, indices_end);
       status_every_i_iterations = min(status_every_i_iterations, sentence_count);
@@ -1973,16 +2022,12 @@ int main(int argc, char** argv) {
         auto& sentence = corpus.sents[*index_iter];
         const vector<int>& actions=corpus.actions[*index_iter];
         {
-          ComputationGraph hg;
-          parser.log_prob_parser(&hg, sentence, actions, &right, false);
-          double lp = as_scalar(hg.incremental_forward());
-          if (lp < 0) {
-            cerr << "Log prob < 0 on sentence " << *index_iter << ": lp=" << lp << endl;
-            assert(lp >= 0.0);
+          double loss = train_sentence(sentence, actions, &right);
+          if (loss < 0) {
+            cerr << "loss < 0 on sentence " << *index_iter << ": loss=" << loss << endl;
+            //assert(lp >= 0.0)
           }
-          hg.backward();
-          sgd.update(1.0);
-          llh += lp;
+          llh += loss;
         }
         trs += actions.size();
         words += sentence.size();
@@ -1994,7 +2039,16 @@ int main(int argc, char** argv) {
           auto dur = chrono::duration_cast<chrono::milliseconds>(time_now - time_start);
           cerr << "update #" << iter << " (epoch " << (static_cast<double>(tot_seen) / epoch_size) <<
                /*" |time=" << put_time(localtime(&time_now), "%c %Z") << ")\tllh: "<< */
-               ") per-action-ppl: " << exp(llh / trs) << " per-input-ppl: " << exp(llh / words) << " per-sent-ppl: " << exp(llh / status_every_i_iterations) << " err: " << (trs - right) / trs << " [" << dur.count() / (double)status_every_i_iterations << "ms per instance]" << endl;
+               ") per-action-ppl: " << exp(llh / trs) << " per-input-ppl: " << exp(llh / words) << " per-sent-ppl: " << exp(llh / status_every_i_iterations) << " err: " << (trs - right) / trs << " [" << dur.count() / (double)status_every_i_iterations << "ms per instance]";
+
+          if (min_risk_training) {
+            double total_f1 = 0;
+            for (double f1: sampled_f1s) total_f1 += f1;
+            double mean_f1 = total_f1 / sampled_f1s.size();
+            sampled_f1s.clear();
+            cerr << " mean samp f1: " << mean_f1;
+          }
+          cerr << endl;
           llh = trs = right = words = 0;
 
           if (iter % 25 == 0) { // report on dev set
@@ -2285,7 +2339,7 @@ int main(int argc, char** argv) {
       for (unsigned sii = 0; sii < test_size; ++sii) {
         const auto &sentence = test_corpus.sents[sii];
         const vector<int> &actions = test_corpus.actions[sii];
-        Tree gold_tree = to_tree(actions, sentence, true);
+        Tree gold_tree = to_tree(actions, sentence);
         // greedy predict
         pair<vector<unsigned>, Expression> result_and_nlp;
         if (beam_size > 1 || conf.count("beam_within_word")) {
@@ -2323,7 +2377,7 @@ int main(int argc, char** argv) {
           assert(result == beam_result);
            */
         }
-        Tree predicted_tree = to_tree(vector<int>(result_and_nlp.first.begin(), result_and_nlp.first.end()), sentence, true);
+        Tree predicted_tree = to_tree(vector<int>(result_and_nlp.first.begin(), result_and_nlp.first.end()), sentence);
         MatchCounts this_counts = predicted_tree.compare(gold_tree, true);
         all_match_counts.push_back(this_counts);
         //cout << (sii+1) << "\tcorrect " << this_counts.correct << "\tgold " << this_counts.gold << "\tpred " << this_counts.predicted << endl;
@@ -2336,7 +2390,7 @@ int main(int argc, char** argv) {
       pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(corpus.devdata, pfx, pfx + "_evalbout.txt");
       Metrics metrics = results.first;
         /*
-         * TODO: fix punct dropping?
+      // TODO: fix punct dropping?
       for (unsigned i = 0; i < all_match_counts.size(); i++) {
         if (all_match_counts[i] != results.second[i]) {
           cout << "mismatch for " << (i+1) << endl;
@@ -2344,9 +2398,9 @@ int main(int argc, char** argv) {
           cout << results.second[i].correct << " " << results.second[i].gold << " " << results.second[i].predicted << endl;
         }
       }
-         */
-      //cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << "\n";
       cerr << "recall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
+         */
+      cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << "\n";
     }
   }
 }
