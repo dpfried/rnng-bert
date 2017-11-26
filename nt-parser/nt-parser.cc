@@ -1964,7 +1964,13 @@ int main(int argc, char** argv) {
     unsigned min_risk_samples = conf["min_risk_samples"].as<unsigned>();
     assert(min_risk_samples > 0);
 
-    vector<double> sampled_f1s;
+    //vector<double> sampled_f1s;
+    double total_f1s = 0.0;
+    double total_standardized_f1s = 0.0;
+    double m2_f1 = 0.0;
+    double mean_f1 = 0.0;
+    double std_f1 = 0.0;
+    unsigned num_samples = 0;
 
     auto train_sentence = [&](const parser::Sentence& sentence, const vector<int>& actions, double* right) -> double {
         ComputationGraph hg;
@@ -1986,9 +1992,19 @@ int main(int argc, char** argv) {
             cerr << endl;
             */
             Tree pred_tree = to_tree(vector<int>(sample_and_nlp.first.begin(), sample_and_nlp.first.end()), sentence);
+
             double scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0;
-            sampled_f1s.push_back(scaled_f1);
-            loss = loss + (sample_and_nlp.second * input(hg, scaled_f1));
+            // Welford online variance, https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
+            num_samples++;
+            total_f1s += scaled_f1;
+            double delta = scaled_f1 - mean_f1;
+            mean_f1 += delta / num_samples;
+            m2_f1 += delta*(scaled_f1 - mean_f1);
+            std_f1 = sqrt(num_samples > 1 ? m2_f1 / (num_samples - 1) : 1.0);
+            double standardized_f1 = std_f1 > 0 ? (scaled_f1 - mean_f1) / std_f1 : 0;
+            total_standardized_f1s += standardized_f1;
+
+            loss = loss + (sample_and_nlp.second * input(hg, standardized_f1));
           }
           loss = loss * input(hg, 1.0 / min_risk_samples);
           loss_v = as_scalar(hg.incremental_forward());
@@ -2023,7 +2039,7 @@ int main(int argc, char** argv) {
         const vector<int>& actions=corpus.actions[*index_iter];
         {
           double loss = train_sentence(sentence, actions, &right);
-          if (loss < 0) {
+          if (!min_risk_training && loss < 0) {
             cerr << "loss < 0 on sentence " << *index_iter << ": loss=" << loss << endl;
             //assert(lp >= 0.0)
           }
@@ -2042,15 +2058,13 @@ int main(int argc, char** argv) {
                ") per-action-ppl: " << exp(llh / trs) << " per-input-ppl: " << exp(llh / words) << " per-sent-ppl: " << exp(llh / status_every_i_iterations) << " err: " << (trs - right) / trs << " [" << dur.count() / (double)status_every_i_iterations << "ms per instance]";
 
           if (min_risk_training) {
-            double total_f1 = 0;
-            for (double f1: sampled_f1s) total_f1 += f1;
-            double mean_f1 = total_f1 / sampled_f1s.size();
-            sampled_f1s.clear();
-            cerr << " mean samp f1: " << mean_f1;
+            //sampled_f1s.clear();
+            cerr << " mean sampled f1: " << mean_f1 << "(" << (total_f1s / num_samples) <<") mean standardized f1:" << total_standardized_f1s / num_samples;
           }
           cerr << endl;
           llh = trs = right = words = 0;
 
+          //if (iter % (min_risk_training ? 10 : 25) == 0) { // report on dev set
           if (iter % 25 == 0) { // report on dev set
             unsigned dev_size = dev_corpus.size();
             double llh = 0;

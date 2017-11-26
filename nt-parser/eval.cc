@@ -24,7 +24,7 @@ pair<Metrics, vector<MatchCounts>> metrics_from_evalb(const string& ref_fname, c
   std::regex precision_regex{R"(Bracketing Precision\s+=\s+(\d+\.\d+))"};
   std::regex fmeasure_regex{R"(Bracketing FMeasure\s+=\s+(\d+\.\d+))"};
 
-  Metrics results{NAN, NAN, NAN};
+  Metrics results(0.0, 0.0, 0.0);
 
     std::string line;
 
