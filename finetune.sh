@@ -1,10 +1,15 @@
 #!/bin/bash
 dynet_seed=$1
+method=$2
+candidates=$3
 model="snapshots/ntparse_pos_pretrained_0_2_32_128_16_128-seed1-pid2336.params.bin"
-output_prefix="finetune/1"
+out_dir="sequence_level/finetune"
+mkdir -p $out_dir
+output_prefix="${out_dir}/1_method=${method}_candidates=${candidates}"
+
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
-    --cnn-mem 3000,3000,500 \
+    --cnn-mem 1500,1500,500 \
     -x \
     -T corpora/train.oracle \
     -d corpora/dev.oracle \
@@ -17,7 +22,9 @@ build/nt-parser/nt-parser \
     --hidden_dim 128 \
     -D 0.2 \
     --min_risk_training \
-    --min_risk_samples 10 \
+    --min_risk_method $method \
+    --min_risk_candidates $candidates \
     -m $model \
+    --model_output_file $output_prefix \
     > ${output_prefix}.stdout \
     2> ${output_prefix}.stderr

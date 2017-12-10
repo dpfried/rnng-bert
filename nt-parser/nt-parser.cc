@@ -113,7 +113,11 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("block_count", po::value<unsigned>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
           ("block_num", po::value<unsigned>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
           ("min_risk_training", "min risk training (default F1)")
-          ("min_risk_samples", po::value<unsigned>()->default_value(10), "min risk number of samples")
+          ("min_risk_method", po::value<string>()->default_value("reinforce"), "reinforce or beam")
+          ("min_risk_include_gold", "use the true parse in the gradient updates")
+          ("min_risk_candidates", po::value<unsigned>()->default_value(10), "min risk number of candidates")
+          ("label_smoothing_epsilon", po::value<float>()->default_value(0.0f), "use epsilon interpolation with the uniform distribution in label smoothing")
+          ("model_output_file", po::value<string>())
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -137,6 +141,18 @@ struct AbstractParserState {
   virtual bool word_completed() = 0;
 };
 
+Expression logsumexp_stable(const vector<Expression>& all_log_probs) {
+  // Expression cwise_max = max(all_log_probs); // gives an error despite being correct
+  Expression cwise_max = all_log_probs.front();
+  for (auto it = all_log_probs.begin() + 1; it != all_log_probs.end(); ++it)
+    cwise_max = max(cwise_max, *it);
+  vector <Expression> exp_log_probs;
+  for (const Expression& log_probs : all_log_probs)
+    exp_log_probs.push_back(exp(log_probs - cwise_max));
+  return log(sum(exp_log_probs)) + cwise_max;
+}
+
+
 struct AbstractParser {
   virtual std::shared_ptr<AbstractParserState> new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) = 0;
 
@@ -146,10 +162,16 @@ struct AbstractParser {
       const vector<int>& correct_actions,
       double *right,
       bool is_evaluation,
-      bool sample = false
+      bool sample = false,
+      bool label_smoothing = false,
+      float label_smoothing_epsilon = 0.95
   ) {
     bool build_training_graph = correct_actions.size() > 0;
     bool apply_dropout = (DROPOUT && !is_evaluation);
+
+    if (label_smoothing) {
+      assert(build_training_graph);
+    }
 
     std::shared_ptr<AbstractParserState> state = new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
 
@@ -202,10 +224,21 @@ struct AbstractParser {
         }
         action = correct_actions[action_count];
         if (model_action == action) { (*right)++; }
+        if (label_smoothing) {
+          Expression cross_entropy = pick(adiste, action) * input(*hg, (1 - label_smoothing_epsilon));
+          // add uniform cross entropy
+          for (unsigned a: valid_actions) {
+            cross_entropy = cross_entropy + pick(adiste, a) * input(*hg, label_smoothing_epsilon / valid_actions.size());
+          }
+          log_probs.push_back(cross_entropy);
+        } else {
+          log_probs.push_back(pick(adiste, action));
+        }
+      } else {
+        log_probs.push_back(pick(adiste, action));
       }
 
       ++action_count;
-      log_probs.push_back(pick(adiste, action));
       results.push_back(action);
 
       state = state->perform_action(action);
@@ -224,11 +257,11 @@ struct AbstractParser {
   }
 
   virtual vector<pair<vector<unsigned>, Expression>> abstract_log_prob_parser_beam(
-      //ComputationGraph* hg,
+      ComputationGraph* hg,
       const parser::Sentence& sent,
       unsigned beam_size
   ) {
-    ComputationGraph hg;
+    //ComputationGraph hg;
     struct BeamItem {
       explicit BeamItem(std::shared_ptr<AbstractParserState> state, unsigned last_action, Expression score) :
               state(state), last_action(last_action), score(score)  {}
@@ -241,7 +274,7 @@ struct AbstractParser {
     bool build_training_graph = false;
     bool apply_dropout = false;
 
-    std::shared_ptr<AbstractParserState> initial_state = new_sentence(&hg, sent, is_evaluation, build_training_graph, apply_dropout);
+    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
 
     vector<Expression> log_probs;
     vector<unsigned> results;
@@ -249,7 +282,7 @@ struct AbstractParser {
     vector<Stack<BeamItem>> completed;
     vector<Stack<BeamItem>> beam;
 
-    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, input(hg, 0.0))));
+    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, input(*hg, 0.0))));
 
     unsigned action_count = 0;
     while (completed.size() < beam_size && !beam.empty()) {
@@ -264,7 +297,7 @@ struct AbstractParser {
         std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
         vector<unsigned> valid_actions = current_parser_state->get_valid_actions();
         Expression adiste = current_parser_state->get_action_log_probs(valid_actions);
-        vector<float> adist = as_vector(hg.incremental_forward());
+        vector<float> adist = as_vector(hg->incremental_forward());
 
         for (unsigned action: valid_actions) {
           Expression action_score = pick(adiste, action);
@@ -326,12 +359,12 @@ struct AbstractParser {
   }
 
   virtual vector<pair<vector<unsigned>, Expression>> abstract_log_prob_parser_beam_within_word(
-          //ComputationGraph* hg,
+          ComputationGraph* hg,
           const parser::Sentence& sent,
           unsigned beam_size,
           int beam_filter_at_word_size
   ) {
-    ComputationGraph hg;
+    //ComputationGraph hg;
       if (beam_filter_at_word_size < 0)
         beam_filter_at_word_size = beam_size;
 
@@ -347,14 +380,14 @@ struct AbstractParser {
     bool build_training_graph = false;
     bool apply_dropout = false;
 
-    std::shared_ptr<AbstractParserState> initial_state = new_sentence(&hg, sent, is_evaluation, build_training_graph, apply_dropout);
+    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
 
     vector<unsigned> results;
 
     vector<Stack<BeamItem>> completed;
     vector<Stack<BeamItem>> beam;
 
-    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, input(hg, 0.0))));
+    beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, input(*hg, 0.0))));
 
     for (unsigned current_termc = 0; current_termc < sent.size(); current_termc++) {
       completed.clear();
@@ -369,7 +402,7 @@ struct AbstractParser {
           std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
           vector<unsigned> valid_actions = current_parser_state->get_valid_actions();
           Expression adiste = current_parser_state->get_action_log_probs(valid_actions);
-          vector<float> adist = as_vector(hg.incremental_forward());
+          vector<float> adist = as_vector(hg->incremental_forward());
 
           for (unsigned action: valid_actions) {
             Expression action_score = pick(adiste, action);
@@ -1375,14 +1408,14 @@ struct EnsembledParser : public AbstractParser {
   }
 
   vector<pair<vector<unsigned>, Expression>> abstract_log_prob_parser_beam(
-          //ComputationGraph* hg,
+          ComputationGraph* hg,
           const parser::Sentence& sent,
           unsigned beam_size
   ) {
     if (factored_beam) {
       set<vector<unsigned>> all_candidates;
       for (const std::shared_ptr<ParserBuilder>& parser : parsers) {
-        auto this_beam = parser->abstract_log_prob_parser_beam(sent, beam_size);
+        auto this_beam = parser->abstract_log_prob_parser_beam(hg, sent, beam_size);
         for (auto results : this_beam) {
           all_candidates.insert(results.first);
         }
@@ -1402,7 +1435,7 @@ struct EnsembledParser : public AbstractParser {
       return candidates_and_nlps;
 
     } else {
-      return AbstractParser::abstract_log_prob_parser_beam(sent, beam_size);
+      return AbstractParser::abstract_log_prob_parser_beam(hg, sent, beam_size);
     }
   }
 };
@@ -1701,14 +1734,7 @@ struct EnsembledParserState : public AbstractParserState {
     switch (parser->combine_type) {
       case EnsembledParser::CombineType::sum: {
         // combined_log_probs = logsumexp(all_log_probs); // numerically unstable
-        // Expression cwise_max = max(all_log_probs); // gives an error despite being correct
-        Expression cwise_max = all_log_probs.front();
-        for (auto it = all_log_probs.begin() + 1; it != all_log_probs.end(); ++it)
-          cwise_max = max(cwise_max, *it);
-        vector <Expression> exp_log_probs;
-        for (const Expression& log_probs : all_log_probs)
-          exp_log_probs.push_back(exp(log_probs - cwise_max));
-        combined_log_probs = log(sum(exp_log_probs)) + cwise_max;
+        combined_log_probs = logsumexp_stable(all_log_probs);
         break;
       }
       case EnsembledParser::CombineType::product:
@@ -1855,7 +1881,8 @@ int main(int argc, char** argv) {
      << (NO_STACK ? "_no-stack" : "")
      << "-seed" << random_seed
      << "-pid" << getpid() << ".params";
-  const string fname = os.str();
+
+  const string fname = conf.count("model_output_file") > 0 ? conf["model_output_file"].as<string>() : os.str();
   cerr << "PARAMETER FILE: " << fname << endl;
   //bool softlinkCreated = false;
 
@@ -1961,8 +1988,17 @@ int main(int argc, char** argv) {
     double bestf1=0.0;
 
     bool min_risk_training = conf.count("min_risk_training") > 0;
-    unsigned min_risk_samples = conf["min_risk_samples"].as<unsigned>();
-    assert(min_risk_samples > 0);
+    string min_risk_method = conf["min_risk_method"].as<string>();
+    unsigned min_risk_candidates = conf["min_risk_candidates"].as<unsigned>();
+    bool min_risk_include_gold = conf.count("min_risk_include_gold") > 0;
+    assert(min_risk_candidates > 0);
+
+    float label_smoothing_epsilon = conf["label_smoothing_epsilon"].as<float>();
+    bool label_smoothing = (label_smoothing_epsilon != 0.0f);
+    if (label_smoothing) {
+      assert(!min_risk_training);
+      assert(label_smoothing_epsilon > 0);
+    }
 
     //vector<double> sampled_f1s;
     double total_f1s = 0.0;
@@ -1976,41 +2012,84 @@ int main(int argc, char** argv) {
         ComputationGraph hg;
         double loss_v;
         if (conf.count("min_risk_training")) {
-          Expression loss = input(hg, 0.0);
-          Tree gold_tree = to_tree(actions, sentence);
-          /*
-          cerr << "gold ";
-          print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cerr);
-          cerr << endl;
-          */
-          for (int i = 0; i < min_risk_samples; i++) {
-            double blank;
-            auto sample_and_nlp = parser.abstract_log_prob_parser(&hg, sentence, vector<int>(), &blank, false, true);
+          if (min_risk_method == "reinforce") {
+            Expression loss = input(hg, 0.0);
+            Tree gold_tree = to_tree(actions, sentence);
             /*
-            cerr << " " << i;
-            print_parse(sample_and_nlp.first, sentence, true, cerr);
+            cerr << "gold ";
+            print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cerr);
             cerr << endl;
             */
-            Tree pred_tree = to_tree(vector<int>(sample_and_nlp.first.begin(), sample_and_nlp.first.end()), sentence);
+            for (int i = 0; i < min_risk_candidates; i++) {
+              double blank;
+              pair<vector<unsigned>, Expression> sample_and_nlp;
+              if (min_risk_include_gold && i == 0) {
+                sample_and_nlp = parser.abstract_log_prob_parser(&hg, sentence, actions, &blank, false, false);
+              } else {
+                sample_and_nlp = parser.abstract_log_prob_parser(&hg, sentence, vector<int>(), &blank, false, true);
+              }
+              /*
+              cerr << " " << i;
+              print_parse(sample_and_nlp.first, sentence, true, cerr);
+              cerr << endl;
+              */
+              Tree pred_tree = to_tree(vector<int>(sample_and_nlp.first.begin(), sample_and_nlp.first.end()), sentence);
+              double scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0;
+              // Welford online variance, https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
+              num_samples++;
+              total_f1s += scaled_f1;
+              double delta = scaled_f1 - mean_f1;
+              mean_f1 += delta / num_samples;
+              m2_f1 += delta * (scaled_f1 - mean_f1);
+              std_f1 = sqrt(num_samples > 1 ? m2_f1 / (num_samples - 1) : 1.0);
+              double standardized_f1 = std_f1 > 0 ? (scaled_f1 - mean_f1) / std_f1 : 0;
+              total_standardized_f1s += standardized_f1;
 
-            double scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0;
-            // Welford online variance, https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
-            num_samples++;
-            total_f1s += scaled_f1;
-            double delta = scaled_f1 - mean_f1;
-            mean_f1 += delta / num_samples;
-            m2_f1 += delta*(scaled_f1 - mean_f1);
-            std_f1 = sqrt(num_samples > 1 ? m2_f1 / (num_samples - 1) : 1.0);
-            double standardized_f1 = std_f1 > 0 ? (scaled_f1 - mean_f1) / std_f1 : 0;
-            total_standardized_f1s += standardized_f1;
-
-            loss = loss + (sample_and_nlp.second * input(hg, standardized_f1));
+              loss = loss + (sample_and_nlp.second * input(hg, standardized_f1));
+            }
+            loss = loss * input(hg, 1.0 / min_risk_candidates);
+            loss_v = as_scalar(hg.incremental_forward());
+          } else if (min_risk_method == "beam") {
+              // L_risk objective (Eq 4) from Edunov et al 2017: https://arxiv.org/pdf/1711.04956.pdf
+            Tree gold_tree = to_tree(actions, sentence);
+            auto candidates = parser.abstract_log_prob_parser_beam(&hg, sentence, min_risk_include_gold ? min_risk_candidates - 1: min_risk_candidates);
+            if (min_risk_include_gold) {
+              double blank;
+              candidates.push_back(parser.abstract_log_prob_parser(&hg, sentence, actions, &blank, false, false));
+            }
+            vector<Expression> log_probs_plus_log_losses;
+            vector<Expression> log_probs;
+            for (auto& parse_and_loss: candidates) {
+              //Expression log_prob = -parse_and_loss.second;
+              Expression log_prob = -parse_and_loss.second;
+              Tree pred_tree = to_tree(vector<int>(parse_and_loss.first.begin(), parse_and_loss.first.end()), sentence);
+              float scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0f;
+              if (scaled_f1 < 1.0) {
+                log_probs_plus_log_losses.push_back(log_prob + log(input(hg, 1.0f - scaled_f1)));
+              }
+              log_probs.push_back(log_prob);
+            }
+            if (log_probs_plus_log_losses.size() > 0) {
+              Expression loss = exp(logsumexp(log_probs_plus_log_losses) - logsumexp(log_probs));
+              loss_v = as_scalar(hg.incremental_forward());
+            } else {
+              Expression loss = input(hg, 0.0f);
+              loss_v = as_scalar(hg.incremental_forward());
+            }
+          } else {
+            cerr << "invalid min_risk_method: " << min_risk_method << endl;
+            exit(1);
           }
-          loss = loss * input(hg, 1.0 / min_risk_samples);
-          loss_v = as_scalar(hg.incremental_forward());
           hg.backward();
         } else {
-          auto result_and_nlp = parser.abstract_log_prob_parser(&hg, sentence, actions, right, false);
+          auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
+                                                                sentence,
+                                                                actions,
+                                                                right,
+                                                                false, // is_evaluation
+                                                                false, //sample
+                                                                label_smoothing,
+                                                                label_smoothing_epsilon);
           //auto result_and_nlp = parser.log_prob_parser(&hg, sentence, actions, right, false);
           //parser.log_prob_parser(&hg, sentence, actions, right, false);
           loss_v = as_scalar(hg.incremental_forward());
@@ -2095,7 +2174,8 @@ int main(int argc, char** argv) {
             out.close();
             double err = (trs - right) / trs;
             cerr << "Dev output in " << pfx << endl;
-            pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(corpus.devdata, pfx, pfx + "_evalbout.txt");
+            pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(corpus.devdata, pfx,
+                                                                            pfx + "_evalbout.txt");
             Metrics metrics = results.first;
 
             cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
@@ -2306,14 +2386,14 @@ int main(int argc, char** argv) {
         }
 
         if (output_beam_as_samples) {
-          //ComputationGraph hg;
+          ComputationGraph hg;
           vector<pair<vector<unsigned>, Expression>> beam_results;
           if (conf.count("beam_within_word")) {
-            beam_results = abstract_parser->abstract_log_prob_parser_beam_within_word(sentence,
+            beam_results = abstract_parser->abstract_log_prob_parser_beam_within_word(&hg, sentence,
                                                                                       beam_size,
                                                                                       conf["beam_filter_at_word_size"].as<int>());
           } else {
-            beam_results = abstract_parser->abstract_log_prob_parser_beam(sentence, beam_size);
+            beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
           }
           if (beam_results.size() < beam_size) {
             cerr << "warning: only " << beam_results.size() << " parses found by beam search for sent " << sii << endl;
@@ -2357,39 +2437,20 @@ int main(int argc, char** argv) {
         // greedy predict
         pair<vector<unsigned>, Expression> result_and_nlp;
         if (beam_size > 1 || conf.count("beam_within_word")) {
+          ComputationGraph hg;
           vector<pair<vector<unsigned>, Expression>> beam_results;
           if (conf.count("beam_within_word")) {
-            beam_results = abstract_parser->abstract_log_prob_parser_beam_within_word(sentence,
+            beam_results = abstract_parser->abstract_log_prob_parser_beam_within_word(&hg, sentence,
                                                                                       beam_size,
                                                                                       conf["beam_filter_at_word_size"].as<int>());
           } else {
-            beam_results = abstract_parser->abstract_log_prob_parser_beam(sentence, beam_size);
+            beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
           }
           result_and_nlp = beam_results[0];
-          /*
-          cerr << beam_results.size() << " ";
-          cerr << result_and_nlp.second << endl;
-          */
-          /*
-          abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(result_and_nlp.first.begin(), result_and_nlp.first.end()), &right, true);
-          double rescore_nlp = as_scalar(hg.incremental_forward());
-          cerr << result_and_nlp.second << " " << rescore_nlp << endl;
-          assert(abs(result_and_nlp.second - rescore_nlp) < 1e-3);
-           */
         } else {
           ComputationGraph hg;
           result_and_nlp = abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(), &right,
                                                                               true);
-
-          /*
-          auto beam_result_and_nlp = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, 1);
-          double beam_nlp = beam_result_and_nlp[0].second;
-          vector<unsigned> beam_result = beam_result_and_nlp[0].first;
-
-          cerr << nlp << " " << beam_nlp << endl;
-          assert(abs(nlp - beam_nlp) < 1e-3);
-          assert(result == beam_result);
-           */
         }
         Tree predicted_tree = to_tree(vector<int>(result_and_nlp.first.begin(), result_and_nlp.first.end()), sentence);
         MatchCounts this_counts = predicted_tree.compare(gold_tree, true);
