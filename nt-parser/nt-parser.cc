@@ -118,6 +118,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("min_risk_candidates", po::value<unsigned>()->default_value(10), "min risk number of candidates")
           ("label_smoothing_epsilon", po::value<float>()->default_value(0.0f), "use epsilon interpolation with the uniform distribution in label smoothing")
           ("model_output_file", po::value<string>())
+          ("optimizer", po::value<string>()->default_value("sgd"))
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1960,26 +1961,36 @@ int main(int argc, char** argv) {
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
 
+    string optimizer_name = conf["optimizer"].as<string>();
+    assert(optimizer_name == "sgd" || optimizer_name == "adam");
+
+
     Model model;
     ParserBuilder parser(&model, pretrained);
-    SimpleSGDTrainer sgd(&model);
-    cerr << "using sgd for training" << endl;
+    unique_ptr<Trainer> optimizer = optimizer_name == "sgd" ? unique_ptr<Trainer>(new SimpleSGDTrainer(&model)) : unique_ptr<Trainer>(new AdamTrainer(&model)); //(&model);
+
+    if (optimizer_name == "sgd") {
+      optimizer->eta_decay = 0.05;
+    }
 
     if (conf.count("model")) {
       ifstream in(conf["model"].as<string>().c_str());
       if (conf.count("text_format")) {
         boost::archive::text_iarchive ia(in);
-        ia >> model >> sgd;
+        ia >> model >> *optimizer;
+        //ia >> model;
       } else {
         boost::archive::binary_iarchive ia(in);
-        ia >> model >> sgd;
+        ia >> model >> *optimizer;
+        //ia >> model;
       }
+    } else {
+      cerr << "using " << optimizer_name << " for training" << endl;
     }
 
     //AdamTrainer sgd(&model);
     //MomentumSGDTrainer sgd(&model);
     //sgd.eta_decay = 0.08;
-    sgd.eta_decay = 0.05;
 
     unsigned tot_seen = 0;
     int iter = -1;
@@ -2007,6 +2018,18 @@ int main(int argc, char** argv) {
     double mean_f1 = 0.0;
     double std_f1 = 0.0;
     unsigned num_samples = 0;
+
+    auto standardize_and_update_f1 = [&](double scaled_f1)  {
+        num_samples++;
+        total_f1s += scaled_f1;
+        double delta = scaled_f1 - mean_f1;
+        mean_f1 += delta / num_samples;
+        m2_f1 += delta * (scaled_f1 - mean_f1);
+        std_f1 = sqrt(num_samples > 1 ? m2_f1 / (num_samples - 1) : 1.0);
+        double standardized_f1 = std_f1 > 0 ? (scaled_f1 - mean_f1) / std_f1 : 0;
+        total_standardized_f1s += standardized_f1;
+        return standardized_f1;
+    };
 
     auto train_sentence = [&](const parser::Sentence& sentence, const vector<int>& actions, double* right) -> double {
         ComputationGraph hg;
@@ -2036,15 +2059,7 @@ int main(int argc, char** argv) {
               Tree pred_tree = to_tree(vector<int>(sample_and_nlp.first.begin(), sample_and_nlp.first.end()), sentence);
               double scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0;
               // Welford online variance, https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
-              num_samples++;
-              total_f1s += scaled_f1;
-              double delta = scaled_f1 - mean_f1;
-              mean_f1 += delta / num_samples;
-              m2_f1 += delta * (scaled_f1 - mean_f1);
-              std_f1 = sqrt(num_samples > 1 ? m2_f1 / (num_samples - 1) : 1.0);
-              double standardized_f1 = std_f1 > 0 ? (scaled_f1 - mean_f1) / std_f1 : 0;
-              total_standardized_f1s += standardized_f1;
-
+              double standardized_f1 = standardize_and_update_f1(scaled_f1);
               loss = loss + (sample_and_nlp.second * input(hg, standardized_f1));
             }
             loss = loss * input(hg, 1.0 / min_risk_candidates);
@@ -2061,13 +2076,14 @@ int main(int argc, char** argv) {
             vector<Expression> log_probs;
             for (auto& parse_and_loss: candidates) {
               //Expression log_prob = -parse_and_loss.second;
-              Expression log_prob = -parse_and_loss.second;
+              Expression normed_log_prob = -parse_and_loss.second - log(input(hg, parse_and_loss.first.size()));
               Tree pred_tree = to_tree(vector<int>(parse_and_loss.first.begin(), parse_and_loss.first.end()), sentence);
               float scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0f;
+              standardize_and_update_f1(scaled_f1);
               if (scaled_f1 < 1.0) {
-                log_probs_plus_log_losses.push_back(log_prob + log(input(hg, 1.0f - scaled_f1)));
+                log_probs_plus_log_losses.push_back(normed_log_prob + log(input(hg, 1.0f - scaled_f1)));
               }
-              log_probs.push_back(log_prob);
+              log_probs.push_back(normed_log_prob);
             }
             if (log_probs_plus_log_losses.size() > 0) {
               Expression loss = exp(logsumexp(log_probs_plus_log_losses) - logsumexp(log_probs));
@@ -2097,7 +2113,7 @@ int main(int argc, char** argv) {
 
           //loss_v = as_scalar(result_and_nlp.second.value());
         }
-        sgd.update(1.0);
+        optimizer->update(1.0);
         return loss_v;
     };
 
@@ -2129,7 +2145,7 @@ int main(int argc, char** argv) {
 
         if (tot_seen % status_every_i_iterations == 0) {
           ++iter;
-          sgd.status();
+          optimizer->status();
           auto time_now = chrono::system_clock::now();
           auto dur = chrono::duration_cast<chrono::milliseconds>(time_now - time_start);
           cerr << "update #" << iter << " (epoch " << (static_cast<double>(tot_seen) / epoch_size) <<
@@ -2187,12 +2203,12 @@ int main(int argc, char** argv) {
               if (conf.count("text_format")) {
                   boost::archive::text_oarchive oa(out);
                   // oa << model;
-                  oa << model << sgd;
+                  oa << model << *optimizer;
                   oa << termdict << adict << ntermdict << posdict;
               } else {
                   boost::archive::binary_oarchive oa(out);
                   // oa << model;
-                  oa << model << sgd;
+                  oa << model << *optimizer;
                   oa << termdict << adict << ntermdict << posdict;
               }
               system((string("cp ") + pfx + string(" ") + pfx + string(".best")).c_str());
@@ -2240,7 +2256,7 @@ int main(int argc, char** argv) {
       sentence_count += main_indices.size();
       train_block(*main_corpus, main_indices.begin(), main_indices.end(), sentence_count);
 
-      sgd.update_epoch();
+      optimizer->update_epoch();
 
       /*
       ostringstream epoch_os;
