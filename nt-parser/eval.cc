@@ -43,8 +43,7 @@ pair<Metrics, vector<MatchCounts>> metrics_from_evalb(const string& ref_fname, c
 
         unsigned index;
         iss >> index;
-        assert(index == i);
-        if (!iss) {
+        if (!iss || index != i) {
             break;
         }
 
