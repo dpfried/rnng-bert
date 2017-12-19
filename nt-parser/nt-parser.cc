@@ -113,7 +113,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("block_count", po::value<unsigned>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
           ("block_num", po::value<unsigned>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
           ("min_risk_training", "min risk training (default F1)")
-          ("min_risk_method", po::value<string>()->default_value("reinforce"), "reinforce or beam")
+          ("min_risk_method", po::value<string>()->default_value("reinforce"), "reinforce, beam, or beam_unnormalized")
           ("min_risk_include_gold", "use the true parse in the gradient updates")
           ("min_risk_candidates", po::value<unsigned>()->default_value(10), "min risk number of candidates")
           ("label_smoothing_epsilon", po::value<float>()->default_value(0.0f), "use epsilon interpolation with the uniform distribution in label smoothing")
@@ -1957,6 +1957,39 @@ int main(int argc, char** argv) {
 
   bool factored_ensemble_beam = conf.count("factored_ensemble_beam") > 0;
 
+
+  bool sample = conf.count("samples") > 0;
+  bool output_beam_as_samples = conf.count("output_beam_as_samples") > 0;
+  bool output_candidate_trees = output_beam_as_samples || conf.count("samples_include_gold") || sample;
+
+  unsigned beam_size = conf["beam_size"].as<unsigned>();
+  unsigned test_size = test_corpus.size();
+
+  unsigned start_index = 0;
+  unsigned stop_index = test_corpus.size();
+  unsigned block_count = conf["block_count"].as<unsigned>();
+  unsigned block_num = conf["block_num"].as<unsigned>();
+
+
+  auto decode = [&](AbstractParser& parser, const parser::Sentence& sentence) {
+      double right = 0;
+      // get parse and negative log probability
+      ComputationGraph hg;
+      if (beam_size > 1 || conf.count("beam_within_word")) {
+        vector<pair<vector<unsigned>, Expression>> beam_results;
+        if (conf.count("beam_within_word")) {
+          beam_results = parser.abstract_log_prob_parser_beam_within_word(&hg, sentence,
+                                                                          beam_size,
+                                                                          conf["beam_filter_at_word_size"].as<int>());
+        } else {
+          beam_results = parser.abstract_log_prob_parser_beam(&hg, sentence, beam_size);
+        }
+        return beam_results[0];
+      } else {
+        return parser.abstract_log_prob_parser(&hg, sentence, vector<int>(), &right, true);
+      }
+  };
+
   //TRAINING
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
@@ -2064,32 +2097,51 @@ int main(int argc, char** argv) {
             }
             loss = loss * input(hg, 1.0 / min_risk_candidates);
             loss_v = as_scalar(hg.incremental_forward());
-          } else if (min_risk_method == "beam") {
-              // L_risk objective (Eq 4) from Edunov et al 2017: https://arxiv.org/pdf/1711.04956.pdf
+          } else if (min_risk_method == "beam" || min_risk_method == "beam_unnormalized") {
             Tree gold_tree = to_tree(actions, sentence);
             auto candidates = parser.abstract_log_prob_parser_beam(&hg, sentence, min_risk_include_gold ? min_risk_candidates - 1: min_risk_candidates);
+
             if (min_risk_include_gold) {
               double blank;
               candidates.push_back(parser.abstract_log_prob_parser(&hg, sentence, actions, &blank, false, false));
             }
-            vector<Expression> log_probs_plus_log_losses;
-            vector<Expression> log_probs;
-            for (auto& parse_and_loss: candidates) {
-              //Expression log_prob = -parse_and_loss.second;
-              Expression normed_log_prob = -parse_and_loss.second - log(input(hg, parse_and_loss.first.size()));
-              Tree pred_tree = to_tree(vector<int>(parse_and_loss.first.begin(), parse_and_loss.first.end()), sentence);
-              float scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0f;
-              standardize_and_update_f1(scaled_f1);
-              if (scaled_f1 < 1.0) {
-                log_probs_plus_log_losses.push_back(normed_log_prob + log(input(hg, 1.0f - scaled_f1)));
+
+            if (min_risk_method == "beam") {
+              // L_risk objective (Eq 4) from Edunov et al 2017: https://arxiv.org/pdf/1711.04956.pdf
+              vector<Expression> log_probs_plus_log_losses;
+              vector<Expression> log_probs;
+              for (auto &parse_and_loss: candidates) {
+                //Expression log_prob = -parse_and_loss.second;
+                Expression normed_log_prob = -parse_and_loss.second - log(input(hg, parse_and_loss.first.size()));
+                Tree pred_tree = to_tree(vector<int>(parse_and_loss.first.begin(), parse_and_loss.first.end()),
+                                         sentence);
+                float scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0f;
+                standardize_and_update_f1(scaled_f1);
+                if (scaled_f1 < 1.0) {
+                  log_probs_plus_log_losses.push_back(normed_log_prob + log(input(hg, 1.0f - scaled_f1)));
+                }
+                log_probs.push_back(normed_log_prob);
               }
-              log_probs.push_back(normed_log_prob);
-            }
-            if (log_probs_plus_log_losses.size() > 0) {
-              Expression loss = exp(logsumexp(log_probs_plus_log_losses) - logsumexp(log_probs));
-              loss_v = as_scalar(hg.incremental_forward());
+              if (log_probs_plus_log_losses.size() > 0) {
+                Expression loss = exp(logsumexp(log_probs_plus_log_losses) - logsumexp(log_probs));
+                loss_v = as_scalar(hg.incremental_forward());
+              } else {
+                Expression loss = input(hg, 0.0f);
+                loss_v = as_scalar(hg.incremental_forward());
+              }
             } else {
+              assert(min_risk_method == "beam_unnormalized");
               Expression loss = input(hg, 0.0f);
+              for (auto &parse_and_loss: candidates) {
+                Expression log_prob = -parse_and_loss.second;
+                Expression prob = exp(log_prob);
+                float prob_v = as_scalar(hg.incremental_forward());
+                Tree pred_tree = to_tree(vector<int>(parse_and_loss.first.begin(), parse_and_loss.first.end()),
+                                         sentence);
+                float scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0f;
+                standardize_and_update_f1(scaled_f1);
+                loss = loss - log_prob * input(hg, (scaled_f1) * prob_v);
+              }
               loss_v = as_scalar(hg.incremental_forward());
             }
           } else {
@@ -2181,8 +2233,9 @@ int main(int argc, char** argv) {
                 double lp = as_scalar(hg.incremental_forward());
                 llh += lp;
               }
-              ComputationGraph hg;
-              vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,vector<int>(),&right,true);
+              //ComputationGraph hg;
+              vector<unsigned> pred = decode(parser, sentence).first;
+              //vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,vector<int>(),&right,true);
               print_parse(pred, sentence, true, out);
               trs += actions.size();
             }
@@ -2327,18 +2380,6 @@ int main(int argc, char** argv) {
       abstract_parser = ensembled_parser.get();
     }
 
-    bool sample = conf.count("samples") > 0;
-    bool output_beam_as_samples = conf.count("output_beam_as_samples") > 0;
-    bool output_candidate_trees = output_beam_as_samples || conf.count("samples_include_gold") || sample;
-
-    unsigned beam_size = conf["beam_size"].as<unsigned>();
-    unsigned test_size = test_corpus.size();
-
-    unsigned start_index = 0;
-    unsigned stop_index = test_corpus.size();
-    unsigned block_count = conf["block_count"].as<unsigned>();
-    unsigned block_num = conf["block_num"].as<unsigned>();
-
     if (block_count > 0) {
       assert(block_num < block_count);
       unsigned q = test_corpus.size() / block_count;
@@ -2436,6 +2477,7 @@ int main(int argc, char** argv) {
       cerr << "avg distinct samples: " << avg_distinct_samples << endl;
     }
 
+
     // shortcut: only do a test decode if we aren't outputting any candidate trees
     if (!output_candidate_trees) {
       ostringstream os;
@@ -2451,23 +2493,7 @@ int main(int argc, char** argv) {
         const vector<int> &actions = test_corpus.actions[sii];
         Tree gold_tree = to_tree(actions, sentence);
         // greedy predict
-        pair<vector<unsigned>, Expression> result_and_nlp;
-        if (beam_size > 1 || conf.count("beam_within_word")) {
-          ComputationGraph hg;
-          vector<pair<vector<unsigned>, Expression>> beam_results;
-          if (conf.count("beam_within_word")) {
-            beam_results = abstract_parser->abstract_log_prob_parser_beam_within_word(&hg, sentence,
-                                                                                      beam_size,
-                                                                                      conf["beam_filter_at_word_size"].as<int>());
-          } else {
-            beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
-          }
-          result_and_nlp = beam_results[0];
-        } else {
-          ComputationGraph hg;
-          result_and_nlp = abstract_parser->abstract_log_prob_parser(&hg, sentence, vector<int>(), &right,
-                                                                              true);
-        }
+        pair<vector<unsigned>, Expression> result_and_nlp = decode(*abstract_parser, sentence);
         Tree predicted_tree = to_tree(vector<int>(result_and_nlp.first.begin(), result_and_nlp.first.end()), sentence);
         MatchCounts this_counts = predicted_tree.compare(gold_tree, true);
         all_match_counts.push_back(this_counts);
