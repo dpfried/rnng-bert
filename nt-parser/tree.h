@@ -100,7 +100,7 @@ public:
       for (const auto& pair: gold_brackets) {
           match_counts.gold += pair.second;
           if (predicted_brackets.count(pair.first) > 0)
-              match_counts.correct += predicted_brackets[pair.first];
+              match_counts.correct += min(predicted_brackets[pair.first], pair.second);
       }
 
       for (const auto& pair: predicted_brackets) {
