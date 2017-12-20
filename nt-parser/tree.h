@@ -79,22 +79,24 @@ public:
       }
   }
 
-  MatchCounts compare(Tree& gold, bool advp_prt=true) {
+  MatchCounts compare(Tree& gold, bool advp_prt=true, bool verbose=false) {
       BracketCounts predicted_brackets = brackets(advp_prt);
       BracketCounts gold_brackets = gold.brackets(advp_prt);
 
-      /*
-      cout << "predicted" << endl;
-      for (auto& pair: predicted_brackets) {
-          cout << get<0>(pair.first) << "-" << get<1>(pair.first) << "-" << get<2>(pair.first) << " " << pair.second << "\t";
+      if (verbose) {
+          cout << "predicted" << endl;
+          for (auto &pair: predicted_brackets) {
+              cout << get<0>(pair.first) << "-" << get<1>(pair.first) << "-" << get<2>(pair.first) << " " << pair.second
+                   << "\t";
+          }
+          cout << endl;
+          cout << "gold" << endl;
+          for (auto &pair: gold_brackets) {
+              cout << get<0>(pair.first) << "-" << get<1>(pair.first) << "-" << get<2>(pair.first) << " " << pair.second
+                   << "\t";
+          }
+          cout << endl;
       }
-      cout << endl;
-      cout << "gold" << endl;
-      for (auto& pair: gold_brackets) {
-          cout << get<0>(pair.first) << "-" << get<1>(pair.first) << "-" << get<2>(pair.first) << " " << pair.second << "\t";
-      }
-      cout << endl;
-       */
 
       MatchCounts match_counts;
       for (const auto& pair: gold_brackets) {

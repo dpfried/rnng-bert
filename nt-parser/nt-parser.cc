@@ -1456,7 +1456,8 @@ Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence) {
       linearized.push_back("(" + ntermdict.Convert(action2NTindex.find(a)->second));
     }
     else if (adict.Convert(a)[0] == 'S') {
-      linearized.push_back(termdict.Convert(sentence.raw[ti++]));
+      //linearized.push_back(termdict.Convert(sentence.raw[ti++]));
+      linearized.push_back(posdict.Convert(sentence.pos[ti++]));
       if (IMPLICIT_REDUCE_AFTER_SHIFT) {
         linearized.push_back(")");
       }
@@ -1691,15 +1692,17 @@ int main(int argc, char** argv) {
 
       pred_out.close();
       gold_out.close();
-      cerr << "Pred output in " << pred_fname << endl;
-      cerr << "Gold output in " << gold_fname << endl;
+      cerr << name << " output in " << pred_fname << endl;
 
       pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(gold_fname, pred_fname, evalb_fname);
-      pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.devdata, pred_fname, evalb_fname + "_corpus");
+      //pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.devdata, pred_fname, evalb_fname + "_corpus");
 
-      cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
-      cerr << "evalb\trecall=" << results.first.recall << ", precision=" << results.first.precision << ", F1=" << results.first.f1 << "\n";
-      cerr << "evalb corpus\trecall=" << corpus_results.first.recall << ", precision=" << corpus_results.first.precision << ", F1=" << corpus_results.first.f1 << "\n";
+      if (abs(match_counts.metrics().f1 - results.first.f1) > 1e-2) {
+        cerr << "warning: score mismatch" << endl;
+        cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
+        cerr << "evalb\trecall=" << results.first.recall << ", precision=" << results.first.precision << ", F1=" << results.first.f1 << "\n";
+        //cerr << "evalb corpus\trecall=" << corpus_results.first.recall << ", precision=" << corpus_results.first.precision << ", F1=" << corpus_results.first.f1 << "\n";
+      }
 
       /*
       for (unsigned i = 0; i < all_match_counts.size(); i++) {
@@ -1707,10 +1710,13 @@ int main(int argc, char** argv) {
           cout << "mismatch for " << (i+1) << endl;
           cout << all_match_counts[i].correct << " " << all_match_counts[i].gold << " " << all_match_counts[i].predicted << endl;
           cout << results.second[i].correct << " " << results.second[i].gold << " " << results.second[i].predicted << endl;
+          Tree pred_tree = to_tree(vector<int>(pred_parses[i].begin(), pred_parses[i].end()), sentences[i]);
+          Tree gold_tree = to_tree(gold_parses[i], sentences[i]);
+          pred_tree.compare(gold_tree, true, true);
         }
       }
-       */
-      return corpus_results.first;
+      */
+      return results.first;
   };
 
 
@@ -1968,7 +1974,7 @@ int main(int argc, char** argv) {
             double err = (trs - right) / trs;
 
             Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev");
-
+            cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << "\n";
             cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
             if (metrics.f1>bestf1) {
               cerr << "  new best...writing model to " << fname << ".bin ...\n";
@@ -2211,7 +2217,8 @@ int main(int argc, char** argv) {
         predicted.push_back(result_and_nlp.first);
       }
       auto t_end = chrono::high_resolution_clock::now();
-      evaluate(test_corpus.sents, test_corpus.actions, predicted, "test");
+      Metrics metrics = evaluate(test_corpus.sents, test_corpus.actions, predicted, "test");
+      cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << "\n";
     }
   }
 }
