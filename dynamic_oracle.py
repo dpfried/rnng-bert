@@ -5,9 +5,9 @@ Span = namedtuple("Span", ["label", "start", "end"])
 State = namedtuple("State", ["position", "last_action", "open_spans"])
 
 MAX_OPEN_NTS = 100
-MAX_CONS_NT = 8
+MAX_CONS_NT = None
 
-NTS = {'($', "(''", '(*HASH*', '(,', '(-LRB-', '(-RRB-', '(.', '(:', '(ADJP', '(ADVP', '(CC', '(CD', '(CONJP', '(DT', '(EX', '(FRAG', '(IN', '(INTJ', '(JJ', '(JJR', '(JJS', '(LS', '(LST', '(MD', '(NAC', '(NN', '(NNP', '(NNPS', '(NNS', '(NP', '(NX', '(PDT', '(POS', '(PP', '(PRN', '(PRP', '(PRP$', '(PRT', '(QP', '(RB', '(RBR', '(RBS', '(RP', '(S', '(SBAR', '(SBARQ', '(SINV', '(SQ', '(TO', '(UCP', '(VB', '(VBD', '(VBG', '(VBN', '(VBP', '(VBZ', '(VP', '(WDT', '(WHADJP', '(WHADVP', '(WHNP', '(WHPP', '(WP', '(WP$', '(WRB', '(X', '(``'}
+NTS = ['($', "(''", '(*HASH*', '(,', '(-LRB-', '(-RRB-', '(.', '(:', '(ADJP', '(ADVP', '(CC', '(CD', '(CONJP', '(DT', '(EX', '(FRAG', '(IN', '(INTJ', '(JJ', '(JJR', '(JJS', '(LS', '(LST', '(MD', '(NAC', '(NN', '(NNP', '(NNPS', '(NNS', '(NP', '(NX', '(PDT', '(POS', '(PP', '(PRN', '(PRP', '(PRP$', '(PRT', '(QP', '(RB', '(RBR', '(RBS', '(RP', '(S', '(SBAR', '(SBARQ', '(SINV', '(SQ', '(TO', '(UCP', '(VB', '(VBD', '(VBG', '(VBN', '(VBP', '(VBZ', '(VP', '(WDT', '(WHADJP', '(WHADVP', '(WHNP', '(WHPP', '(WP', '(WP$', '(WRB', '(X', '(``']
 
 class FScore(object):
     # taken from https://github.com/jhcross/span-parser/blob/master/src/phrase_tree.py
@@ -41,7 +41,7 @@ class FScore(object):
             return 0.0
    
 
-    def __str__(self):
+    def __repr__(self):
         precision = self.precision()
         recall    = self.recall()
         fscore = self.fscore()
@@ -95,8 +95,10 @@ def oracle_action(gold_parse, partial_parse):
     part_pos = len(part_words)
     remaining_spans = set(gold_spans) - set(part_spans)
 
+    can_reduce = len(part_stack) > 1 or len(part_words) == len(gold_words)
+
     # should reduce?
-    if part_stack and not partial_parse[-1].startswith("("): 
+    if can_reduce and part_stack and not partial_parse[-1].startswith("("): 
         top_label, top_start = part_stack[-1]
         # can reduce
         gold_ahead = False
@@ -142,6 +144,7 @@ def oracle_action(gold_parse, partial_parse):
         return None
 
 def compute_f1(gold_spans, predicted_spans):
+    # note: this won't return the same score as evalb with COLLINS.prm because of punctuation dropping and label equivalences
     gold_counts = Counter(gold_spans)
     predicted_counts = Counter(predicted_spans)
     correct = 0
@@ -159,23 +162,29 @@ def is_forbidden(action, last_action, words_shifted, sent_length, nopen_parens, 
     is_shift = not (is_nt or is_reduce)
     assert is_shift or is_reduce or is_nt
     if is_nt and nopen_parens > MAX_OPEN_NTS:
+        # print "too many open"
         return True
-    if is_nt and ncons_nt >= MAX_CONS_NT:
+    if is_nt and MAX_CONS_NT is not None and ncons_nt >= MAX_CONS_NT:
+        # print "too many consecutive"
         return True
     if nopen_parens == 0:
+        # print "nopen_parens == 0"
         return not is_nt
 
     # only close top-level parens if all words have been shifted
     if nopen_parens == 1 and words_shifted < sent_length:
         if is_reduce:
+            # print "can't close top-level without shifting all words"
             return True
 
     if is_reduce and last_action.startswith("("):
+        # print "can't reduce after NT"
         return True
     if is_nt and words_shifted >= sent_length:
+        # print "no words left to cover"
         return True
 
-def test_completion(gold_parse, partial_parse=None, corruption_chance=None, corruption_action_types=["SHIFT", "REDUCE", "NT"]):
+def test_completion(gold_parse, partial_parse=None, corruption_chance=None, add_shift=False, add_reduce=False, add_nt=False):
     if partial_parse is None:
         partial_parse = []
 
@@ -186,8 +195,22 @@ def test_completion(gold_parse, partial_parse=None, corruption_chance=None, corr
     n_actions = 0
     nopen_parens = 0
     ncons_nt = 0
+    if partial_parse is not None:
+        for action in partial_parse:
+            if action.startswith("("):
+                nopen_parens += 1
+                ncons_nt += 1
+            elif action.startswith(")"):
+                nopen_parens -= 1
+                ncons_nt = 0
+            else:
+                words_shifted += 1
+                ncons_nt = 0
+            n_actions += 1
+
     def forbidden(action):
         return is_forbidden(action, last_action, words_shifted, len(gold_words), nopen_parens, ncons_nt)
+
     while True:
         #print "partial_parse", partial_parse 
         action = oracle_action(gold_parse, partial_parse)
@@ -196,15 +219,15 @@ def test_completion(gold_parse, partial_parse=None, corruption_chance=None, corr
         assert not forbidden(action)
         if corruption_chance is not None and random.random() < corruption_chance:
             possible_actions = []
-            if "SHIFT" in corruption_action_types and words_shifted < len(gold_words):
+            if add_shift and words_shifted < len(gold_words):
                 ac = gold_words[words_shifted]
                 if not forbidden(ac):
                     possible_actions.append(ac)
-            if "NT" in corruption_action_types:
+            if add_nt:
                 ac = random.choice(NTS)
                 if not forbidden(ac):
                     possible_actions.append(ac)
-            if "REDUCE" in corruption_action_types:
+            if add_reduce:
                 ac = ")"
                 if not forbidden(ac):
                     possible_actions.append(ac)
@@ -241,6 +264,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--corpus")
     parser.add_argument("--corruption_chance", type=float)
+    parser.add_argument("--add_shift", action='store_true')
+    parser.add_argument("--add_nt", action='store_true')
+    parser.add_argument("--add_reduce", action='store_true')
     args = parser.parse_args()
     if args.corpus:
         with open(args.corpus) as f:
@@ -259,7 +285,7 @@ if __name__ == "__main__":
             gold_spans, gold_stack, gold_words = spans_and_stack(gold)
             assert not gold_stack
 
-            pred = test_completion(gold, corruption_chance=args.corruption_chance)
+            pred = test_completion(gold, corruption_chance=args.corruption_chance, add_shift=args.add_shift, add_nt=args.add_nt, add_reduce=args.add_reduce)
 
             pred_spans, pred_stack, pred_words = spans_and_stack(pred)
             assert not pred_stack
@@ -274,5 +300,5 @@ if __name__ == "__main__":
                 exact_matches += 1
             if not args.corruption_chance:
                 assert pred == gold
-        print str(fscore)
+        print str(total_fscore)
         print "exact match: %d / %d (%0.2f%%)" % (exact_matches, count, exact_matches * 100.0 / count)
