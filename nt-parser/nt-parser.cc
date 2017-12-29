@@ -62,6 +62,7 @@ unsigned NT_SIZE = 0;
 float DROPOUT = 0.0f;
 unsigned POS_SIZE = 0;
 std::map<int,int> action2NTindex;  // pass in index of action NT(X), return index of X
+std::map<int,int> ntIndex2Action;  // pass in index of X, return index of action NT(X)
 
 bool USE_POS = false;  // in discriminative parser, incorporate POS information in token embedding
 bool USE_PRETRAINED = false;  // in discriminative parser, use pretrained word embeddings (not updated)
@@ -136,6 +137,87 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   }
 }
 
+struct DynamicOracle {
+  DynamicOracle(const vector<Bracket>& gold_brackets):
+          gold_brackets(gold_brackets) {}
+
+  const vector<Bracket> gold_brackets;
+
+  /*
+  unsigned oracle_action(const AbstractParserState& parser_state) {
+
+  }
+   */
+};
+
+// checks to see if a proposed action is valid in discriminative models
+static bool IsActionForbidden_Discriminative(const string& a, char prev_a, unsigned bsize, unsigned ssize, unsigned nopen_parens, unsigned ncons_nt) {
+    bool is_shift = (a[0] == 'S' && a[1]=='H');
+    bool is_reduce = (a[0] == 'R' && a[1]=='E');
+    bool is_nt = (a[0] == 'N');
+    assert(is_shift || is_reduce || is_nt);
+    static const unsigned MAX_OPEN_NTS = 100;
+    if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
+    if (is_nt && ncons_nt >= MAX_CONS_NT) return true;
+    if (ssize == 1) {
+        if (!is_nt) return true;
+        return false;
+    }
+
+    if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+        // if a SHIFT has an implicit REDUCE, then only shift after an NT:
+        if (is_shift && prev_a != 'N') return true;
+    }
+
+    // be careful with top-level parens- you can only close them if you
+    // have fully processed the buffer
+    if (nopen_parens == 1 && bsize > 1) {
+        if (IMPLICIT_REDUCE_AFTER_SHIFT && is_shift) return true;
+        if (is_reduce) return true;
+    }
+
+    // you can't reduce after an NT action
+    if (is_reduce && prev_a == 'N') return true;
+    if (is_nt && bsize == 1) return true;
+    if (is_shift && bsize == 1) return true;
+    if (is_reduce && ssize < 3) return true;
+
+    // TODO should we control the depth of the parse in some way? i.e., as long as there
+    // are items in the buffer, we can do an NT operation, which could cause trouble
+    return false;
+}
+
+
+pair<vector<Bracket>, vector<OpenBracket>> actions_to_brackets(const vector<int>& actions) {
+  vector<Bracket> completed_brackets;
+  vector<OpenBracket> open_brackets;
+
+  unsigned words_shifted = 0;
+
+  for (auto action: actions) {
+    string a = adict.Convert(action);
+    bool is_shift = (a[0] == 'S' && a[1]=='H');
+    bool is_reduce = (a[0] == 'R' && a[1]=='E');
+    bool is_nt = (a[0] == 'N');
+    if (is_nt) {
+      auto it = action2NTindex.find(action);
+      assert(it != action2NTindex.end());
+      int nt_index = it->second;
+      open_brackets.push_back(OpenBracket(nt_index, words_shifted));
+    } else if (is_reduce) {
+      assert(!open_brackets.empty());
+      OpenBracket bracket = open_brackets.back();
+      open_brackets.pop_back();
+      assert(words_shifted > bracket.start);
+      completed_brackets.push_back(bracket.close(words_shifted));
+    } else {
+      assert(is_shift);
+      words_shifted += 1;
+    }
+  }
+  return pair<vector<Bracket>, vector<OpenBracket>>(completed_brackets, open_brackets);
+}
+
 struct AbstractParserState {
   virtual bool is_finished() = 0;
   virtual vector<unsigned> get_valid_actions() = 0;
@@ -143,6 +225,12 @@ struct AbstractParserState {
   virtual std::shared_ptr<AbstractParserState> perform_action(const unsigned action) = 0;
   virtual void finish_sentence() = 0;
   virtual bool word_completed() = 0;
+
+  virtual bool action_is_valid(const unsigned action) = 0;
+  virtual bool action_is_valid(const string action) = 0;
+  virtual Stack<Bracket> get_completed_brackets() = 0;
+  virtual Stack<OpenBracket> get_open_brackets() = 0;
+
 };
 
 Expression logsumexp_stable(const vector<Expression>& all_log_probs) {
@@ -477,6 +565,53 @@ struct AbstractParser {
 
 };
 
+struct SymbolicParserState;
+
+std::shared_ptr<SymbolicParserState> initialize_symbolic_parser_state(const parser::Sentence& sent) {
+  vector<int> bufferi(sent.size() + 1);  // position of the words in the sentence
+  for (unsigned i = 0; i < sent.size(); ++i) {
+    bufferi[sent.size() - i] = i;
+  }
+  bufferi[0] = -999;
+  vector<int> stacki; // position of words in the sentence of head of subtree
+  stacki.push_back(-999); // not used for anything
+  vector<int> is_open_paren; // -1 if no nonterminal has a parenthesis open, otherwise index of NT
+  is_open_paren.push_back(-1); // corresponds to dummy symbol
+
+  unsigned nt_count = 0; // number of times an NT has been introduced
+  unsigned cons_nt_count = 0; // number of consecutive NTs with no intervening shifts or reduces
+  int nopen_parens = 0;
+  char prev_a = '0';
+
+  unsigned action_count = 0;
+  unsigned action = START_OF_SENTENCE_ACTION;
+
+  bool was_word_completed = false;
+
+  Stack<Bracket> completed_brackets;
+  Stack<OpenBracket> open_brackets;
+
+  unsigned words_shifted = 0;
+
+  return std::make_shared<SymbolicParserState>(
+          Stack<int>(bufferi),
+          Stack<int>(stacki),
+          Stack<int>(is_open_paren),
+          nt_count,
+          cons_nt_count,
+          nopen_parens,
+          prev_a,
+          was_word_completed,
+          action_count,
+          action,
+          completed_brackets,
+          open_brackets,
+          words_shifted
+  );
+
+}
+
+
 struct ParserState;
 
 struct ParserBuilder : public AbstractParser {
@@ -555,43 +690,6 @@ struct ParserBuilder : public AbstractParser {
     }
   }
 
-  // checks to see if a proposed action is valid in discriminative models
-  static bool IsActionForbidden_Discriminative(const string& a, char prev_a, unsigned bsize, unsigned ssize, unsigned nopen_parens, unsigned ncons_nt) {
-    bool is_shift = (a[0] == 'S' && a[1]=='H');
-    bool is_reduce = (a[0] == 'R' && a[1]=='E');
-    bool is_nt = (a[0] == 'N');
-    assert(is_shift || is_reduce || is_nt);
-    static const unsigned MAX_OPEN_NTS = 100;
-    if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
-    if (is_nt && ncons_nt >= MAX_CONS_NT) return true;
-    if (ssize == 1) {
-      if (!is_nt) return true;
-      return false;
-    }
-
-    if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-      // if a SHIFT has an implicit REDUCE, then only shift after an NT:
-      if (is_shift && prev_a != 'N') return true;
-    }
-
-    // be careful with top-level parens- you can only close them if you
-    // have fully processed the buffer
-    if (nopen_parens == 1 && bsize > 1) {
-      if (IMPLICIT_REDUCE_AFTER_SHIFT && is_shift) return true;
-      if (is_reduce) return true;
-    }
-
-    // you can't reduce after an NT action
-    if (is_reduce && prev_a == 'N') return true;
-    if (is_nt && bsize == 1) return true;
-    if (is_shift && bsize == 1) return true;
-    if (is_reduce && ssize < 3) return true;
-
-    // TODO should we control the depth of the parse in some way? i.e., as long as there
-    // are items in the buffer, we can do an NT operation, which could cause trouble
-    return false;
-  }
-
   // instance variables for each sentence
   ComputationGraph* hg;
   bool apply_dropout;
@@ -649,7 +747,6 @@ struct ParserBuilder : public AbstractParser {
     action_lstm.add_input(action_start);
 
     vector<Expression> buffer(sent.size() + 1);  // variables representing word embeddings
-    vector<int> bufferi(sent.size() + 1);  // position of the words in the sentence
     // precompute buffer representation from left to right
 
     // in the discriminative model, here we set up the buffer contents
@@ -669,34 +766,22 @@ struct ParserBuilder : public AbstractParser {
         args.push_back(lookup(*hg, p_pos, sent.pos[i]));
       }
       buffer[sent.size() - i] = rectify(affine_transform(args));
-      bufferi[sent.size() - i] = i;
     }
 
     // dummy symbol to represent the empty buffer
     buffer[0] = parameter(*hg, p_buffer_guard);
-    bufferi[0] = -999;
     for (auto& b : buffer)
       buffer_lstm->add_input(b);
 
     vector<Expression> stack;  // variables representing subtree embeddings
-    vector<int> stacki; // position of words in the sentence of head of subtree
     stack.push_back(parameter(*hg, p_stack_guard));
-    stacki.push_back(-999); // not used for anything
     // drive dummy symbol on stack through LSTM
     if (!NO_STACK) stack_lstm.add_input(stack.back());
 
     vector<int> is_open_paren; // -1 if no nonterminal has a parenthesis open, otherwise index of NT
     is_open_paren.push_back(-1); // corresponds to dummy symbol
 
-    unsigned nt_count = 0; // number of times an NT has been introduced
-    unsigned cons_nt_count = 0; // number of consecutive NTs with no intervening shifts or reduces
-    int nopen_parens = 0;
-    char prev_a = '0';
-
-    unsigned action_count = 0;
-    unsigned action = START_OF_SENTENCE_ACTION;
-
-    bool was_word_completed = false;
+    std::shared_ptr<SymbolicParserState> symbolic_parser_state = initialize_symbolic_parser_state(sent);
 
     return std::static_pointer_cast<AbstractParserState>(
         std::make_shared<ParserState>(
@@ -705,329 +790,12 @@ struct ParserBuilder : public AbstractParser {
             buffer_lstm->state(),
             stack_lstm.state(),
             Stack<Expression>(buffer),
-            Stack<int>(bufferi),
             Stack<Expression>(stack),
-            Stack<int>(stacki),
             Stack<int>(is_open_paren),
-            nt_count,
-            cons_nt_count,
-            nopen_parens,
-            prev_a,
-            was_word_completed,
-            action_count,
-            action
+            symbolic_parser_state
         )
     );
   }
-
-  // *** if correct_actions is empty, this runs greedy decoding ***
-  // returns parse actions for input sentence (in training just returns the reference)
-  // this lets us use pretrained embeddings, when available, for words that were OOV in the
-  // parser training data
-  // set sample=true to sample rather than max
-  vector<unsigned> log_prob_parser(ComputationGraph* hg,
-                       const parser::Sentence& sent,
-                       const vector<int>& correct_actions,
-                       double *right,
-                       bool is_evaluation,
-                       bool sample = false) {
-      vector<unsigned> results;
-      const bool build_training_graph = correct_actions.size() > 0;
-      bool apply_dropout = (DROPOUT && !is_evaluation);
-      if (!NO_STACK) stack_lstm.new_graph(*hg);
-      action_lstm.new_graph(*hg);
-      const_lstm_fwd.new_graph(*hg);
-      const_lstm_rev.new_graph(*hg);
-      if (!NO_STACK) stack_lstm.start_new_sequence();
-      buffer_lstm->new_graph(*hg);
-      buffer_lstm->start_new_sequence();
-      action_lstm.start_new_sequence();
-      if (apply_dropout) {
-        if (!NO_STACK) stack_lstm.set_dropout(DROPOUT);
-        action_lstm.set_dropout(DROPOUT);
-        buffer_lstm->set_dropout(DROPOUT);
-        const_lstm_fwd.set_dropout(DROPOUT);
-        const_lstm_rev.set_dropout(DROPOUT);
-      } else {
-        if (!NO_STACK) stack_lstm.disable_dropout();
-        action_lstm.disable_dropout();
-        buffer_lstm->disable_dropout();
-        const_lstm_fwd.disable_dropout();
-        const_lstm_rev.disable_dropout();
-      }
-      // variables in the computation graph representing the parameters
-      Expression pbias = parameter(*hg, p_pbias);
-      Expression S = parameter(*hg, p_S);
-      Expression B = parameter(*hg, p_B);
-      Expression A = parameter(*hg, p_A);
-      Expression ptbias, ptW;
-      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-        ptbias = parameter(*hg, p_ptbias);
-        ptW = parameter(*hg, p_ptW);
-      }
-      Expression p2w;
-      if (USE_POS) {
-        p2w = parameter(*hg, p_p2w);
-      }
-
-      Expression ib = parameter(*hg, p_ib);
-      Expression cbias = parameter(*hg, p_cbias);
-      Expression w2l = parameter(*hg, p_w2l);
-      Expression t2l;
-      if (p_t2l)
-        t2l = parameter(*hg, p_t2l);
-      Expression p2a = parameter(*hg, p_p2a);
-      Expression abias = parameter(*hg, p_abias);
-      Expression action_start = parameter(*hg, p_action_start);
-      Expression cW = parameter(*hg, p_cW);
-
-      action_lstm.add_input(action_start);
-
-      vector<Expression> buffer(sent.size() + 1);  // variables representing word embeddings
-      vector<int> bufferi(sent.size() + 1);  // position of the words in the sentence
-      // precompute buffer representation from left to right
-
-      // in the discriminative model, here we set up the buffer contents
-      for (unsigned i = 0; i < sent.size(); ++i) {
-          int wordid = sent.raw[i]; // this will be equal to unk at dev/test
-          if (build_training_graph && !is_evaluation && singletons.size() > wordid && singletons[wordid] && rand01() > 0.5)
-            wordid = sent.unk[i];
-          Expression w = lookup(*hg, p_w, wordid);
-
-          vector<Expression> args = {ib, w2l, w}; // learn embeddings
-          if (p_t && pretrained.count(sent.lc[i])) {  // include fixed pretrained vectors?
-            Expression t = const_lookup(*hg, p_t, sent.lc[i]);
-            args.push_back(t2l);
-            args.push_back(t);
-          }
-          if (USE_POS) {
-            args.push_back(p2w);
-            args.push_back(lookup(*hg, p_pos, sent.pos[i]));
-          }
-          buffer[sent.size() - i] = rectify(affine_transform(args));
-          bufferi[sent.size() - i] = i;
-      }
-      // dummy symbol to represent the empty buffer
-      buffer[0] = parameter(*hg, p_buffer_guard);
-      bufferi[0] = -999;
-      for (auto& b : buffer)
-        buffer_lstm->add_input(b);
-
-      vector<Expression> stack;  // variables representing subtree embeddings
-      vector<int> stacki; // position of words in the sentence of head of subtree
-      stack.push_back(parameter(*hg, p_stack_guard));
-      stacki.push_back(-999); // not used for anything
-      // drive dummy symbol on stack through LSTM
-      if (!NO_STACK) stack_lstm.add_input(stack.back());
-      vector<int> is_open_paren; // -1 if no nonterminal has a parenthesis open, otherwise index of NT
-      is_open_paren.push_back(-1); // corresponds to dummy symbol
-
-      vector<Expression> log_probs;
-      // string rootword; // not used
-      unsigned action_count = 0;  // incremented at each prediction
-      unsigned nt_count = 0; // number of times an NT has been introduced
-      unsigned cons_nt_count = 0; // number of consecutive NTs with no intervening shifts or reduces
-      vector<unsigned> current_valid_actions;
-      int nopen_parens = 0;
-      char prev_a = '0';
-      while(stack.size() > 2 || buffer.size() > 1) {
-        // get list of possible actions for the current parser state
-        current_valid_actions.clear();
-        for (auto a: possible_actions) {
-          if (IsActionForbidden_Discriminative(adict.Convert(a), prev_a, buffer.size(), stack.size(), nopen_parens, cons_nt_count))
-            continue;
-          current_valid_actions.push_back(a);
-        }
-        //cerr << "valid actions = " << current_valid_actions.size() << endl;
-
-        // p_t = pbias + S * slstm + B * blstm + A * almst
-        Expression stack_summary = NO_STACK ? Expression() : stack_lstm.back();
-        Expression action_summary = action_lstm.back();
-        Expression buffer_summary = buffer_lstm->back();
-        if (apply_dropout) {
-          if (!NO_STACK) stack_summary = dropout(stack_summary, DROPOUT);
-          action_summary = dropout(action_summary, DROPOUT);
-          buffer_summary = dropout(buffer_summary, DROPOUT);
-        }
-        Expression p_t = NO_STACK ?
-                         affine_transform({pbias, B, buffer_summary, A, action_summary}) :
-                         affine_transform({pbias, S, stack_summary, B, buffer_summary, A, action_summary});
-        Expression nlp_t = rectify(p_t);
-        //if (build_training_graph) nlp_t = dropout(nlp_t, 0.4);
-        // r_t = abias + p2a * nlp
-        Expression r_t = affine_transform({abias, p2a, nlp_t});
-        //if (sample && ALPHA != 1.0f) r_t = r_t * ALPHA;
-        // adist = log_softmax(r_t, current_valid_actions)
-        Expression adiste = log_softmax(r_t, current_valid_actions);
-        vector<float> adist = as_vector(hg->incremental_forward());
-        double best_score = adist[current_valid_actions[0]];
-        unsigned model_action = current_valid_actions[0];
-        if (sample) {
-          double p = rand01();
-          assert(current_valid_actions.size() > 0);
-          vector<float> dist_to_sample;
-          if (ALPHA != 1.0f) {
-            Expression r_t_smoothed = r_t * ALPHA;
-            Expression adiste_smoothed = log_softmax(r_t_smoothed, current_valid_actions);
-            dist_to_sample = as_vector(hg->incremental_forward());
-          } else {
-            dist_to_sample = adist;
-          }
-          unsigned w = 0;
-          for (; w < current_valid_actions.size(); ++w) {
-            p -= exp(dist_to_sample[current_valid_actions[w]]);
-            if (p < 0.0) { break; }
-          }
-          if (w == current_valid_actions.size()) w--;
-          model_action = current_valid_actions[w];
-        } else { // max
-          for (unsigned i = 1; i < current_valid_actions.size(); ++i) {
-            if (adist[current_valid_actions[i]] > best_score) {
-              best_score = adist[current_valid_actions[i]];
-              model_action = current_valid_actions[i];
-            }
-          }
-        }
-        unsigned action = model_action;
-        if (build_training_graph) {  // if we have reference actions (for training) use the reference action
-          if (action_count >= correct_actions.size()) {
-            cerr << "Correct action list exhausted, but not in final parser state.\n";
-            abort();
-          }
-          action = correct_actions[action_count];
-          if (model_action == action) { (*right)++; }
-        } else {
-          //cerr << "Chosen action: " << adict.Convert(action) << endl;
-        }
-        //cerr << "prob ="; for (unsigned i = 0; i < adist.size(); ++i) { cerr << ' ' << adict.Convert(i) << ':' << adist[i]; }
-        //cerr << endl;
-        ++action_count;
-        log_probs.push_back(pick(adiste, action));
-        results.push_back(action);
-
-        // add current action to action LSTM
-        Expression actione = lookup(*hg, p_a, action);
-        action_lstm.add_input(actione);
-
-        // do action
-        const string& actionString=adict.Convert(action);
-        //cerr << "ACT: " << actionString << endl;
-        const char ac = actionString[0];
-        const char ac2 = actionString[1];
-        prev_a = ac;
-
-        if (ac =='S' && ac2=='H') {  // SHIFT
-          assert(buffer.size() > 1); // dummy symbol means > 1 (not >= 1)
-          if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-            --nopen_parens;
-            int i = is_open_paren.size() - 1;
-            assert(is_open_paren[i] >= 0);
-            Expression nonterminal = lookup(*hg, p_ntup, is_open_paren[i]);
-            Expression terminal = buffer.back();
-            Expression c = concatenate({nonterminal, terminal});
-            Expression pt = rectify(affine_transform({ptbias, ptW, c}));
-            stack.pop_back();
-            stacki.pop_back();
-            if (!NO_STACK) stack_lstm.rewind_one_step();
-            buffer.pop_back();
-            bufferi.pop_back();
-            buffer_lstm->rewind_one_step();
-            is_open_paren.pop_back();
-            if (!NO_STACK) stack_lstm.add_input(pt);
-            stack.push_back(pt);
-            stacki.push_back(999);
-            is_open_paren.push_back(-1);
-          } else {
-            stack.push_back(buffer.back());
-            if (!NO_STACK) stack_lstm.add_input(buffer.back());
-            stacki.push_back(bufferi.back());
-            buffer.pop_back();
-            buffer_lstm->rewind_one_step();
-            bufferi.pop_back();
-            is_open_paren.push_back(-1);
-          }
-          cons_nt_count = 0;
-        } else if (ac == 'N') { // NT
-          ++nopen_parens;
-          assert(buffer.size() > 1);
-          auto it = action2NTindex.find(action);
-          assert(it != action2NTindex.end());
-          int nt_index = it->second;
-          nt_count++;
-          Expression nt_embedding = lookup(*hg, p_nt, nt_index);
-          stack.push_back(nt_embedding);
-          if (!NO_STACK) stack_lstm.add_input(nt_embedding);
-          stacki.push_back(-1);
-          is_open_paren.push_back(nt_index);
-          cons_nt_count += 1;
-        } else { // REDUCE
-          --nopen_parens;
-          assert(stack.size() > 2); // dummy symbol means > 2 (not >= 2)
-          // find what paren we are closing
-          int i = is_open_paren.size() - 1;
-          while(is_open_paren[i] < 0) { --i; assert(i >= 0); }
-          Expression nonterminal = lookup(*hg, p_ntup, is_open_paren[i]);
-          int nchildren = is_open_paren.size() - i - 1;
-          assert(nchildren > 0);
-          //cerr << "  number of children to reduce: " << nchildren << endl;
-          vector<Expression> children(nchildren);
-          const_lstm_fwd.start_new_sequence();
-          const_lstm_rev.start_new_sequence();
-
-          // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
-          // TO BE COMPOSED INTO A TREE EMBEDDING
-          for (i = 0; i < nchildren; ++i) {
-            children[i] = stack.back();
-            assert (stacki.back() != -1);
-            stacki.pop_back();
-            stack.pop_back();
-            if (!NO_STACK) stack_lstm.rewind_one_step();
-            is_open_paren.pop_back();
-          }
-          is_open_paren.pop_back(); // nt symbol
-          assert (stacki.back() == -1);
-          stacki.pop_back(); // nonterminal dummy
-          stack.pop_back(); // nonterminal dummy
-          if (NO_STACK) {
-            stack.push_back(Expression()); // placeholder since we check size
-          } else {
-            stack_lstm.rewind_one_step(); // nt symbol
-
-            // BUILD TREE EMBEDDING USING BIDIR LSTM
-            const_lstm_fwd.add_input(nonterminal);
-            const_lstm_rev.add_input(nonterminal);
-            for (i = 0; i < nchildren; ++i) {
-              const_lstm_fwd.add_input(children[i]);
-              const_lstm_rev.add_input(children[nchildren - i - 1]);
-            }
-            Expression cfwd = const_lstm_fwd.back();
-            Expression crev = const_lstm_rev.back();
-            if (apply_dropout) {
-              cfwd = dropout(cfwd, DROPOUT);
-              crev = dropout(crev, DROPOUT);
-            }
-            Expression c = concatenate({cfwd, crev});
-            Expression composed = rectify(affine_transform({cbias, cW, c}));
-            stack_lstm.add_input(composed);
-            stack.push_back(composed);
-          }
-          stacki.push_back(999); // who knows, should get rid of this
-          is_open_paren.push_back(-1); // we just closed a paren at this position
-          cons_nt_count = 0;
-        }
-      }
-      if (build_training_graph && action_count != correct_actions.size()) {
-        cerr << "Unexecuted actions remain but final state reached!\n";
-        abort();
-      }
-      assert(stack.size() == 2); // guard symbol, root
-      assert(stacki.size() == 2);
-      assert(buffer.size() == 1); // guard symbol
-      assert(bufferi.size() == 1);
-      Expression tot_neglogprob = -sum(log_probs);
-      assert(tot_neglogprob.pg != nullptr);
-      return results;
-    }
 
 };
 
@@ -1085,54 +853,190 @@ struct EnsembledParser : public AbstractParser {
   }
 };
 
-struct ParserState : public AbstractParserState {
-  ParserState(
-      ParserBuilder* parser,
-      RNNPointer action_state,
-      RNNPointer buffer_state,
-      RNNPointer stack_state,
-      Stack<Expression> buffer,
-      Stack<int> bufferi,
-      Stack<Expression> stack,
-      Stack<int> stacki,
-      Stack<int> is_open_paren,
-      unsigned nt_count,
-      unsigned cons_nt_count,
-      int nopen_parens,
-      char prev_a,
-      bool was_word_completed,
-      unsigned action_count,
-      unsigned action
+struct SymbolicParserState: public AbstractParserState {
+  SymbolicParserState(
+          Stack<int> bufferi,
+          Stack<int> stacki,
+          Stack<int> is_open_paren,
+          unsigned nt_count,
+          unsigned cons_nt_count,
+          int nopen_parens,
+          char prev_a,
+          bool was_word_completed,
+          unsigned action_count,
+          unsigned action,
+          Stack<Bracket> completed_brackets,
+          Stack<OpenBracket> open_brackets,
+          unsigned words_shifted
   ) :
-      parser(parser),
-      action_state(action_state),
-      buffer_state(buffer_state),
-      stack_state(stack_state),
-      buffer(buffer),
-      bufferi(bufferi),
-      stack(stack),
-      stacki(stacki),
-      is_open_paren(is_open_paren),
-      nt_count(nt_count),
-      cons_nt_count(cons_nt_count),
-      nopen_parens(nopen_parens),
-      prev_a(prev_a),
-      was_word_completed(was_word_completed),
-      action_count(action_count),
-      action(action)
-  {}
+          bufferi(bufferi),
+          stacki(stacki),
+          is_open_paren(is_open_paren),
+          nt_count(nt_count),
+          cons_nt_count(cons_nt_count),
+          nopen_parens(nopen_parens),
+          prev_a(prev_a),
+          was_word_completed(was_word_completed),
+          action_count(action_count),
+          action(action),
+          completed_brackets(completed_brackets),
+          open_brackets(open_brackets),
+          words_shifted(words_shifted)
+  {};
 
-  ParserBuilder* parser;
-
-  const RNNPointer action_state;
-  const RNNPointer buffer_state;
-  const RNNPointer stack_state;
-
-  const Stack<Expression> buffer;
   const Stack<int> bufferi;
-
-  const Stack<Expression> stack;
   const Stack<int> stacki;
+
+  bool is_finished() override {
+    return stacki.size() == 2 && bufferi.size() == 1;
+  }
+
+  bool word_completed() override {
+    return was_word_completed;
+  }
+
+  Stack<Bracket> get_completed_brackets() override {
+    return completed_brackets;
+  }
+
+  Stack<OpenBracket> get_open_brackets() override {
+    return open_brackets;
+  }
+
+  bool action_is_valid(const string action) override {
+    return not IsActionForbidden_Discriminative(action, prev_a, bufferi.size(), stacki.size(), nopen_parens, cons_nt_count);
+  }
+
+  bool action_is_valid(const unsigned action) override {
+    return action_is_valid(adict.Convert(action));
+  }
+
+  vector<unsigned> get_valid_actions() override {
+    vector<unsigned> valid_actions;
+    for (auto a: possible_actions) {
+      if (action_is_valid(a))
+        valid_actions.push_back(a);
+    }
+    return valid_actions;
+  }
+
+  Expression get_action_log_probs(const vector<unsigned>& valid_actions) override {
+    throw std::runtime_error("get_action_log_probs not implemented for SymbolicParserState");
+  }
+
+  std::shared_ptr<AbstractParserState> perform_action(const unsigned action) override {
+    const string& actionString = adict.Convert(action);
+    const char ac = actionString[0];
+    const char ac2 = actionString[1];
+
+    Stack<int> new_bufferi(bufferi);
+    Stack<int> new_stacki(stacki);
+    Stack<int> new_is_open_paren(is_open_paren);
+    unsigned new_nt_count = nt_count;
+    unsigned new_cons_nt_count = cons_nt_count;
+    int new_nopen_parens = nopen_parens;
+
+    Stack<Bracket> new_completed_brackets(completed_brackets);
+    Stack<OpenBracket> new_open_brackets(open_brackets);
+
+    unsigned new_words_shifted = words_shifted;
+
+    bool was_word_completed = false;
+
+    if (ac =='S' && ac2=='H') {  // SHIFT
+      assert(bufferi.size() > 1); // dummy symbol means > 1 (not >= 1)
+      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+        assert(false); // for purposes of word-level beam debugging
+        --new_nopen_parens;
+        assert(is_open_paren.back() >= 0);
+
+        new_stacki = new_stacki.pop_back();
+        new_bufferi = new_bufferi.pop_back();
+        new_is_open_paren = new_is_open_paren.pop_back();
+        new_stacki = new_stacki.push_back(999);
+        new_is_open_paren = new_is_open_paren.push_back(-1);
+      } else {
+        new_stacki = new_stacki.push_back(bufferi.back());
+        new_bufferi = new_bufferi.pop_back();
+        new_is_open_paren = new_is_open_paren.push_back(-1);
+        was_word_completed = (new_bufferi.size() > 1);
+      }
+      new_words_shifted += 1;
+      new_cons_nt_count = 0;
+    }
+
+    else if (ac == 'N') { // NT
+      ++new_nopen_parens;
+      assert(bufferi.size() > 1);
+      auto it = action2NTindex.find(action);
+      assert(it != action2NTindex.end());
+      int nt_index = it->second;
+      new_nt_count++;
+      new_stacki = new_stacki.push_back(-1);
+      new_is_open_paren = new_is_open_paren.push_back(nt_index);
+      new_cons_nt_count += 1;
+      new_open_brackets = new_open_brackets.push_back(OpenBracket(nt_index, words_shifted));
+    }
+
+    else { // REDUCE
+      --new_nopen_parens;
+      assert(stacki.size() > 2); // dummy symbol means > 2 (not >= 2)
+
+      // find what paren we are closing
+      int i = is_open_paren.size() - 1;
+      // while(is_open_paren[i] < 0) { --i; assert(i >= 0); }
+      Stack<int> temp_is_open_paren = is_open_paren;
+      while (temp_is_open_paren.back() < 0) {
+        --i;
+        assert(i >= 0);
+        temp_is_open_paren = temp_is_open_paren.pop_back();
+      }
+      int nchildren = is_open_paren.size() - i - 1;
+      assert(nchildren > 0);
+      //cerr << "  number of children to reduce: " << nchildren << endl;
+
+      // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
+      // TO BE COMPOSED INTO A TREE EMBEDDING
+      for (i = 0; i < nchildren; ++i) {
+        assert(new_stacki.back() != -1);
+        new_stacki = new_stacki.pop_back();
+        new_is_open_paren = new_is_open_paren.pop_back();
+      }
+      new_is_open_paren = new_is_open_paren.pop_back(); // nt symbol
+      assert(new_stacki.back() == -1);
+      new_stacki = new_stacki.pop_back(); // nonterminal dummy
+      new_stacki = new_stacki.push_back(999); // who knows, should get rid of this
+      new_is_open_paren = new_is_open_paren.push_back(-1); // we just closed a paren at this position
+      if (new_stacki.size() <= 2) {
+        was_word_completed = true;
+      }
+      new_cons_nt_count = 0;
+      new_completed_brackets = new_completed_brackets.push_back(new_open_brackets.back().close(words_shifted));
+      new_open_brackets = new_open_brackets.pop_back();
+    }
+
+    return std::make_shared<SymbolicParserState>(
+            new_bufferi,
+            new_stacki,
+            new_is_open_paren,
+            new_nt_count,
+            new_cons_nt_count,
+            new_nopen_parens,
+            ac,
+            was_word_completed,
+            action_count + 1,
+            action,
+            new_completed_brackets,
+            new_open_brackets,
+            new_words_shifted
+    );
+  }
+
+  void finish_sentence() override {
+    assert(stacki.size() == 2); // guard symbol, root
+    assert(bufferi.size() == 1); // guard symbol
+    assert(open_brackets.empty());
+  }
 
   const Stack<int> is_open_paren;
 
@@ -1146,22 +1050,74 @@ struct ParserState : public AbstractParserState {
   const unsigned action_count;
   const unsigned action;
 
+  const Stack<Bracket> completed_brackets;
+  const Stack<OpenBracket> open_brackets;
+
+  const unsigned words_shifted;
+
+};
+
+struct ParserState : public AbstractParserState {
+  ParserState(
+      ParserBuilder* parser,
+      RNNPointer action_state,
+      RNNPointer buffer_state,
+      RNNPointer stack_state,
+      Stack<Expression> buffer,
+      Stack<Expression> stack,
+      Stack<int> is_open_paren,
+      std::shared_ptr<SymbolicParserState> symbolic_parser_state
+  ) :
+      parser(parser),
+      action_state(action_state),
+      buffer_state(buffer_state),
+      stack_state(stack_state),
+      buffer(buffer),
+      stack(stack),
+      symbolic_parser_state(symbolic_parser_state),
+      is_open_paren(is_open_paren)
+  {}
+
+  ParserBuilder* parser;
+
+  const RNNPointer action_state;
+  const RNNPointer buffer_state;
+  const RNNPointer stack_state;
+
+  const Stack<Expression> buffer;
+
+  const Stack<Expression> stack;
+
+  const std::shared_ptr<SymbolicParserState> symbolic_parser_state;
+
+  const Stack<int> is_open_paren;
+
   bool is_finished() override {
     return stack.size() == 2 && buffer.size() == 1;
   }
 
   bool word_completed() override {
-    return was_word_completed;
+    return symbolic_parser_state->word_completed();
+  }
+
+  Stack<Bracket> get_completed_brackets() override {
+    return symbolic_parser_state->get_completed_brackets();
+  }
+
+  Stack<OpenBracket> get_open_brackets() override {
+    return symbolic_parser_state->get_open_brackets();
+  }
+
+  bool action_is_valid(const string action) override {
+    return symbolic_parser_state->action_is_valid(action);
+  }
+
+  bool action_is_valid(const unsigned action) override {
+    return symbolic_parser_state->action_is_valid(action);
   }
 
   vector<unsigned> get_valid_actions() override {
-    vector<unsigned> valid_actions;
-    for (auto a: possible_actions) {
-      if (ParserBuilder::IsActionForbidden_Discriminative(adict.Convert(a), prev_a, buffer.size(), stack.size(), nopen_parens, cons_nt_count))
-        continue;
-      valid_actions.push_back(a);
-    }
-    return valid_actions;
+    return symbolic_parser_state->get_valid_actions();
   }
 
   Expression get_action_log_probs(const vector<unsigned>& valid_actions) override {
@@ -1182,6 +1138,10 @@ struct ParserState : public AbstractParserState {
   }
 
   std::shared_ptr<AbstractParserState> perform_action(const unsigned action) override {
+    std::shared_ptr<SymbolicParserState> new_symbolic_parser_state = std::static_pointer_cast<SymbolicParserState>(
+            symbolic_parser_state->perform_action(action)
+    );
+
     const string& actionString = adict.Convert(action);
     const char ac = actionString[0];
     const char ac2 = actionString[1];
@@ -1190,36 +1150,26 @@ struct ParserState : public AbstractParserState {
     RNNPointer new_buffer_state = buffer_state;
     RNNPointer new_stack_state = stack_state;
     Stack<Expression> new_buffer(buffer);
-    Stack<int> new_bufferi(bufferi);
     Stack<Expression> new_stack(stack);
-    Stack<int> new_stacki(stacki);
+
     Stack<int> new_is_open_paren(is_open_paren);
-    unsigned new_nt_count = nt_count;
-    unsigned new_cons_nt_count = cons_nt_count;
-    int new_nopen_parens = nopen_parens;
 
     // add current action to action LSTM
     Expression actione = lookup(*parser->hg, parser->p_a, action);
     parser->action_lstm.add_input(action_state, actione);
     new_action_state = parser->action_lstm.state();
 
-    bool was_word_completed = false;
-
     if (ac =='S' && ac2=='H') {  // SHIFT
       assert(buffer.size() > 1); // dummy symbol means > 1 (not >= 1)
       if (IMPLICIT_REDUCE_AFTER_SHIFT) {
           assert(false); // for purposes of word-level beam debugging
-        --new_nopen_parens;
-        assert(is_open_paren.back() >= 0);
         Expression nonterminal = lookup(*parser->hg, parser->p_ntup, is_open_paren.back());
         Expression terminal = buffer.back();
         Expression c = concatenate({nonterminal, terminal});
         Expression pt = rectify(affine_transform({parser->ptbias, parser->ptW, c}));
         new_stack = new_stack.pop_back();
-        new_stacki = new_stacki.pop_back();
         if (!NO_STACK) new_stack_state = parser->stack_lstm.head_of(stack_state);
         new_buffer = new_buffer.pop_back();
-        new_bufferi = new_bufferi.pop_back();
         new_buffer_state = parser->buffer_lstm->head_of(buffer_state);
         new_is_open_paren = new_is_open_paren.pop_back();
         if (!NO_STACK) {
@@ -1227,7 +1177,6 @@ struct ParserState : public AbstractParserState {
           new_stack_state = parser->stack_lstm.state();
         }
         new_stack = new_stack.push_back(pt);
-        new_stacki = new_stacki.push_back(999);
         new_is_open_paren = new_is_open_paren.push_back(-1);
       } else {
         new_stack = new_stack.push_back(buffer.back());
@@ -1235,36 +1184,27 @@ struct ParserState : public AbstractParserState {
           parser->stack_lstm.add_input(stack_state, buffer.back());
           new_stack_state = parser->stack_lstm.state();
         }
-        new_stacki = new_stacki.push_back(bufferi.back());
         new_buffer = new_buffer.pop_back();
         new_buffer_state = parser->buffer_lstm->head_of(buffer_state);
-        new_bufferi = new_bufferi.pop_back();
         new_is_open_paren = new_is_open_paren.push_back(-1);
-        was_word_completed = (new_buffer.size() > 1);
       }
-      new_cons_nt_count = 0;
     }
 
     else if (ac == 'N') { // NT
-      ++new_nopen_parens;
       assert(buffer.size() > 1);
       auto it = action2NTindex.find(action);
       assert(it != action2NTindex.end());
       int nt_index = it->second;
-      new_nt_count++;
       Expression nt_embedding = lookup(*parser->hg, parser->p_nt, nt_index);
       new_stack = new_stack.push_back(nt_embedding);
       if (!NO_STACK) {
         parser->stack_lstm.add_input(stack_state, nt_embedding);
         new_stack_state = parser->stack_lstm.state();
       }
-      new_stacki = new_stacki.push_back(-1);
       new_is_open_paren = new_is_open_paren.push_back(nt_index);
-      new_cons_nt_count += 1;
     }
 
     else { // REDUCE
-      --new_nopen_parens;
       assert(stack.size() > 2); // dummy symbol means > 2 (not >= 2)
 
       // find what paren we are closing
@@ -1288,15 +1228,11 @@ struct ParserState : public AbstractParserState {
       // TO BE COMPOSED INTO A TREE EMBEDDING
       for (i = 0; i < nchildren; ++i) {
         children[i] = new_stack.back();
-        assert(new_stacki.back() != -1);
-        new_stacki = new_stacki.pop_back();
         new_stack = new_stack.pop_back();
         if (!NO_STACK) new_stack_state = parser->stack_lstm.head_of(new_stack_state);
         new_is_open_paren = new_is_open_paren.pop_back();
       }
       new_is_open_paren = new_is_open_paren.pop_back(); // nt symbol
-      assert(new_stacki.back() == -1);
-      new_stacki = new_stacki.pop_back(); // nonterminal dummy
       new_stack = new_stack.pop_back(); // nonterminal dummy
       if (NO_STACK) {
         new_stack = new_stack.push_back(Expression()); // placeholder since we check size
@@ -1322,12 +1258,7 @@ struct ParserState : public AbstractParserState {
         new_stack_state = parser->stack_lstm.state();
         new_stack = new_stack.push_back(composed);
       }
-      new_stacki = new_stacki.push_back(999); // who knows, should get rid of this
       new_is_open_paren = new_is_open_paren.push_back(-1); // we just closed a paren at this position
-      if (new_stack.size() <= 2) {
-        was_word_completed = true;
-      }
-      new_cons_nt_count = 0;
     }
 
     return std::make_shared<ParserState>(
@@ -1336,25 +1267,16 @@ struct ParserState : public AbstractParserState {
         new_buffer_state,
         new_stack_state,
         new_buffer,
-        new_bufferi,
         new_stack,
-        new_stacki,
         new_is_open_paren,
-        new_nt_count,
-        new_cons_nt_count,
-        new_nopen_parens,
-        ac,
-        was_word_completed,
-        action_count + 1,
-        action
+        new_symbolic_parser_state
     );
   }
 
   void finish_sentence() override {
+    symbolic_parser_state->finish_sentence();
     assert(stack.size() == 2); // guard symbol, root
-    assert(stacki.size() == 2);
     assert(buffer.size() == 1); // guard symbol
-    assert(bufferi.size() == 1);
   }
 };
 
@@ -1375,8 +1297,24 @@ struct EnsembledParserState : public AbstractParserState {
     return states.front()->word_completed();
   }
 
+  bool action_is_valid(const unsigned action) override {
+    return states.front()->action_is_valid(action);
+  }
+
+  bool action_is_valid(const string action) override {
+    return states.front()->action_is_valid(action);
+  }
+
   vector<unsigned> get_valid_actions() override {
     return states.front()->get_valid_actions();
+  }
+
+  Stack<Bracket> get_completed_brackets() override {
+    return states.front()->get_completed_brackets();
+  }
+
+  Stack<OpenBracket> get_open_brackets() override {
+    return states.front()->get_open_brackets();
   }
 
   Expression get_action_log_probs(const vector<unsigned>& valid_actions) override {
@@ -1456,7 +1394,6 @@ Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence) {
       linearized.push_back("(" + ntermdict.Convert(action2NTindex.find(a)->second));
     }
     else if (adict.Convert(a)[0] == 'S') {
-      //linearized.push_back(termdict.Convert(sentence.raw[ti++]));
       linearized.push_back(posdict.Convert(sentence.pos[ti++]));
       if (IMPLICIT_REDUCE_AFTER_SHIFT) {
         linearized.push_back(")");
@@ -1605,6 +1542,7 @@ int main(int argc, char** argv) {
     size_t end = a.rfind(')');
     int nt = ntermdict.Convert(a.substr(start, end - start));
     action2NTindex[i] = nt;
+    ntIndex2Action[nt] = i;
   }
 
   NT_SIZE = ntermdict.size();
@@ -1701,10 +1639,9 @@ int main(int argc, char** argv) {
         cerr << "warning: score mismatch" << endl;
         cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
         cerr << "evalb\trecall=" << results.first.recall << ", precision=" << results.first.precision << ", F1=" << results.first.f1 << "\n";
-        //cerr << "evalb corpus\trecall=" << corpus_results.first.recall << ", precision=" << corpus_results.first.precision << ", F1=" << corpus_results.first.f1 << "\n";
       }
+      //cerr << "evalb corpus\trecall=" << corpus_results.first.recall << ", precision=" << corpus_results.first.precision << ", F1=" << corpus_results.first.f1 << "\n";
 
-      /*
       for (unsigned i = 0; i < all_match_counts.size(); i++) {
         if (all_match_counts[i] != results.second[i]) {
           cout << "mismatch for " << (i+1) << endl;
@@ -1715,7 +1652,6 @@ int main(int argc, char** argv) {
           pred_tree.compare(gold_tree, true, true);
         }
       }
-      */
       return results.first;
   };
 
@@ -1830,7 +1766,7 @@ int main(int argc, char** argv) {
             }
             loss = loss * input(hg, 1.0 / min_risk_candidates);
             loss_v = as_scalar(hg.incremental_forward());
-          } else if (min_risk_method == "beam" || min_risk_method == "beam_unnormalized") {
+          } else if (min_risk_method == "beam" || min_risk_method == "beam_noprobs" || min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log") {
             Tree gold_tree = to_tree(actions, sentence);
             auto candidates = parser.abstract_log_prob_parser_beam(&hg, sentence, min_risk_include_gold ? min_risk_candidates - 1: min_risk_candidates, false);
 
@@ -1856,15 +1792,28 @@ int main(int argc, char** argv) {
                 log_probs.push_back(normed_log_prob);
               }
               if (log_probs_plus_log_losses.size() > 0) {
-                Expression loss = exp(logsumexp(log_probs_plus_log_losses) - logsumexp(log_probs));
+                Expression loss = logsumexp(log_probs_plus_log_losses) - logsumexp(log_probs);
                 loss_v = as_scalar(hg.incremental_forward());
               } else {
                 Expression loss = input(hg, 0.0f);
                 loss_v = as_scalar(hg.incremental_forward());
               }
-            } else {
-              assert(min_risk_method == "beam_unnormalized");
+            } else if (min_risk_method == "beam_noprobs") {
               Expression loss = input(hg, 0.0f);
+              float normalizer = 0.0;
+              for (auto &parse_and_loss: candidates) {
+                Tree pred_tree = to_tree(vector<int>(parse_and_loss.first.begin(), parse_and_loss.first.end()),
+                                         sentence);
+                float scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0f;
+                //scaled_f1 = standardize_and_update_f1(scaled_f1);
+                loss = loss + (parse_and_loss.second * input(hg, scaled_f1));
+              }
+              loss = loss * input(hg, 1.0 / candidates.size());
+              loss_v = as_scalar(hg.incremental_forward());
+            } else {
+              assert(min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log");
+              Expression loss = input(hg, 0.0f);
+              float normalizer = 0.0;
               for (auto &parse_and_loss: candidates) {
                 Expression log_prob = -parse_and_loss.second;
                 Expression prob = exp(log_prob);
@@ -1872,10 +1821,16 @@ int main(int argc, char** argv) {
                 Tree pred_tree = to_tree(vector<int>(parse_and_loss.first.begin(), parse_and_loss.first.end()),
                                          sentence);
                 float scaled_f1 = pred_tree.compare(gold_tree, true).metrics().f1 / 100.0f;
-                standardize_and_update_f1(scaled_f1);
+                //scaled_f1 = standardize_and_update_f1(scaled_f1);
+                normalizer += scaled_f1 * prob_v;
                 loss = loss - log_prob * input(hg, (scaled_f1) * prob_v);
                 //loss = loss - log_prob * input(hg, (scaled_f1));
               }
+              if (min_risk_method == "beam_unnormalized_log") {
+                if (normalizer != 0.0)
+                  loss = loss * input(hg, 1.0f / normalizer);
+              }
+
               loss_v = as_scalar(hg.incremental_forward());
             }
           } else {
@@ -1945,7 +1900,6 @@ int main(int argc, char** argv) {
           cerr << endl;
           llh = trs = right = words = 0;
 
-          //if (iter % (min_risk_training ? 10 : 25) == 0) { // report on dev set
           if (iter % 25 == 0) { // report on dev set
             unsigned dev_size = dev_corpus.size();
             double llh = 0;
@@ -1960,7 +1914,7 @@ int main(int argc, char** argv) {
               dwords += sentence.size();
               {
                 ComputationGraph hg;
-                parser.log_prob_parser(&hg,sentence,actions,&right,true);
+                parser.abstract_log_prob_parser(&hg, sentence, actions, &right, true);
                 double lp = as_scalar(hg.incremental_forward());
                 llh += lp;
               }
@@ -1983,12 +1937,10 @@ int main(int argc, char** argv) {
               ofstream out(fname + ".bin");
               if (conf.count("text_format")) {
                   boost::archive::text_oarchive oa(out);
-                  // oa << model;
                   oa << model << *optimizer;
                   oa << termdict << adict << ntermdict << posdict;
               } else {
                   boost::archive::binary_oarchive oa(out);
-                  // oa << model;
                   oa << model << *optimizer;
                   oa << termdict << adict << ntermdict << posdict;
               }
