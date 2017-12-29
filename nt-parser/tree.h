@@ -19,30 +19,37 @@ typedef map<tuple<string, unsigned, unsigned>, unsigned> BracketCounts;
 
 const set<string> PUNCTUATION = {",", ".", ":", "``", "''", "PU"};
 
-struct Bracket {
-  Bracket(int nt_index, unsigned start, unsigned end):
-          nt_index(nt_index),
-          start(start),
-          end(end) {}
+typedef pair<int, unsigned> OpenBracket;
+typedef tuple<int, unsigned, unsigned> Bracket;
 
-  const int nt_index;
-  const unsigned start;
-  const unsigned end;
-};
+Bracket close_bracket(const OpenBracket& open_bracket, unsigned end) {
+    return tuple<int, unsigned, unsigned>(open_bracket.first, open_bracket.second, end);
+}
 
-struct OpenBracket {
-
-  OpenBracket(int nt_index, unsigned start):
-          nt_index(nt_index),
-          start(start) {}
-
-  Bracket close(unsigned end) const {
-      return Bracket(nt_index, start, end);
-  }
-
-  const int nt_index;
-  const unsigned start;
-};
+//struct Bracket {
+//  Bracket(int nt_index, unsigned start, unsigned end):
+//          nt_index(nt_index),
+//          start(start),
+//          end(end) {}
+//
+//  const int nt_index;
+//  const unsigned start;
+//  const unsigned end;
+//};
+//
+//struct OpenBracket {
+//
+//  OpenBracket(int nt_index, unsigned start):
+//          nt_index(nt_index),
+//          start(start) {}
+//
+//  Bracket close(unsigned end) const {
+//      return Bracket(nt_index, start, end);
+//  }
+//
+//  const int nt_index;
+//  const unsigned start;
+//};
 
 class Tree {
 public:

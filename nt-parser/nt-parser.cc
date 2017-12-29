@@ -54,6 +54,9 @@ unsigned POS_DIM = 10;
 
 unsigned MAX_CONS_NT = 8;
 
+unsigned SHIFT_ACTION = UINT_MAX;
+unsigned REDUCE_ACTION = UINT_MAX;
+
 float ALPHA = 1.f;
 unsigned N_SAMPLES = 0;
 unsigned ACTION_SIZE = 0;
@@ -137,25 +140,12 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   }
 }
 
-struct DynamicOracle {
-  DynamicOracle(const vector<Bracket>& gold_brackets):
-          gold_brackets(gold_brackets) {}
-
-  const vector<Bracket> gold_brackets;
-
-  /*
-  unsigned oracle_action(const AbstractParserState& parser_state) {
-
-  }
-   */
-};
-
 // checks to see if a proposed action is valid in discriminative models
-static bool IsActionForbidden_Discriminative(const string& a, char prev_a, unsigned bsize, unsigned ssize, unsigned nopen_parens, unsigned ncons_nt) {
-    bool is_shift = (a[0] == 'S' && a[1]=='H');
-    bool is_reduce = (a[0] == 'R' && a[1]=='E');
-    bool is_nt = (a[0] == 'N');
-    assert(is_shift || is_reduce || is_nt);
+static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsigned bsize, unsigned ssize, unsigned nopen_parens, unsigned ncons_nt) {
+    bool is_shift = action == SHIFT_ACTION;
+    bool is_reduce = action == REDUCE_ACTION;
+    bool is_nt = !(is_shift | is_reduce);
+
     static const unsigned MAX_OPEN_NTS = 100;
     if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
     if (is_nt && ncons_nt >= MAX_CONS_NT) return true;
@@ -188,48 +178,17 @@ static bool IsActionForbidden_Discriminative(const string& a, char prev_a, unsig
 }
 
 
-pair<vector<Bracket>, vector<OpenBracket>> actions_to_brackets(const vector<int>& actions) {
-  vector<Bracket> completed_brackets;
-  vector<OpenBracket> open_brackets;
-
-  unsigned words_shifted = 0;
-
-  for (auto action: actions) {
-    string a = adict.Convert(action);
-    bool is_shift = (a[0] == 'S' && a[1]=='H');
-    bool is_reduce = (a[0] == 'R' && a[1]=='E');
-    bool is_nt = (a[0] == 'N');
-    if (is_nt) {
-      auto it = action2NTindex.find(action);
-      assert(it != action2NTindex.end());
-      int nt_index = it->second;
-      open_brackets.push_back(OpenBracket(nt_index, words_shifted));
-    } else if (is_reduce) {
-      assert(!open_brackets.empty());
-      OpenBracket bracket = open_brackets.back();
-      open_brackets.pop_back();
-      assert(words_shifted > bracket.start);
-      completed_brackets.push_back(bracket.close(words_shifted));
-    } else {
-      assert(is_shift);
-      words_shifted += 1;
-    }
-  }
-  return pair<vector<Bracket>, vector<OpenBracket>>(completed_brackets, open_brackets);
-}
-
 struct AbstractParserState {
-  virtual bool is_finished() = 0;
-  virtual vector<unsigned> get_valid_actions() = 0;
-  virtual Expression get_action_log_probs(const vector<unsigned>& valid_actions) = 0;
-  virtual std::shared_ptr<AbstractParserState> perform_action(const unsigned action) = 0;
-  virtual void finish_sentence() = 0;
-  virtual bool word_completed() = 0;
+  virtual bool is_finished() const = 0;
+  virtual vector<unsigned> get_valid_actions() const = 0;
+  virtual Expression get_action_log_probs(const vector<unsigned>& valid_actions) const = 0;
+  virtual std::shared_ptr<AbstractParserState> perform_action(unsigned action) const = 0;
+  virtual void finish_sentence() const = 0;
+  virtual bool word_completed() const = 0;
 
-  virtual bool action_is_valid(const unsigned action) = 0;
-  virtual bool action_is_valid(const string action) = 0;
-  virtual Stack<Bracket> get_completed_brackets() = 0;
-  virtual Stack<OpenBracket> get_open_brackets() = 0;
+  virtual bool action_is_valid(unsigned action) const = 0;
+  virtual Stack<Bracket> get_completed_brackets() const = 0;
+  virtual Stack<OpenBracket> get_open_brackets() const = 0;
 
 };
 
@@ -383,7 +342,7 @@ struct AbstractParser {
       vector<std::tuple<Stack<BeamItem>, unsigned, Expression>> successors;
 
       while (!beam.empty()) {
-        Stack<BeamItem> current_stack_item = beam.back();
+        const Stack<BeamItem>& current_stack_item = beam.back();
         beam.pop_back();
 
         std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
@@ -488,7 +447,7 @@ struct AbstractParser {
         vector<std::tuple<Stack<BeamItem>, unsigned, Expression>> successors;
 
         while (!beam.empty()) {
-          Stack<BeamItem> current_stack_item = beam.back();
+          const Stack<BeamItem>& current_stack_item = beam.back();
           beam.pop_back();
 
           std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
@@ -608,6 +567,47 @@ std::shared_ptr<SymbolicParserState> initialize_symbolic_parser_state(const pars
           open_brackets,
           words_shifted
   );
+
+}
+
+pair<vector<Bracket>, vector<OpenBracket>> actions_to_brackets(const parser::Sentence& sentence, const vector<int>& actions) {
+  vector<Bracket> completed_brackets;
+  vector<OpenBracket> open_brackets;
+
+  unsigned words_shifted = 0;
+
+  for (auto action: actions) {
+    string a = adict.Convert(action);
+    bool is_shift = (a[0] == 'S' && a[1]=='H');
+    bool is_reduce = (a[0] == 'R' && a[1]=='E');
+    bool is_nt = (a[0] == 'N');
+    if (is_nt) {
+      auto it = action2NTindex.find(action);
+      assert(it != action2NTindex.end());
+      int nt_index = it->second;
+      open_brackets.push_back(OpenBracket(nt_index, words_shifted));
+    } else if (is_reduce) {
+      assert(!open_brackets.empty());
+      const OpenBracket& bracket = open_brackets.back();
+      open_brackets.pop_back();
+      assert(words_shifted > bracket.second);
+      completed_brackets.push_back(close_bracket(bracket, words_shifted));
+    } else {
+      assert(is_shift);
+      words_shifted += 1;
+    }
+  }
+  std::shared_ptr<AbstractParserState> parser_state = std::static_pointer_cast<AbstractParserState>(initialize_symbolic_parser_state(sentence));
+
+  for (auto action: actions) {
+    assert(action >= 0);
+    parser_state = parser_state->perform_action((unsigned) action);
+  }
+
+  assert(parser_state->get_completed_brackets().values() == completed_brackets);
+  assert(parser_state->get_open_brackets().values() == open_brackets);
+
+  return pair<vector<Bracket>, vector<OpenBracket>>(completed_brackets, open_brackets);
 
 }
 
@@ -887,31 +887,27 @@ struct SymbolicParserState: public AbstractParserState {
   const Stack<int> bufferi;
   const Stack<int> stacki;
 
-  bool is_finished() override {
+  bool is_finished() const override {
     return stacki.size() == 2 && bufferi.size() == 1;
   }
 
-  bool word_completed() override {
+  bool word_completed() const override {
     return was_word_completed;
   }
 
-  Stack<Bracket> get_completed_brackets() override {
+  Stack<Bracket> get_completed_brackets() const override {
     return completed_brackets;
   }
 
-  Stack<OpenBracket> get_open_brackets() override {
+  Stack<OpenBracket> get_open_brackets() const override {
     return open_brackets;
   }
 
-  bool action_is_valid(const string action) override {
+  bool action_is_valid(unsigned action) const override {
     return not IsActionForbidden_Discriminative(action, prev_a, bufferi.size(), stacki.size(), nopen_parens, cons_nt_count);
   }
 
-  bool action_is_valid(const unsigned action) override {
-    return action_is_valid(adict.Convert(action));
-  }
-
-  vector<unsigned> get_valid_actions() override {
+  vector<unsigned> get_valid_actions() const override {
     vector<unsigned> valid_actions;
     for (auto a: possible_actions) {
       if (action_is_valid(a))
@@ -920,11 +916,11 @@ struct SymbolicParserState: public AbstractParserState {
     return valid_actions;
   }
 
-  Expression get_action_log_probs(const vector<unsigned>& valid_actions) override {
+  Expression get_action_log_probs(const vector<unsigned>& valid_actions) const override {
     throw std::runtime_error("get_action_log_probs not implemented for SymbolicParserState");
   }
 
-  std::shared_ptr<AbstractParserState> perform_action(const unsigned action) override {
+  std::shared_ptr<AbstractParserState> perform_action(unsigned action) const override {
     const string& actionString = adict.Convert(action);
     const char ac = actionString[0];
     const char ac2 = actionString[1];
@@ -1011,7 +1007,7 @@ struct SymbolicParserState: public AbstractParserState {
         was_word_completed = true;
       }
       new_cons_nt_count = 0;
-      new_completed_brackets = new_completed_brackets.push_back(new_open_brackets.back().close(words_shifted));
+      new_completed_brackets = new_completed_brackets.push_back(close_bracket(new_open_brackets.back(), words_shifted));
       new_open_brackets = new_open_brackets.pop_back();
     }
 
@@ -1032,7 +1028,7 @@ struct SymbolicParserState: public AbstractParserState {
     );
   }
 
-  void finish_sentence() override {
+  void finish_sentence() const override {
     assert(stacki.size() == 2); // guard symbol, root
     assert(bufferi.size() == 1); // guard symbol
     assert(open_brackets.empty());
@@ -1092,35 +1088,31 @@ struct ParserState : public AbstractParserState {
 
   const Stack<int> is_open_paren;
 
-  bool is_finished() override {
+  bool is_finished() const override {
     return stack.size() == 2 && buffer.size() == 1;
   }
 
-  bool word_completed() override {
+  bool word_completed() const override {
     return symbolic_parser_state->word_completed();
   }
 
-  Stack<Bracket> get_completed_brackets() override {
+  Stack<Bracket> get_completed_brackets() const override {
     return symbolic_parser_state->get_completed_brackets();
   }
 
-  Stack<OpenBracket> get_open_brackets() override {
+  Stack<OpenBracket> get_open_brackets() const override {
     return symbolic_parser_state->get_open_brackets();
   }
 
-  bool action_is_valid(const string action) override {
+  bool action_is_valid(unsigned action) const override {
     return symbolic_parser_state->action_is_valid(action);
   }
 
-  bool action_is_valid(const unsigned action) override {
-    return symbolic_parser_state->action_is_valid(action);
-  }
-
-  vector<unsigned> get_valid_actions() override {
+  vector<unsigned> get_valid_actions() const override {
     return symbolic_parser_state->get_valid_actions();
   }
 
-  Expression get_action_log_probs(const vector<unsigned>& valid_actions) override {
+  Expression get_action_log_probs(const vector<unsigned>& valid_actions) const override {
     Expression stack_summary = NO_STACK ? Expression() : parser->stack_lstm.get_h(stack_state).back();
     Expression action_summary = parser->action_lstm.get_h(action_state).back();
     Expression buffer_summary = parser->buffer_lstm->get_h(buffer_state).back();
@@ -1137,7 +1129,7 @@ struct ParserState : public AbstractParserState {
     return log_softmax(r_t, valid_actions);
   }
 
-  std::shared_ptr<AbstractParserState> perform_action(const unsigned action) override {
+  std::shared_ptr<AbstractParserState> perform_action(unsigned action) const override {
     std::shared_ptr<SymbolicParserState> new_symbolic_parser_state = std::static_pointer_cast<SymbolicParserState>(
             symbolic_parser_state->perform_action(action)
     );
@@ -1273,7 +1265,7 @@ struct ParserState : public AbstractParserState {
     );
   }
 
-  void finish_sentence() override {
+  void finish_sentence() const override {
     symbolic_parser_state->finish_sentence();
     assert(stack.size() == 2); // guard symbol, root
     assert(buffer.size() == 1); // guard symbol
@@ -1289,35 +1281,31 @@ struct EnsembledParserState : public AbstractParserState {
     assert(!states.empty());
   }
 
-  bool is_finished() override {
+  bool is_finished() const override {
     return states.front()->is_finished();
   }
 
-  bool word_completed() override {
+  bool word_completed() const override {
     return states.front()->word_completed();
   }
 
-  bool action_is_valid(const unsigned action) override {
+  bool action_is_valid(unsigned action) const override {
     return states.front()->action_is_valid(action);
   }
 
-  bool action_is_valid(const string action) override {
-    return states.front()->action_is_valid(action);
-  }
-
-  vector<unsigned> get_valid_actions() override {
+  vector<unsigned> get_valid_actions() const override {
     return states.front()->get_valid_actions();
   }
 
-  Stack<Bracket> get_completed_brackets() override {
+  Stack<Bracket> get_completed_brackets() const override {
     return states.front()->get_completed_brackets();
   }
 
-  Stack<OpenBracket> get_open_brackets() override {
+  Stack<OpenBracket> get_open_brackets() const override {
     return states.front()->get_open_brackets();
   }
 
-  Expression get_action_log_probs(const vector<unsigned>& valid_actions) override {
+  Expression get_action_log_probs(const vector<unsigned>& valid_actions) const override {
     vector<Expression> all_log_probs;
     for (const std::shared_ptr<AbstractParserState>& state : states)
       all_log_probs.push_back(state->get_action_log_probs(valid_actions));
@@ -1335,17 +1323,32 @@ struct EnsembledParserState : public AbstractParserState {
     return log_softmax(combined_log_probs, valid_actions);
   }
 
-  std::shared_ptr<AbstractParserState> perform_action(const unsigned action) override {
+  std::shared_ptr<AbstractParserState> perform_action(unsigned action) const override {
     vector<std::shared_ptr<AbstractParserState>> new_states;
     for (const std::shared_ptr<AbstractParserState>& state : states)
       new_states.push_back(state->perform_action(action));
     return std::make_shared<EnsembledParserState>(parser, new_states);
   }
 
-  void finish_sentence() override {
+  void finish_sentence() const override {
     for (const std::shared_ptr<AbstractParserState>& state : states)
       state->finish_sentence();
   }
+};
+
+struct DynamicOracle {
+  DynamicOracle(const vector<Bracket>& gold_brackets):
+          gold_brackets(gold_brackets) {}
+
+  const vector<Bracket> gold_brackets;
+
+  /*
+  unsigned oracle_action(const AbstractParserState& parser_state) {
+      if (parser_state.action_is_valid(REDUCE_ACTION)) {
+
+      }
+  }
+   */
 };
 
 void signal_callback_handler(int /* signum */) {
@@ -1402,10 +1405,10 @@ Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence) {
       linearized.push_back(")");
     }
   }
-    /*
-  for (auto& sym: linearized) cout << sym << " ";
-  cout << endl;
-     */
+  /*
+for (auto& sym: linearized) cout << sym << " ";
+cout << endl;
+   */
   return parse_linearized(linearized);
 }
 
@@ -1512,6 +1515,9 @@ int main(int argc, char** argv) {
   adict.Freeze();
   ntermdict.Freeze();
   posdict.Freeze();
+
+  SHIFT_ACTION = adict.Convert("SHIFT");
+  REDUCE_ACTION = adict.Convert("REDUCE");
 
   {  // compute the singletons in the parser's training data
     /*
@@ -1911,6 +1917,11 @@ int main(int argc, char** argv) {
             for (unsigned sii = 0; sii < dev_size; ++sii) {
               const auto& sentence=dev_corpus.sents[sii];
               const vector<int>& actions=dev_corpus.actions[sii];
+
+              // todo: remove this
+//              cerr << "checking symbolic parser via actions_to_brackets" << endl;
+              actions_to_brackets(dev_corpus.sents[sii], dev_corpus.actions[sii]);
+
               dwords += sentence.size();
               {
                 ComputationGraph hg;
