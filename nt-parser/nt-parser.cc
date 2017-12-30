@@ -1936,6 +1936,10 @@ int main(int argc, char** argv) {
                                             label_smoothing,
                                             label_smoothing_epsilon,
                                             &dynamic_oracle);
+            if (DYNAMIC_EXPLORATION_PROBABILITY == 0.0f) {
+              assert(vector<int>(result_and_nlp.first.begin(),
+                    result_and_nlp.first.end()) == actions);
+            }
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
           }
           loss_v = as_scalar(hg.incremental_forward());
