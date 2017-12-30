@@ -95,6 +95,10 @@ def oracle_action(gold_parse, partial_parse):
     part_pos = len(part_words)
     remaining_spans = set(gold_spans) - set(part_spans)
 
+    remaining_spans = Counter(gold_spans)
+    for span in part_spans:
+        remaining_spans[span] -= 1
+
     can_reduce = len(part_stack) > 1 or len(part_words) == len(gold_words)
 
     # should reduce?
@@ -102,7 +106,9 @@ def oracle_action(gold_parse, partial_parse):
         top_label, top_start = part_stack[-1]
         # can reduce
         gold_ahead = False
-        for (l, s, e) in remaining_spans:
+        for (l, s, e), v in remaining_spans.items():
+            if v <= 0:
+                continue
             if l == top_label and s == top_start:
                 if e == part_pos:
                     return ")"

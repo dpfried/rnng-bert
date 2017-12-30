@@ -26,6 +26,10 @@ Bracket close_bracket(const OpenBracket& open_bracket, unsigned end) {
     return tuple<int, unsigned, unsigned>(open_bracket.first, open_bracket.second, end);
 }
 
+bool open_matches_closed(const Bracket& closed, const OpenBracket& open) {
+    return get<0>(closed) == open.first && get<1>(closed) == open.second;
+}
+
 //struct Bracket {
 //  Bracket(int nt_index, unsigned start, unsigned end):
 //          nt_index(nt_index),
