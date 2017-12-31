@@ -74,6 +74,8 @@ bool USE_PRETRAINED = false;  // in discriminative parser, use pretrained word e
 bool NO_STACK = false;
 unsigned SILVER_BLOCKS_PER_GOLD = 10;
 
+bool UNNORMALIZED = false;
+
 using namespace cnn::expr;
 using namespace cnn;
 using namespace std;
@@ -128,8 +130,10 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("label_smoothing_epsilon", po::value<float>()->default_value(0.0f), "use epsilon interpolation with the uniform distribution in label smoothing")
           ("model_output_file", po::value<string>())
           ("optimizer", po::value<string>()->default_value("sgd"))
+          ("max_margin_training", "min risk training (default F1)")
           ("dynamic_exploration", po::value<string>(), "if passed, should be greedy | sample")
           ("dynamic_exploration_probability", po::value<float>()->default_value(1.0), "with this probability, use the model probabilities to explore (with method given by --dynamic_exploration)")
+          ("unnormalized", "do not locally normalize score distributions")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -181,6 +185,34 @@ static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsig
     return false;
 }
 
+void print_parse(const vector<unsigned>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
+  int ti = 0;
+  for (auto a : actions) {
+    if (adict.Convert(a)[0] == 'N') {
+      out_stream << " (" << ntermdict.Convert(action2NTindex.find(a)->second);
+    } else if (adict.Convert(a)[0] == 'S') {
+      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+        out_stream << termdict.Convert(sentence.raw[ti++]) << ")";
+      } else {
+        if (ptb_output_format) {
+          string preterminal = posdict.Convert(sentence.pos[ti]);
+          out_stream << " (" << preterminal << ' ' << non_unked_termdict.Convert(sentence.non_unked_raw[ti]) << ")";
+          ti++;
+        } else { // use this branch to surpress preterminals
+          out_stream << ' ' << termdict.Convert(sentence.raw[ti++]);
+        }
+      }
+    } else out_stream << ')';
+  }
+  out_stream << endl;
+}
+
+void print_parse(const vector<int>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
+  for (auto action : actions)
+    assert(action >= 0);
+  print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, ptb_output_format, out_stream);
+}
+
 Expression logsumexp_stable(const vector<Expression>& all_log_probs) {
   // Expression cwise_max = max(all_log_probs); // gives an error despite being correct
   Expression cwise_max = all_log_probs.front();
@@ -204,7 +236,8 @@ struct AbstractParser {
       bool sample = false,
       bool label_smoothing = false,
       float label_smoothing_epsilon = 0.0,
-      DynamicOracle* dynamic_oracle = nullptr
+      DynamicOracle* dynamic_oracle = nullptr,
+      bool loss_augmented = false
   ) {
     // can't have both correct actions and an oracle
     assert(correct_actions.empty() || !dynamic_oracle);
@@ -215,18 +248,42 @@ struct AbstractParser {
       assert(build_training_graph);
     }
 
+    if (loss_augmented) {
+      assert(build_training_graph);
+    }
+
     std::shared_ptr<AbstractParserState> state = new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
 
     unsigned action_count = 0;  // incremented at each prediction
 
-    vector<Expression> log_probs;
+    vector<Expression> scores;
     vector<unsigned> results;
 
     while(!state->is_finished()) {
       vector<unsigned> valid_actions = state->get_valid_actions();
 
       Expression adiste = state->get_action_log_probs(valid_actions);
-      vector<float> adist = as_vector(hg->incremental_forward());
+
+      unsigned correct_action;
+      if (build_training_graph) {
+        if (!correct_actions.empty()) {
+          if (action_count >= correct_actions.size()) {
+            cerr << "Correct action list exhausted, but not in final parser state.\n";
+            abort();
+          }
+          correct_action = correct_actions[action_count];
+        } else {
+          correct_action = dynamic_oracle->oracle_action(*state);
+        }
+      }
+
+      if (loss_augmented) {
+        vector<float> aug(possible_actions.size(), 1.0f);
+        aug[correct_action] = 0.0f;
+        adiste = adiste + input(*hg, Dim({aug.size()}), aug);
+      }
+
+      vector<float> adist = as_vector(adiste.value());
 
       unsigned model_action = valid_actions[0];
       if (sample) {
@@ -259,27 +316,30 @@ struct AbstractParser {
       }
 
       unsigned action_taken;
-      if (build_training_graph) {  // if we have reference actions or an oracle (for training)
-        unsigned correct_action;
-        if (!correct_actions.empty()) {
-          if (action_count >= correct_actions.size()) {
-            cerr << "Correct action list exhausted, but not in final parser state.\n";
-            abort();
-          }
-          correct_action = correct_actions[action_count];
+      if (loss_augmented) {
+        if (model_action == correct_action) {
+          (*right)++;
         } else {
-          correct_action = dynamic_oracle->oracle_action(*state);
+          scores.push_back(pick(adiste, correct_action) - pick(adiste, model_action));
         }
+
+        if (dynamic_oracle && rand01() < DYNAMIC_EXPLORATION_PROBABILITY) {
+          action_taken = model_action;
+        } else {
+          action_taken = correct_action;
+        }
+      } else if (build_training_graph) {  // if we have reference actions or an oracle (for training)
         if (model_action == correct_action) { (*right)++; }
         if (label_smoothing) {
+          assert(!UNNORMALIZED);
           Expression cross_entropy = pick(adiste, correct_action) * input(*hg, (1 - label_smoothing_epsilon));
           // add uniform cross entropy
           for (unsigned a: valid_actions) {
             cross_entropy = cross_entropy + pick(adiste, a) * input(*hg, label_smoothing_epsilon / valid_actions.size());
           }
-          log_probs.push_back(cross_entropy);
+          scores.push_back(cross_entropy);
         } else {
-          log_probs.push_back(pick(adiste, correct_action));
+          scores.push_back(pick(adiste, correct_action));
         }
         if (dynamic_oracle && rand01() < DYNAMIC_EXPLORATION_PROBABILITY) {
           action_taken = model_action;
@@ -287,13 +347,15 @@ struct AbstractParser {
           action_taken = correct_action;
         }
       } else {
-        log_probs.push_back(pick(adiste, model_action));
+        scores.push_back(pick(adiste, model_action));
         action_taken = model_action;
       }
 
       ++action_count;
       results.push_back(action_taken);
       state = state->perform_action(action_taken);
+      //cerr << action_count << "\t" << as_scalar(log_probs.back().value()) << "\t";
+      //print_parse(results, sent, false, cerr);
     }
 
     if (!correct_actions.empty() && action_count != correct_actions.size()) {
@@ -303,9 +365,9 @@ struct AbstractParser {
 
     state->finish_sentence();
 
-    Expression tot_neglogprob = -sum(log_probs);
-    assert(tot_neglogprob.pg != nullptr);
-    return pair<vector<unsigned>, Expression>(results, tot_neglogprob);
+    Expression tot_loss = scores.empty() ? input(*hg, 0.0): -sum(scores);
+    assert(tot_loss.pg != nullptr);
+    return pair<vector<unsigned>, Expression>(results, tot_loss);
   }
 
   virtual vector<pair<vector<unsigned>, Expression>> abstract_log_prob_parser_beam(
@@ -1087,7 +1149,11 @@ struct ParserState : public AbstractParserState {
                      affine_transform({parser->pbias, parser->S, stack_summary, parser->B, buffer_summary, parser->A, action_summary});
     Expression nlp_t = rectify(p_t);
     Expression r_t = affine_transform({parser->abias, parser->p2a, nlp_t});
-    return log_softmax(r_t, valid_actions);
+    if (UNNORMALIZED)
+      //return rectify(r_t);
+      return r_t;
+    else
+      return log_softmax(r_t, valid_actions);
   }
 
   std::shared_ptr<AbstractParserState> perform_action(unsigned action) const override {
@@ -1408,34 +1474,6 @@ void signal_callback_handler(int /* signum */) {
   requested_stop = true;
 }
 
-void print_parse(const vector<unsigned>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
-  int ti = 0;
-  for (auto a : actions) {
-    if (adict.Convert(a)[0] == 'N') {
-      out_stream << " (" << ntermdict.Convert(action2NTindex.find(a)->second);
-    } else if (adict.Convert(a)[0] == 'S') {
-      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-        out_stream << termdict.Convert(sentence.raw[ti++]) << ")";
-      } else {
-        if (ptb_output_format) {
-          string preterminal = posdict.Convert(sentence.pos[ti]);
-          out_stream << " (" << preterminal << ' ' << non_unked_termdict.Convert(sentence.non_unked_raw[ti]) << ")";
-          ti++;
-        } else { // use this branch to surpress preterminals
-          out_stream << ' ' << termdict.Convert(sentence.raw[ti++]);
-        }
-      }
-    } else out_stream << ')';
-  }
-  out_stream << endl;
-}
-
-void print_parse(const vector<int>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
-  for (auto action : actions)
-    assert(action >= 0);
-  print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, ptb_output_format, out_stream);
-}
-
 Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence) {
   vector<string> linearized;
   unsigned ti = 0;
@@ -1487,6 +1525,8 @@ int main(int argc, char** argv) {
   MAX_CONS_NT = conf["max_cons_nt"].as<unsigned>();
 
   SILVER_BLOCKS_PER_GOLD = conf["silver_blocks_per_gold"].as<unsigned>();
+
+  UNNORMALIZED = conf.count("unnormalized");
 
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
@@ -1776,6 +1816,7 @@ int main(int argc, char** argv) {
     double bestf1=0.0;
 
     bool min_risk_training = conf.count("min_risk_training") > 0;
+    bool max_margin_training = conf.count("max_margin_training") > 0;
     string min_risk_method = conf["min_risk_method"].as<string>();
     unsigned min_risk_candidates = conf["min_risk_candidates"].as<unsigned>();
     bool min_risk_include_gold = conf.count("min_risk_include_gold") > 0;
@@ -1785,7 +1826,19 @@ int main(int argc, char** argv) {
     bool label_smoothing = (label_smoothing_epsilon != 0.0f);
     if (label_smoothing) {
       assert(!min_risk_training);
+      assert(!max_margin_training);
       assert(label_smoothing_epsilon > 0);
+    }
+
+    if (min_risk_training) {
+      assert(!max_margin_training);
+      assert(exploration_type == DynamicOracle::ExplorationType::none);
+    }
+
+    if (max_margin_training) {
+      assert(UNNORMALIZED);
+      assert(!min_risk_training);
+      assert(exploration_type == DynamicOracle::ExplorationType::none || exploration_type == DynamicOracle::ExplorationType::greedy);
     }
 
     //vector<double> sampled_f1s;
@@ -1807,6 +1860,10 @@ int main(int argc, char** argv) {
         total_standardized_f1s += standardized_f1;
         return standardized_f1;
     };
+
+    //double tot_lad_score = 0.0;
+    //double tot_gold_score = 0.0;
+    //unsigned violations = 0;
 
     auto train_sentence = [&](const parser::Sentence& sentence, const vector<int>& actions, double* right) -> pair<double, MatchCounts> {
         ComputationGraph hg;
@@ -1850,8 +1907,11 @@ int main(int argc, char** argv) {
             }
             loss = loss * input(hg, 1.0 / min_risk_candidates);
             loss_v = as_scalar(hg.incremental_forward());
-          } else if (min_risk_method == "beam" || min_risk_method == "beam_noprobs" || min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log") {
-            auto candidates = parser.abstract_log_prob_parser_beam(&hg, sentence, min_risk_include_gold ? min_risk_candidates - 1: min_risk_candidates, false);
+          } else if (min_risk_method == "beam" || min_risk_method == "beam_noprobs" ||
+                     min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log") {
+            auto candidates = parser.abstract_log_prob_parser_beam(&hg, sentence,
+                                                                   min_risk_include_gold ? min_risk_candidates - 1
+                                                                                         : min_risk_candidates, false);
 
             if (min_risk_include_gold) {
               double blank;
@@ -1909,36 +1969,86 @@ int main(int argc, char** argv) {
               }
               loss_v = as_scalar(hg.incremental_forward());
             }
-          } else {
+          }  else {
             cerr << "invalid min_risk_method: " << min_risk_method << endl;
             exit(1);
           }
           hg.backward();
-        } else {
+        }
+        /* doesn't work; search errors
+         else if (max_margin_training) {
+          assert(UNNORMALIZED);
+          double blank;
+
+          DynamicOracle dynamic_oracle(sentence, actions);
+          auto lad_and_neg_score = parser.abstract_log_prob_parser(&hg,
+                                                                sentence,
+                                                                vector<int>(),
+                                                                right,
+                                                                false, // is_evaluation
+                                                                false, //sample
+                                                                label_smoothing,
+                                                                label_smoothing_epsilon,
+                                                                &dynamic_oracle,
+                                                                true // loss augmented
+          );
+          get_f1_and_update_mc(gold_tree, sentence, lad_and_neg_score.first);
+          double lad_score = -as_scalar(lad_and_neg_score.second.value());
+          tot_lad_score += lad_score;
+
+
+          cerr << "lad: " << lad_score;
+          print_parse(lad_and_neg_score.first, sentence, false, cerr);
+
+          auto gold_and_neg_score = parser.abstract_log_prob_parser(&hg, sentence, actions, &blank, false, false);
+          double gold_score = -as_scalar(gold_and_neg_score.second.value());
+          tot_gold_score += gold_score;
+
+          cerr << "gold: " << gold_score;
+          print_parse(gold_and_neg_score.first, sentence, false, cerr);
+
+          if (lad_score > gold_score) {
+            Expression loss = gold_and_neg_score.second - lad_and_neg_score.second;
+            loss_v = as_scalar(hg.incremental_forward());
+            cerr << "violation: " << loss_v << endl;
+            hg.backward();
+            violations++;
+          } else {
+            loss_v = 0;
+          }
+          cerr << endl;
+        }
+          */
+        else { // not min_risk
           if (exploration_type == DynamicOracle::ExplorationType::none) {
             auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
-                                            sentence,
-                                            actions,
-                                            right,
-                                            false, // is_evaluation
-                                            false, //sample
-                                            label_smoothing,
-                                            label_smoothing_epsilon);
+                                                                  sentence,
+                                                                  actions,
+                                                                  right,
+                                                                  false, // is_evaluation
+                                                                  false, //sample
+                                                                  label_smoothing,
+                                                                  label_smoothing_epsilon,
+                                                                  nullptr, // dynamic_oracle
+                                                                  max_margin_training // loss_augmented
+            );
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
           } else {
             DynamicOracle dynamic_oracle(sentence, actions);
             auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
-                                            sentence,
-                                            vector<int>(),
-                                            right,
-                                            false, // is_evaluation
-                                            exploration_type == DynamicOracle::ExplorationType::sample, //sample
-                                            label_smoothing,
-                                            label_smoothing_epsilon,
-                                            &dynamic_oracle);
+                                                                  sentence,
+                                                                  vector<int>(),
+                                                                  right,
+                                                                  false, // is_evaluation
+                                                                  exploration_type == DynamicOracle::ExplorationType::sample, //sample
+                                                                  label_smoothing,
+                                                                  label_smoothing_epsilon,
+                                                                  &dynamic_oracle,
+                                                                  max_margin_training // loss_augmented
+            );
             if (DYNAMIC_EXPLORATION_PROBABILITY == 0.0f) {
               assert(vector<int>(result_and_nlp.first.begin(),
-                    result_and_nlp.first.end()) == actions);
+                                 result_and_nlp.first.end()) == actions);
             }
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
           }
@@ -1958,20 +2068,25 @@ int main(int argc, char** argv) {
       unsigned words = 0;
       double right = 0;
       double llh = 0;
+      //tot_gold_score = 0.0;
+      //tot_lad_score = 0.0;
+
+      unsigned sents = 0;
+
       //cerr << "TRAINING STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << endl;
       auto time_start = chrono::system_clock::now();
 
         MatchCounts block_match_counts;
 
       for (vector<unsigned>::iterator index_iter = indices_begin; index_iter != indices_end; ++index_iter) {
-        tot_seen += 1;
+        tot_seen++;
         auto& sentence = corpus.sents[*index_iter];
         const vector<int>& actions=corpus.actions[*index_iter];
         {
           auto loss_and_mc = train_sentence(sentence, actions, &right);
           double loss = loss_and_mc.first;
           block_match_counts += loss_and_mc.second;
-          if (!min_risk_training && loss < 0) {
+          if (!min_risk_training && !max_margin_training && loss < 0) {
             cerr << "loss < 0 on sentence " << *index_iter << ": loss=" << loss << endl;
             //assert(lp >= 0.0)
           }
@@ -1979,27 +2094,42 @@ int main(int argc, char** argv) {
         }
         trs += actions.size();
         words += sentence.size();
+        sents++;
 
         if (tot_seen % status_every_i_iterations == 0) {
           ++iter;
           optimizer->status();
           auto time_now = chrono::system_clock::now();
           auto dur = chrono::duration_cast<chrono::milliseconds>(time_now - time_start);
-          cerr << "update #" << iter << " (epoch " << (static_cast<double>(tot_seen) / epoch_size) <<
+          cerr << "update #" << iter << " (epoch " << (static_cast<double>(tot_seen) / epoch_size) << ")";
                /*" |time=" << put_time(localtime(&time_now), "%c %Z") << ")\tllh: "<< */
-               ") per-action-ppl: " << exp(llh / trs) <<
-               " per-input-ppl: " << exp(llh / words) <<
-               " per-sent-ppl: " << exp(llh / status_every_i_iterations) <<
-               " err: " << (trs - right) / trs <<
-               " trace f1: " << block_match_counts.metrics().f1 / 100.f  <<
-               " [" << dur.count() / (double)status_every_i_iterations << "ms per instance]";
-
+            /*
+          if (max_margin_training) {
+            cerr <<
+              " mean-gold-score: " << tot_gold_score / sents << 
+              " mean-lad-score: " << tot_lad_score / sents <<
+              " violations: " <<  violations << "/" << sents;
+          } else
+             */
+          {
+            cerr <<
+              " per-action-ppl: " << exp(llh / trs) <<
+              " per-input-ppl: " << exp(llh / words) <<
+              " per-sent-ppl: " << exp(llh / status_every_i_iterations) <<
+              " err: " << (trs - right) / trs;
+          }
+          cerr << 
+            " trace f1: " << block_match_counts.metrics().f1 / 100.f  <<
+            " [" << dur.count() / (double)status_every_i_iterations << "ms per instance]";
           if (min_risk_training) {
             //sampled_f1s.clear();
             cerr << " mean sampled f1: " << mean_f1 << " mean standardized f1:" << total_standardized_f1s / num_samples;
           }
+
           cerr << endl;
-          llh = trs = right = words = 0;
+          llh = trs = right = words = sents = 0;
+          //tot_gold_score = tot_lad_score = 0.0;
+          //violations = 0;
 
           if (iter % 25 == 0) { // report on dev set
             unsigned dev_size = dev_corpus.size();

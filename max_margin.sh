@@ -1,17 +1,15 @@
 #!/bin/bash
 dynet_seed=$1
-method=$2
-candidates=$3
-optimizer=$4
+optimizer=$2
 
-if [ -z "$4" ]
+if [ -z "$optimizer" ]
 then
     optimizer="sgd"
 fi
 
 out_dir="sequence_level"
 mkdir -p $out_dir
-output_prefix="${out_dir}/${dynet_seed}_method=${method}_candidates=${candidates}_opt=${optimizer}"
+output_prefix="${out_dir}/${dynet_seed}_method=max_margin_opt=${optimizer}"
 
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
@@ -27,9 +25,8 @@ build/nt-parser/nt-parser \
     --lstm_input_dim 128 \
     --hidden_dim 128 \
     -D 0.2 \
-    --min_risk_training \
-    --min_risk_method $method \
-    --min_risk_candidates $candidates \
+    --max_margin_training \
+    --unnormalized \
     --model_output_file $output_prefix \
     --optimizer $optimizer \
     > ${output_prefix}.stdout \
