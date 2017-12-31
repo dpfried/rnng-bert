@@ -343,7 +343,7 @@ struct AbstractParser {
       vector<std::tuple<Stack<BeamItem>, unsigned, Expression>> successors;
 
       while (!beam.empty()) {
-        const Stack<BeamItem>& current_stack_item = beam.back();
+        const Stack<BeamItem> current_stack_item = beam.back();
         beam.pop_back();
 
         std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
@@ -448,7 +448,7 @@ struct AbstractParser {
         vector<std::tuple<Stack<BeamItem>, unsigned, Expression>> successors;
 
         while (!beam.empty()) {
-          const Stack<BeamItem>& current_stack_item = beam.back();
+          const Stack<BeamItem> current_stack_item = beam.back();
           beam.pop_back();
 
           std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
