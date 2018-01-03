@@ -2,14 +2,22 @@
 dynet_seed=$1
 method=$2
 candidates=$3
-model="snapshots/ntparse_pos_pretrained_0_2_32_128_16_128-seed1-pid2336.params.bin"
+optimizer=$4
+
+if [ -z "$4" ]
+then
+    optimizer="sgd"
+fi
+
+model="snapshots/ntparse_pos_pretrained_0_2_32_128_16_128-seed3-pid7347.params.bin"
 out_dir="sequence_level/finetune"
 mkdir -p $out_dir
-output_prefix="${out_dir}/1_method=${method}_candidates=${candidates}"
+output_prefix="${out_dir}/1_method=${method}_candidates=${candidates}_opt=${optimizer}"
+#output_prefix="/tmp/test"
 
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
-    --cnn-mem 1500,1500,500 \
+    --cnn-mem 2000,2000,500 \
     -x \
     -T corpora/train.oracle \
     -d corpora/dev.oracle \
@@ -26,5 +34,6 @@ build/nt-parser/nt-parser \
     --min_risk_candidates $candidates \
     -m $model \
     --model_output_file $output_prefix \
+    --optimizer $optimizer \
     > ${output_prefix}.stdout \
     2> ${output_prefix}.stderr
