@@ -134,6 +134,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("dynamic_exploration", po::value<string>(), "if passed, should be greedy | sample")
           ("dynamic_exploration_probability", po::value<float>()->default_value(1.0), "with this probability, use the model probabilities to explore (with method given by --dynamic_exploration)")
           ("unnormalized", "do not locally normalize score distributions")
+          ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1743,7 +1744,8 @@ int main(int argc, char** argv) {
 
       pred_out.close();
       gold_out.close();
-      cerr << name << " output in " << pred_fname << endl;
+      cerr << name << " parses in " << pred_fname << endl;
+      cerr << name << " output in " << evalb_fname << endl;
 
       pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(gold_fname, pred_fname, evalb_fname);
       //pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.devdata, pred_fname, evalb_fname + "_corpus");
@@ -1781,7 +1783,9 @@ int main(int argc, char** argv) {
 
     Model model;
     ParserBuilder parser(&model, pretrained);
-    unique_ptr<Trainer> optimizer = optimizer_name == "sgd" ? unique_ptr<Trainer>(new SimpleSGDTrainer(&model)) : unique_ptr<Trainer>(new AdamTrainer(&model)); //(&model);
+    unique_ptr<Trainer> optimizer = optimizer_name == "sgd" 
+                                    ? unique_ptr<Trainer>(new SimpleSGDTrainer(&model, 1e-6, conf["sgd_e0"].as<float>())) 
+                                    : unique_ptr<Trainer>(new AdamTrainer(&model)); //(&model);
 
     if (optimizer_name == "sgd") {
       optimizer->eta_decay = 0.05;
