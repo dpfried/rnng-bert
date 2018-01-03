@@ -2403,10 +2403,14 @@ int main(int argc, char** argv) {
       auto t_start = chrono::high_resolution_clock::now();
       vector<vector<unsigned>> predicted;
       for (unsigned sii = 0; sii < test_size; ++sii) {
+        if (sii % 10 == 0) {
+            cerr << "\r decoding sent: " << sii;
+        }
         const auto &sentence = test_corpus.sents[sii];
         pair<vector<unsigned>, Expression> result_and_nlp = decode(*abstract_parser, sentence);
         predicted.push_back(result_and_nlp.first);
       }
+      cerr << endl;
       auto t_end = chrono::high_resolution_clock::now();
       Metrics metrics = evaluate(test_corpus.sents, test_corpus.actions, predicted, "test");
       cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << "\n";
