@@ -1,29 +1,28 @@
 #!/bin/bash
 dynet_seed=$1
-method=$2
-candidates=$3
-optimizer=$4
-dim=$5
+dpe=$2
+optimizer=$3
+sgd_e0=$4
 
-if [ -z "$4" ]
+if [ -z "$optimizer" ]
 then
     optimizer="sgd"
 fi
 
-out_dir="sequence_level"
+out_dir="max_margin_explore"
 mkdir -p $out_dir
-output_prefix="${out_dir}/${dynet_seed}_method=${method}_candidates=${candidates}_opt=${optimizer}"
+output_prefix="${out_dir}/${dynet_seed}_dpe=${dpe}_opt=${optimizer}"
 
-if [ -z "$dim" ]
+if [ -z "$sgd_e0" ]
 then
-  dim=128
+  sgd_e0="0.1"
 else
-  output_prefix="${output_prefix}_dim=${dim}"
+  output_prefix="${output_prefix}_sgd_e0=${sgd_e0}"
 fi
 
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
-    --cnn-mem 2000,2000,1000 \
+    --cnn-mem 1500,1500,500 \
     -x \
     -T corpora/train.oracle \
     -d corpora/dev.oracle \
@@ -32,13 +31,15 @@ build/nt-parser/nt-parser \
     -P \
     --pretrained_dim 100 \
     -w embeddings/sskip.100.vectors \
-    --lstm_input_dim $dim \
-    --hidden_dim $dim \
+    --lstm_input_dim 128 \
+    --hidden_dim 128 \
     -D 0.2 \
-    --min_risk_training \
-    --min_risk_method $method \
-    --min_risk_candidates $candidates \
+    --max_margin_training \
+    --unnormalized \
     --model_output_file $output_prefix \
+    --dynamic_exploration greedy \
+    --dynamic_exploration_probability $dpe \
     --optimizer $optimizer \
+    --sgd_e0 $sgd_e0 \
     > ${output_prefix}.stdout \
     2> ${output_prefix}.stderr
