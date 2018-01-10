@@ -1150,7 +1150,6 @@ struct ParserState : public AbstractParserState {
     Expression nlp_t = rectify(p_t);
     Expression r_t = affine_transform({parser->abias, parser->p2a, nlp_t});
     if (UNNORMALIZED)
-      //return rectify(r_t);
       return r_t;
     else
       return log_softmax(r_t, valid_actions);
@@ -1850,6 +1849,7 @@ int main(int argc, char** argv) {
     unsigned num_samples = 0;
 
     auto standardize_and_update_f1 = [&](double scaled_f1)  {
+        // Welford online variance, https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
         num_samples++;
         total_f1s += scaled_f1;
         double delta = scaled_f1 - mean_f1;
@@ -1901,7 +1901,6 @@ int main(int argc, char** argv) {
               cerr << endl;
               */
               float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, sample_and_nlp.first);
-              // Welford online variance, https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
               double standardized_f1 = standardize_and_update_f1(scaled_f1);
               loss = loss + (sample_and_nlp.second * input(hg, standardized_f1));
             }
