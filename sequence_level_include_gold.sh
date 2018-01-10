@@ -12,7 +12,7 @@ fi
 
 out_dir="sequence_level"
 mkdir -p $out_dir
-output_prefix="${out_dir}/${dynet_seed}_method=${method}_candidates=${candidates}_opt=${optimizer}"
+output_prefix="${out_dir}/${dynet_seed}_method=${method}_candidates=${candidates}_opt=${optimizer}_include-gold"
 
 if [ -z "$dim" ]
 then
@@ -38,6 +38,7 @@ build/nt-parser/nt-parser \
     --min_risk_training \
     --min_risk_method $method \
     --min_risk_candidates $candidates \
+    --min_risk_include_gold \
     --model_output_file $output_prefix \
     --optimizer $optimizer \
     > ${output_prefix}.stdout \

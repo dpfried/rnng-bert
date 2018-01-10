@@ -19,4 +19,5 @@ build/nt-parser/nt-parser \
     --lstm_input_dim 128 \
     --hidden_dim 128 \
     --beam_size $beam_size \
+    --unnormalized \
     -D 0.2
