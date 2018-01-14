@@ -1833,6 +1833,7 @@ int main(int argc, char** argv) {
     //sgd.eta_decay = 0.08;
 
     unsigned tot_seen = 0;
+    unsigned sents_since_last_status = 0;
     int iter = -1;
 
     double best_dev_err = 9e99;
@@ -2109,6 +2110,7 @@ int main(int argc, char** argv) {
               sents++;
               index_iter++;
               tot_seen++;
+              sents_since_last_status++;
             }
 
             assert(!batch_losses.empty());
@@ -2118,7 +2120,7 @@ int main(int argc, char** argv) {
             optimizer->update(1.0);
           }
 
-          if (tot_seen % status_every_i_iterations == 0) {
+          if (sents_since_last_status >= status_every_i_iterations) {
             ++iter;
             optimizer->status();
             auto time_now = chrono::system_clock::now();
@@ -2137,19 +2139,19 @@ int main(int argc, char** argv) {
               cerr <<
                    " per-action-ppl: " << exp(llh / trs) <<
                    " per-input-ppl: " << exp(llh / words) <<
-                   " per-sent-ppl: " << exp(llh / status_every_i_iterations) <<
+                   " per-sent-ppl: " << exp(llh / sents_since_last_status) <<
                    " err: " << (trs - right) / trs;
             }
             cerr <<
                  " trace f1: " << block_match_counts.metrics().f1 / 100.f  <<
-                 " [" << dur.count() / (double)status_every_i_iterations << "ms per instance]";
+                 " [" << dur.count() / (double)sents_since_last_status << "ms per instance]";
             if (min_risk_training) {
               //sampled_f1s.clear();
               cerr << " mean sampled f1: " << streaming_f1.mean_value() << " mean standardized f1:" << streaming_f1.mean_standardized_value();
             }
 
             cerr << endl;
-            llh = trs = right = words = sents = 0;
+            llh = trs = right = words = sents = sents_since_last_status = 0;
             //tot_gold_score = tot_lad_score = 0.0;
             //violations = 0;
 
