@@ -37,6 +37,7 @@
 #include "nt-parser/eval.h"
 #include "nt-parser/stack.h"
 #include "nt-parser/tree.h"
+#include "streaming-statistics.h"
 
 // dictionaries
 cnn::Dict termdict, ntermdict, adict, posdict, non_unked_termdict;
@@ -135,6 +136,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("dynamic_exploration_probability", po::value<float>()->default_value(1.0), "with this probability, use the model probabilities to explore (with method given by --dynamic_exploration)")
           ("unnormalized", "do not locally normalize score distributions")
           ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
+          ("batch_size", po::value<unsigned>()->default_value(1),  "number of training examples to use to compute each gradient update")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -238,7 +240,9 @@ struct AbstractParser {
       bool label_smoothing = false,
       float label_smoothing_epsilon = 0.0,
       DynamicOracle* dynamic_oracle = nullptr,
-      bool loss_augmented = false
+      bool loss_augmented = false,
+      StreamingStatistics* streaming_entropy = nullptr,
+      StreamingStatistics* streaming_gold_prob = nullptr
   ) {
     // can't have both correct actions and an oracle
     assert(correct_actions.empty() || !dynamic_oracle);
@@ -276,6 +280,10 @@ struct AbstractParser {
         } else {
           correct_action = dynamic_oracle->oracle_action(*state);
         }
+        if (streaming_gold_prob) {
+          Expression gold_prob = exp(pick(adiste, correct_action));
+          streaming_gold_prob->standardize_and_update(as_scalar(gold_prob.value()));
+        }
       }
 
       if (loss_augmented) {
@@ -285,6 +293,16 @@ struct AbstractParser {
       }
 
       vector<float> adist = as_vector(adiste.value());
+
+      if (streaming_entropy) {
+        double entropy = 0;
+        // doing this with a dot product produces nans due to invalid actions
+        for (unsigned ac: valid_actions) {
+          double log_p = adist[ac];
+          entropy -= log_p * exp(log_p);
+        }
+        streaming_entropy->standardize_and_update(entropy);
+      }
 
       unsigned model_action = valid_actions[0];
       if (sample) {
@@ -333,7 +351,7 @@ struct AbstractParser {
         if (model_action == correct_action) { (*right)++; }
         if (label_smoothing) {
           assert(!UNNORMALIZED);
-          Expression cross_entropy = pick(adiste, correct_action) * input(*hg, (1 - label_smoothing_epsilon));
+          Expression cross_entropy = pick(adiste, correct_action) * input(*hg, (2 - label_smoothing_epsilon));
           // add uniform cross entropy
           for (unsigned a: valid_actions) {
             cross_entropy = cross_entropy + pick(adiste, a) * input(*hg, label_smoothing_epsilon / valid_actions.size());
@@ -1682,7 +1700,7 @@ int main(int argc, char** argv) {
   unsigned block_num = conf["block_num"].as<unsigned>();
 
 
-  auto decode = [&](AbstractParser& parser, const parser::Sentence& sentence) {
+  auto decode = [&](AbstractParser& parser, const parser::Sentence& sentence, StreamingStatistics* streaming_entropy = nullptr) {
       double right = 0;
       // get parse and negative log probability
       ComputationGraph hg;
@@ -1697,7 +1715,8 @@ int main(int argc, char** argv) {
         }
         return beam_results[0];
       } else {
-        return parser.abstract_log_prob_parser(&hg, sentence, vector<int>(), &right, true);
+        return parser.abstract_log_prob_parser(&hg, sentence, vector<int>(), &right, true,
+                                               false, false, 0.0, nullptr, false, streaming_entropy, nullptr);
       }
   };
 
@@ -1790,18 +1809,19 @@ int main(int argc, char** argv) {
       optimizer->eta_decay = 0.05;
     }
 
+    unsigned batch_size = conf["batch_size"].as<unsigned>();
 
     if (conf.count("model")) {
       cerr << "before load model" << endl;
       ifstream in(conf["model"].as<string>().c_str());
       if (conf.count("text_format")) {
         boost::archive::text_iarchive ia(in);
-        ia >> model >> *optimizer;
-        //ia >> model;
+        //ia >> model >> *optimizer;
+        ia >> model;
       } else {
         boost::archive::binary_iarchive ia(in);
-        ia >> model >> *optimizer;
-        //ia >> model;
+        //ia >> model >> *optimizer;
+        ia >> model;
       }
       cerr << "after load model" << endl;
     } else {
@@ -1844,34 +1864,14 @@ int main(int argc, char** argv) {
       assert(exploration_type == DynamicOracle::ExplorationType::none || exploration_type == DynamicOracle::ExplorationType::greedy);
     }
 
-    //vector<double> sampled_f1s;
-    double total_f1s = 0.0;
-    double total_standardized_f1s = 0.0;
-    double m2_f1 = 0.0;
-    double mean_f1 = 0.0;
-    double std_f1 = 0.0;
-    unsigned num_samples = 0;
-
-    auto standardize_and_update_f1 = [&](double scaled_f1)  {
-        // Welford online variance, https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
-        num_samples++;
-        total_f1s += scaled_f1;
-        double delta = scaled_f1 - mean_f1;
-        mean_f1 += delta / num_samples;
-        m2_f1 += delta * (scaled_f1 - mean_f1);
-        std_f1 = sqrt(num_samples > 1 ? m2_f1 / (num_samples - 1) : 1.0);
-        double standardized_f1 = std_f1 > 0 ? (scaled_f1 - mean_f1) / std_f1 : 0;
-        total_standardized_f1s += standardized_f1;
-        return standardized_f1;
-    };
+    StreamingStatistics streaming_f1;
 
     //double tot_lad_score = 0.0;
     //double tot_gold_score = 0.0;
     //unsigned violations = 0;
 
-    auto train_sentence = [&](const parser::Sentence& sentence, const vector<int>& actions, double* right) -> pair<double, MatchCounts> {
-        ComputationGraph hg;
-        double loss_v;
+    auto train_sentence = [&](ComputationGraph& hg, const parser::Sentence& sentence, const vector<int>& actions, double* right) -> pair<Expression, MatchCounts> {
+        Expression loss = input(hg, 0.0);
 
         MatchCounts sentence_match_counts;
 
@@ -1885,7 +1885,6 @@ int main(int argc, char** argv) {
         Tree gold_tree = to_tree(actions, sentence);
         if (conf.count("min_risk_training")) {
           if (min_risk_method == "reinforce") {
-            Expression loss = input(hg, 0.0);
             /*
             cerr << "gold ";
             print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cerr);
@@ -1905,11 +1904,10 @@ int main(int argc, char** argv) {
               cerr << endl;
               */
               float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, sample_and_nlp.first);
-              double standardized_f1 = standardize_and_update_f1(scaled_f1);
+              double standardized_f1 = streaming_f1.standardize_and_update(scaled_f1);
               loss = loss + (sample_and_nlp.second * input(hg, standardized_f1));
             }
             loss = loss * input(hg, 1.0 / min_risk_candidates);
-            loss_v = as_scalar(hg.incremental_forward());
           } else if (min_risk_method == "beam" || min_risk_method == "beam_noprobs" ||
                      min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log") {
             auto candidates = parser.abstract_log_prob_parser_beam(&hg, sentence,
@@ -1923,11 +1921,13 @@ int main(int argc, char** argv) {
 
             if (min_risk_method == "beam") {
               // L_risk objective (Eq 4) from Edunov et al 2017: https://arxiv.org/pdf/1711.04956.pdf
+                /*
               vector<Expression> log_probs_plus_log_losses;
               vector<Expression> log_probs;
               for (auto &parse_and_loss: candidates) {
-                //Expression log_prob = -parse_and_loss.second;
-                Expression normed_log_prob = -parse_and_loss.second - log(input(hg, parse_and_loss.first.size()));
+                //Expression normed_log_prob = -parse_and_loss.second;
+                //Expression normed_log_prob = -parse_and_loss.second - log(input(hg, parse_and_loss.first.size()));
+                Expression normed_log_prob = -parse_and_loss.second * input(hg, 1.0 / parse_and_loss.first.size());
                 float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, parse_and_loss.first);
                 standardize_and_update_f1(scaled_f1);
                 if (scaled_f1 < 1.0) {
@@ -1942,6 +1942,19 @@ int main(int argc, char** argv) {
                 Expression loss = input(hg, 0.0f);
                 loss_v = as_scalar(hg.incremental_forward());
               }
+                 */
+              vector<Expression> normed_log_probs;
+              for (auto &parse_and_loss: candidates) {
+                Expression normed_log_prob = -parse_and_loss.second * input(hg, 1.0 / parse_and_loss.first.size());
+                normed_log_probs.push_back(normed_log_prob);
+              }
+              Expression log_normalizer = logsumexp(normed_log_probs);
+              assert(normed_log_probs.size() ==  candidates.size());
+              for (unsigned i = 0; i < normed_log_probs.size(); i++) {
+                float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, candidates[i].first);
+                scaled_f1 = streaming_f1.standardize_and_update(scaled_f1);
+                loss = loss + input(hg, -scaled_f1) * exp(normed_log_probs[i] - log_normalizer);
+              }
             } else if (min_risk_method == "beam_noprobs") {
               Expression loss = input(hg, 0.0f);
               float normalizer = 0.0;
@@ -1951,7 +1964,6 @@ int main(int argc, char** argv) {
                 loss = loss + (parse_and_loss.second * input(hg, scaled_f1));
               }
               loss = loss * input(hg, 1.0 / candidates.size());
-              loss_v = as_scalar(hg.incremental_forward());
             } else {
               assert(min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log");
               Expression loss = input(hg, 0.0f);
@@ -1970,13 +1982,11 @@ int main(int argc, char** argv) {
                 if (normalizer != 0.0)
                   loss = loss * input(hg, 1.0f / normalizer);
               }
-              loss_v = as_scalar(hg.incremental_forward());
             }
           }  else {
             cerr << "invalid min_risk_method: " << min_risk_method << endl;
             exit(1);
           }
-          hg.backward();
         }
         /* doesn't work; search errors
          else if (max_margin_training) {
@@ -2014,7 +2024,6 @@ int main(int argc, char** argv) {
             Expression loss = gold_and_neg_score.second - lad_and_neg_score.second;
             loss_v = as_scalar(hg.incremental_forward());
             cerr << "violation: " << loss_v << endl;
-            hg.backward();
             violations++;
           } else {
             loss_v = 0;
@@ -2055,12 +2064,9 @@ int main(int argc, char** argv) {
             }
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
           }
-          loss_v = as_scalar(hg.incremental_forward());
-          hg.backward();
           //loss_v = as_scalar(result_and_nlp.second.value());
         }
-        optimizer->update(1.0);
-        return pair<double, MatchCounts>(loss_v, sentence_match_counts);
+        return pair<Expression, MatchCounts>(loss, sentence_match_counts);
     };
 
     auto train_block = [&](const parser::TopDownOracle& corpus, vector<unsigned>::iterator indices_begin, vector<unsigned>::iterator indices_end, int epoch_size) {
@@ -2081,127 +2087,149 @@ int main(int argc, char** argv) {
 
         MatchCounts block_match_counts;
 
-      for (vector<unsigned>::iterator index_iter = indices_begin; index_iter != indices_end; ++index_iter) {
-        tot_seen++;
-        auto& sentence = corpus.sents[*index_iter];
-        const vector<int>& actions=corpus.actions[*index_iter];
-        {
-          auto loss_and_mc = train_sentence(sentence, actions, &right);
-          double loss = loss_and_mc.first;
-          block_match_counts += loss_and_mc.second;
-          if (!min_risk_training && !max_margin_training && loss < 0) {
-            cerr << "loss < 0 on sentence " << *index_iter << ": loss=" << loss << endl;
-            //assert(lp >= 0.0)
-          }
-          llh += loss;
-        }
-        trs += actions.size();
-        words += sentence.size();
-        sents++;
+        vector<unsigned>::iterator index_iter = indices_begin;
+        while (true) {
+          {
+            ComputationGraph hg;
+            vector<Expression> batch_losses;
+            for (unsigned batch_sent = 0; batch_sent < batch_size && index_iter != indices_end; batch_sent++) {
+              auto &sentence = corpus.sents[*index_iter];
+              const vector<int> &actions = corpus.actions[*index_iter];
+              auto loss_and_mc = train_sentence(hg, sentence, actions, &right);
+              batch_losses.push_back(loss_and_mc.first);
+              block_match_counts += loss_and_mc.second;
+              double loss = as_scalar(loss_and_mc.first.value());
+              if (!min_risk_training && !max_margin_training && loss < 0) {
+                cerr << "loss < 0 on sentence " << *index_iter << ": loss=" << loss << endl;
+                //assert(lp >= 0.0)
+              }
+              llh += loss;
+              trs += actions.size();
+              words += sentence.size();
+              sents++;
+              index_iter++;
+              tot_seen++;
+            }
 
-        if (tot_seen % status_every_i_iterations == 0) {
-          ++iter;
-          optimizer->status();
-          auto time_now = chrono::system_clock::now();
-          auto dur = chrono::duration_cast<chrono::milliseconds>(time_now - time_start);
-          cerr << "update #" << iter << " (epoch " << (static_cast<double>(tot_seen) / epoch_size) << ")";
-               /*" |time=" << put_time(localtime(&time_now), "%c %Z") << ")\tllh: "<< */
+            assert(!batch_losses.empty());
+            Expression batch_loss = average(batch_losses);
+            double batch_loss_v = as_scalar(batch_loss.value());
+            hg.backward();
+            optimizer->update(1.0);
+          }
+
+          if (tot_seen % status_every_i_iterations == 0) {
+            ++iter;
+            optimizer->status();
+            auto time_now = chrono::system_clock::now();
+            auto dur = chrono::duration_cast<chrono::milliseconds>(time_now - time_start);
+            cerr << "update #" << iter << " (epoch " << (static_cast<double>(tot_seen) / epoch_size) << ")";
+            /*" |time=" << put_time(localtime(&time_now), "%c %Z") << ")\tllh: "<< */
             /*
           if (max_margin_training) {
             cerr <<
-              " mean-gold-score: " << tot_gold_score / sents << 
+              " mean-gold-score: " << tot_gold_score / sents <<
               " mean-lad-score: " << tot_lad_score / sents <<
               " violations: " <<  violations << "/" << sents;
           } else
              */
-          {
+            {
+              cerr <<
+                   " per-action-ppl: " << exp(llh / trs) <<
+                   " per-input-ppl: " << exp(llh / words) <<
+                   " per-sent-ppl: " << exp(llh / status_every_i_iterations) <<
+                   " err: " << (trs - right) / trs;
+            }
             cerr <<
-              " per-action-ppl: " << exp(llh / trs) <<
-              " per-input-ppl: " << exp(llh / words) <<
-              " per-sent-ppl: " << exp(llh / status_every_i_iterations) <<
-              " err: " << (trs - right) / trs;
-          }
-          cerr << 
-            " trace f1: " << block_match_counts.metrics().f1 / 100.f  <<
-            " [" << dur.count() / (double)status_every_i_iterations << "ms per instance]";
-          if (min_risk_training) {
-            //sampled_f1s.clear();
-            cerr << " mean sampled f1: " << mean_f1 << " mean standardized f1:" << total_standardized_f1s / num_samples;
-          }
+                 " trace f1: " << block_match_counts.metrics().f1 / 100.f  <<
+                 " [" << dur.count() / (double)status_every_i_iterations << "ms per instance]";
+            if (min_risk_training) {
+              //sampled_f1s.clear();
+              cerr << " mean sampled f1: " << streaming_f1.mean_value() << " mean standardized f1:" << streaming_f1.mean_standardized_value();
+            }
 
-          cerr << endl;
-          llh = trs = right = words = sents = 0;
-          //tot_gold_score = tot_lad_score = 0.0;
-          //violations = 0;
+            cerr << endl;
+            llh = trs = right = words = sents = 0;
+            //tot_gold_score = tot_lad_score = 0.0;
+            //violations = 0;
 
-          if (iter % 25 == 0) { // report on dev set
-            unsigned dev_size = dev_corpus.size();
-            double llh = 0;
-            double trs = 0;
-            double right = 0;
-            double dwords = 0;
-            auto t_start = chrono::high_resolution_clock::now();
-            vector<vector<unsigned>> predicted;
-            for (unsigned sii = 0; sii < dev_size; ++sii) {
-              const auto& sentence=dev_corpus.sents[sii];
-              const vector<int>& actions=dev_corpus.actions[sii];
+            if (iter % 25 == 0) { // report on dev set
+              unsigned dev_size = dev_corpus.size();
+              double llh = 0;
+              double trs = 0;
+              double right = 0;
+              double dwords = 0;
+              auto t_start = chrono::high_resolution_clock::now();
+              vector<vector<unsigned>> predicted;
+
+              StreamingStatistics streaming_entropy;
+              StreamingStatistics streaming_gold_prob;
+
+              for (unsigned sii = 0; sii < dev_size; ++sii) {
+                const auto& sentence=dev_corpus.sents[sii];
+                const vector<int>& actions=dev_corpus.actions[sii];
 
 //              cerr << "checking symbolic parser via actions_to_brackets" << endl;
-              DynamicOracle oracle(dev_corpus.sents[sii], dev_corpus.actions[sii]);
+                DynamicOracle oracle(dev_corpus.sents[sii], dev_corpus.actions[sii]);
 
-              dwords += sentence.size();
-              {
-                ComputationGraph hg;
-                parser.abstract_log_prob_parser(&hg, sentence, actions, &right, true);
-                double lp = as_scalar(hg.incremental_forward());
-                llh += lp;
+                dwords += sentence.size();
+                {
+                  ComputationGraph hg;
+                  parser.abstract_log_prob_parser(&hg, sentence, actions, &right, true, false, false, 0.0, nullptr, false, nullptr, &streaming_gold_prob);
+                  double lp = as_scalar(hg.incremental_forward());
+                  llh += lp;
+                }
+
+                //ComputationGraph hg;
+                vector<unsigned> pred = decode(parser, sentence, &streaming_entropy).first;
+                predicted.push_back(pred);
+                //vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,vector<int>(),&right,true);
+                trs += actions.size();
               }
-              //ComputationGraph hg;
-              vector<unsigned> pred = decode(parser, sentence).first;
-              predicted.push_back(pred);
-              //vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,vector<int>(),&right,true);
-              trs += actions.size();
-            }
-            auto t_end = chrono::high_resolution_clock::now();
-            double err = (trs - right) / trs;
+              auto t_end = chrono::high_resolution_clock::now();
+              double err = (trs - right) / trs;
 
-            Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev");
-            cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << "\n";
-            cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
-            if (metrics.f1>bestf1) {
-              cerr << "  new best...writing model to " << fname << ".bin ...\n";
-              best_dev_err = err;
-              bestf1=metrics.f1;
-              ofstream out(fname + ".bin");
-              if (conf.count("text_format")) {
+              Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev");
+              cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
+              cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
+              cerr << "mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std << " mean gold prob: " << streaming_gold_prob.mean_value() << " stddev gold prob: " << streaming_gold_prob.std;
+              if (metrics.f1>bestf1) {
+                cerr << "  new best...writing model to " << fname << ".bin ...\n";
+                best_dev_err = err;
+                bestf1=metrics.f1;
+                ofstream out(fname + ".bin");
+                if (conf.count("text_format")) {
                   boost::archive::text_oarchive oa(out);
                   oa << model << *optimizer;
                   oa << termdict << adict << ntermdict << posdict;
-              } else {
+                } else {
                   boost::archive::binary_oarchive oa(out);
                   oa << model << *optimizer;
                   oa << termdict << adict << ntermdict << posdict;
-              }
-              // system((string("cp ") + pfx + string(" ") + pfx + string(".best")).c_str());
-              // Create a soft link to the most recent model in order to make it
-              // easier to refer to it in a shell script.
-              /*
-              if (!softlinkCreated) {
-                string softlink = " latest_model";
-                if (system((string("rm -f ") + softlink).c_str()) == 0 &&
-                    system((string("ln -s ") + fname + softlink).c_str()) == 0) {
-                  cerr << "Created " << softlink << " as a soft link to " << fname
-                       << " for convenience." << endl;
                 }
-                softlinkCreated = true;
+                // system((string("cp ") + pfx + string(" ") + pfx + string(".best")).c_str());
+                // Create a soft link to the most recent model in order to make it
+                // easier to refer to it in a shell script.
+                /*
+                if (!softlinkCreated) {
+                  string softlink = " latest_model";
+                  if (system((string("rm -f ") + softlink).c_str()) == 0 &&
+                      system((string("ln -s ") + fname + softlink).c_str()) == 0) {
+                    cerr << "Created " << softlink << " as a soft link to " << fname
+                         << " for convenience." << endl;
+                  }
+                  softlinkCreated = true;
+                }
+                */
               }
-              */
             }
+            time_start = chrono::system_clock::now();
           }
-          time_start = chrono::system_clock::now();
-        }
-      }
 
+          if (index_iter == indices_end) {
+            break;
+          }
+        }
     };
 
     int epoch = 0;
@@ -2401,18 +2429,21 @@ int main(int argc, char** argv) {
     if (!output_candidate_trees) {
       auto t_start = chrono::high_resolution_clock::now();
       vector<vector<unsigned>> predicted;
+      StreamingStatistics streaming_entropy;
+      //StreamingStatistics streaming_gold_prob;
       for (unsigned sii = 0; sii < test_size; ++sii) {
         if (sii % 10 == 0) {
             cerr << "\r decoding sent: " << sii;
         }
         const auto &sentence = test_corpus.sents[sii];
-        pair<vector<unsigned>, Expression> result_and_nlp = decode(*abstract_parser, sentence);
+        pair<vector<unsigned>, Expression> result_and_nlp = decode(*abstract_parser, sentence, &streaming_entropy);
         predicted.push_back(result_and_nlp.first);
       }
       cerr << endl;
       auto t_end = chrono::high_resolution_clock::now();
       Metrics metrics = evaluate(test_corpus.sents, test_corpus.actions, predicted, "test");
-      cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << "\n";
+      cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
+      cerr << "mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
     }
   }
 }

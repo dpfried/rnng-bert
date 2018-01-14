@@ -3,16 +3,26 @@ dynet_seed=$1
 method=$2
 candidates=$3
 optimizer=$4
-dim=$5
+batch_size=$5
+dim=$6
 
-if [ -z "$4" ]
+if [ -z "$optimizer" ]
 then
     optimizer="sgd"
 fi
 
 out_dir="sequence_level"
 mkdir -p $out_dir
+
+
 output_prefix="${out_dir}/${dynet_seed}_method=${method}_candidates=${candidates}_opt=${optimizer}_include-gold"
+
+if [ -z "$batch_size" ]
+then
+  batch_size=1
+else
+  output_prefix="${output_prefix}_batch-size=${batch_size}"
+fi
 
 if [ -z "$dim" ]
 then
@@ -23,7 +33,7 @@ fi
 
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
-    --cnn-mem 2000,2000,1000 \
+    --cnn-mem 3000,3000,500 \
     -x \
     -T corpora/train.oracle \
     -d corpora/dev.oracle \
@@ -41,5 +51,6 @@ build/nt-parser/nt-parser \
     --min_risk_include_gold \
     --model_output_file $output_prefix \
     --optimizer $optimizer \
+    --batch_size $batch_size \
     > ${output_prefix}.stdout \
     2> ${output_prefix}.stderr

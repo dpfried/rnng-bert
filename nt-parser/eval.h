@@ -9,10 +9,13 @@ using namespace std;
 
 struct Metrics {
 public:
-  Metrics(double precision, double recall, double f1):
-          precision(precision), recall(recall), f1(f1) {}
+  Metrics(double precision, double recall, double f1, double complete_match):
+          precision(precision), recall(recall), f1(f1), complete_match(complete_match) {}
 
-  double precision,recall,f1;
+  Metrics(double precision, double recall, double f1):
+      Metrics(precision, recall, f1, 0) {}
+
+  double precision,recall,f1,complete_match;
 };
 
 struct MatchCounts {
