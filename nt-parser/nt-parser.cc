@@ -1720,6 +1720,13 @@ int main(int argc, char** argv) {
       }
   };
 
+
+  auto get_neg_log_likelihood = [&](AbstractParser& parser, const parser::Sentence& sentence, const vector<int>& actions, double* right, StreamingStatistics* streaming_gold_prob = nullptr) {
+    ComputationGraph hg;
+    parser.abstract_log_prob_parser(&hg, sentence, actions, right, true, false, false, 0.0, nullptr, false, nullptr, streaming_gold_prob);
+    return as_scalar(hg.incremental_forward());
+  };
+
   auto evaluate = [&](const vector<parser::Sentence>& sentences, const vector<vector<int>>& gold_parses, const vector<vector<unsigned>>& pred_parses, const string& name) {
       auto make_name = [&](const string& base) {
           ostringstream os;
@@ -1772,6 +1779,10 @@ int main(int argc, char** argv) {
         cerr << "warning: score mismatch" << endl;
         cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
         cerr << "evalb\trecall=" << results.first.recall << ", precision=" << results.first.precision << ", F1=" << results.first.f1 << "\n";
+        if (results.first.recall == 0.0 && results.first.precision == 0.0 && results.first.f1 == 0.0) {
+            cerr << "evalb appears to not have run; returning computed score" << endl;
+            return match_counts.metrics();
+        }
       }
       //cerr << "evalb corpus\trecall=" << corpus_results.first.recall << ", precision=" << corpus_results.first.precision << ", F1=" << corpus_results.first.f1 << "\n";
 
@@ -2175,12 +2186,16 @@ int main(int argc, char** argv) {
                 DynamicOracle oracle(dev_corpus.sents[sii], dev_corpus.actions[sii]);
 
                 dwords += sentence.size();
+                  /*
                 {
                   ComputationGraph hg;
                   parser.abstract_log_prob_parser(&hg, sentence, actions, &right, true, false, false, 0.0, nullptr, false, nullptr, &streaming_gold_prob);
                   double lp = as_scalar(hg.incremental_forward());
                   llh += lp;
                 }
+                   */
+                llh += get_neg_log_likelihood(parser, sentence, actions, &right, &streaming_gold_prob);
+
 
                 //ComputationGraph hg;
                 vector<unsigned> pred = decode(parser, sentence, &streaming_entropy).first;
@@ -2432,7 +2447,10 @@ int main(int argc, char** argv) {
       auto t_start = chrono::high_resolution_clock::now();
       vector<vector<unsigned>> predicted;
       StreamingStatistics streaming_entropy;
-      //StreamingStatistics streaming_gold_prob;
+      StreamingStatistics streaming_gold_prob;
+      double neg_log_likelihood = 0;
+      double actions_correct = 0;
+      unsigned long num_actions = 0;
       for (unsigned sii = 0; sii < test_size; ++sii) {
         if (sii % 10 == 0) {
             cerr << "\r decoding sent: " << sii;
@@ -2440,12 +2458,15 @@ int main(int argc, char** argv) {
         const auto &sentence = test_corpus.sents[sii];
         pair<vector<unsigned>, Expression> result_and_nlp = decode(*abstract_parser, sentence, &streaming_entropy);
         predicted.push_back(result_and_nlp.first);
+        neg_log_likelihood += get_neg_log_likelihood(*abstract_parser, sentence, test_corpus.actions[sii], &actions_correct, &streaming_gold_prob);
+        num_actions += test_corpus.actions[sii].size();
       }
       cerr << endl;
       auto t_end = chrono::high_resolution_clock::now();
       Metrics metrics = evaluate(test_corpus.sents, test_corpus.actions, predicted, "test");
       cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
-      cerr << "mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
+      cerr << "decode: mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
+      cerr << "gold: mean gold probability: " << streaming_gold_prob.mean_value() << " stddev gold probability: " << streaming_entropy.std << " avg log likelihood: " << -neg_log_likelihood / (test_size) << " actions correct: " << actions_correct / num_actions << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
     }
   }
 }
