@@ -1,11 +1,11 @@
 #!/bin/bash
 dynet_seed=$1
-method=$2
-candidates=$3
-optimizer=$4
-batch_size=$5
-dim=$6
-threads=$7
+set_iter=$2
+method=reinforce
+candidates=10
+optimizer=sgd
+batch_size=1
+dim=$3
 
 if [ -z "$optimizer" ]
 then
@@ -32,16 +32,6 @@ else
   output_prefix="${output_prefix}_dim=${dim}"
 fi
 
-if [ -z "$threads" ]
-then
-  echo "no threads"
-else
-  export OMP_NUM_THREADS=$threads
-  export MKL_NUM_THREADS=$threads
-  output_prefix="${output_prefix}_threads=${threads}"
-fi
-echo $MKL_NUM_THREADS
-
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
     --cnn-mem 2000,2000,500 \
@@ -60,8 +50,10 @@ build/nt-parser/nt-parser \
     --min_risk_method $method \
     --min_risk_candidates $candidates \
     --min_risk_include_gold \
-    --model_output_file $output_prefix \
     --optimizer $optimizer \
     --batch_size $batch_size \
-    > ${output_prefix}.stdout \
-    2> ${output_prefix}.stderr
+    --set_iter $set_iter \
+    -m ${output_prefix}.bin \
+    --model_output_file $output_prefix \
+    >> ${output_prefix}.stdout \
+    2>> ${output_prefix}.stderr

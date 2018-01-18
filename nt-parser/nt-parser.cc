@@ -138,6 +138,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
           ("batch_size", po::value<unsigned>()->default_value(1),  "number of training examples to use to compute each gradient update")
           ("compute_distribution_stats", "compute entropy and gold probabilities for action distributions")
+          ("set_iter", po::value<int>(),  "")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1848,12 +1849,12 @@ int main(int argc, char** argv) {
       ifstream in(conf["model"].as<string>().c_str());
       if (conf.count("text_format")) {
         boost::archive::text_iarchive ia(in);
-        //ia >> model >> *optimizer;
-        ia >> model;
+        ia >> model >> *optimizer;
+        //ia >> model;
       } else {
         boost::archive::binary_iarchive ia(in);
-        //ia >> model >> *optimizer;
-        ia >> model;
+        ia >> model >> *optimizer;
+        //ia >> model;
       }
       cerr << "after load model" << endl;
     } else {
@@ -1867,6 +1868,10 @@ int main(int argc, char** argv) {
     unsigned tot_seen = 0;
     unsigned sents_since_last_status = 0;
     int iter = -1;
+    if (conf.count("set_iter")) {
+      iter = conf["set_iter"].as<int>();
+      tot_seen = (unsigned) (iter + 1) * status_every_i_iterations;
+    }
 
     double best_dev_err = 9e99;
     double bestf1=0.0;
