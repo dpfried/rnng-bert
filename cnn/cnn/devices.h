@@ -30,7 +30,7 @@ class Device {
 #if HAVE_CUDA
 class Device_GPU : public Device {
  public:
-  explicit Device_GPU(int mb, int device_id);
+  explicit Device_GPU(int mb_fwd, int mb_bwd, int mb_params, int device_id);
   ~Device_GPU();
   int cuda_device_id;
   cublasHandle_t cublas_handle;

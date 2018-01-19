@@ -11,7 +11,7 @@ namespace cnn {
 Device::~Device() {}
 
 #if HAVE_CUDA
-Device_GPU::Device_GPU(int mb, int device_id) :
+Device_GPU::Device_GPU(int mb_fwd, int mb_bwd, int mb_params, int device_id) :
     Device(DeviceType::GPU, &gpu_mem), cuda_device_id(device_id), gpu_mem(device_id) {
   CUDA_CHECK(cudaSetDevice(device_id));
   CUBLAS_CHECK(cublasCreate(&cublas_handle));
@@ -28,10 +28,9 @@ Device_GPU::Device_GPU(int mb, int device_id) :
 
   // this is the big memory allocation
         
-  size_t byte_count = (size_t)mb << 20;
-  fxs = new AlignedMemoryPool(byte_count, mem); // memory for node values
-  dEdfs = new AlignedMemoryPool(byte_count, mem); // memory for node gradients
-  ps = new AlignedMemoryPool(byte_count, mem); // memory for parameters
+  fxs = new AlignedMemoryPool((size_t)mb_fwd << 20, mem); // memory for node values
+  dEdfs = new AlignedMemoryPool((size_t)mb_bwd << 20, mem); // memory for node gradients
+  ps = new AlignedMemoryPool((size_t)mb_params << 20, mem); // memory for parameters
 
 }
 

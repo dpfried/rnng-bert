@@ -74,6 +74,8 @@ if (WITH_CUDA_BACKEND)
   find_package(CUDA REQUIRED)
   set(CUDA_TOOLKIT_ROOT_DIR ${CUDA_ROOT})
   include_directories(SYSTEM ${CUDA_INCLUDE_DIRS})
+  set_target_properties(dynet PROPERTIES
+      COMPILE_DEFINITIONS HAVE_CUDA)
   add_definitions(-DHAVE_CUDA)
   #list(APPEND CUDA_LIBRARIES /usr/lib64/libpthread.so)
   MESSAGE("CUDA_LIBRARIES: ${CUDA_LIBRARIES}")

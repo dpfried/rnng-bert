@@ -20,7 +20,7 @@ static void RemoveArgs(int& argc, char**& argv, int& argi, int n) {
 
 #define MAX_GPUS 256
 
-vector<Device*> Initialize_GPU(int& argc, char**& argv) {
+vector<Device*> Initialize_GPU(int& argc, char**& argv, int mb_fwd, int mb_bwd, int mb_params) {
   int nDevices;
   CUDA_CHECK(cudaGetDeviceCount(&nDevices));
   if (nDevices < 1) {
@@ -138,10 +138,10 @@ vector<Device*> Initialize_GPU(int& argc, char**& argv) {
   stable_sort(gpus.begin(), gpus.end(), [&](int a, int b) -> bool { return gpu_free_mem[a] > gpu_free_mem[b]; });
   gpus.resize(requested_gpus);
   cerr << "[cnn] Device(s) selected:";
+
   for (int i = 0; i < requested_gpus; ++i) {
     cerr << ' ' << gpus[i];
-    int mb = 512;
-    Device* d = new Device_GPU(mb, gpus[i]);
+    Device* d = new Device_GPU(mb_fwd, mb_bwd, mb_params, gpus[i]);
     gpudevices.push_back(d);
   }
   cerr << endl;

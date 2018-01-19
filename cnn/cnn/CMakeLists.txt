@@ -69,10 +69,14 @@ set(cnn_library_HDRS
     training.h
 )
 
-if(WITH_CUDA_BACKEND)
-  list(APPEND cnn_library_SRCS
-       cuda.cc)
-endif(WITH_CUDA_BACKEND)
+set(cnn_gpu_SRCS
+    cuda.cc
+    gpu-ops.cu)
+
+# if(WITH_CUDA_BACKEND)
+#   list(APPEND cnn_library_SRCS
+#        cuda.cc)
+# endif(WITH_CUDA_BACKEND)
 
 file(GLOB TEST_SRCS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} tests/*.cc)
 
@@ -96,27 +100,36 @@ file(GLOB TEST_SRCS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} tests/*.cc)
 #     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests.bin/${testName} )
 #endforeach(test_src)
 
-# actual target:
-add_library(cnn STATIC ${cnn_library_SRCS} ${cnn_library_HDRS})
-target_link_libraries(cnn ${LIBS})
-if(WITH_CUDA_BACKEND)
-	add_library(gcnn_shared SHARED ${cnn_library_SRCS} ${cnn_library_HDRS})
-	target_link_libraries(gcnn_shared ${LIBS})
-else()
-	add_library(cnn_shared SHARED ${cnn_library_SRCS} ${cnn_library_HDRS})
-	target_link_libraries(cnn_shared ${LIBS})
-endif(WITH_CUDA_BACKEND)
-#add_library(cnn ${cnn_library_SRCS} ${cnn_library_HDRS} ${LIBS})
 if(WITH_CUDA_BACKEND)
   set(CUDA_SEPARABLE_COMPILATION ON)
-  list(APPEND CUDA_NVCC_FLAGS "-gencode;arch=compute_20,code=sm_20;-gencode;arch=compute_30,code=sm_30;-gencode;arch=compute_35,code=sm_35;-gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_52,code=sm_52;-gencode;arch=compute_52,code=compute_52;-std=c++11;-O2;-DVERBOSE;-Xcompiler;-fpic")
+  list(APPEND CUDA_NVCC_FLAGS "-gencode;arch=compute_20,code=sm_20;-gencode;arch=compute_30,code=sm_30;-gencode;arch=compute_35,code=sm_35;-gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_52,code=sm_52;-gencode;arch=compute_52,code=compute_52;-std=c++11;-O2;-DVERBOSE;-Xcompiler;-fpic;-DEIGEN_USE_GPU;-DHAVE_CUDA;-D_FORCE_INLINES")
+  if(CUDNN_FOUND)
+    list(APPEND CUDA_NVCC_FLAGS "-DHAVE_CUDNN")
+  endif()
   SET(CUDA_PROPAGATE_HOST_FLAGS OFF)
-  cuda_add_library(cnncuda STATIC gpu-ops.cu)
-  cuda_add_library(cnncuda_shared SHARED gpu-ops.cu)
+  # cuda_add_library(cnncuda STATIC gpu-ops.cu)
+  # cuda_add_library(cnncuda_shared SHARED gpu-ops.cu)
+  #cuda_add_library(cnn gpu-ops.cu)
+  #cuda_add_library(cnn gpu-ops.cu)
+  cuda_add_library(cnn ${cnn_library_SRCS} ${cnn_library_HDRS} ${cnn_gpu_SRCS} OPTIONS --compiler-options "-fPIC")
+  #add_definitions(-DHAVE_CUDA)
+  set_target_properties(cnn PROPERTIES
+                        COMPILE_DEFINITIONS HAVE_CUDA)
+  if(CUDNN_FOUND)
+    target_compile_definitions(dynet PRIVATE HAVE_CUDNN)
+  endif()
+  cuda_add_cublas_to_target(cnn)
+  target_link_libraries(cnn ${LIBS})
+else()
+  add_library(cnn ${cnn_library_SRCS} ${cnn_library_HDRS})
+  target_link_libraries(cnn ${LIBS})
 endif(WITH_CUDA_BACKEND)
 
 install(FILES ${cnn_library_HDRS} DESTINATION include/cnn)
 install(TARGETS cnn DESTINATION lib)
+if(WITH_CUDA_BACKEND)
+  install(TARGETS cnn DESTINATION lib)
+endif(WITH_CUDA_BACKEND)
 
 # target_compile_features(cnn PRIVATE cxx_range_for)
 

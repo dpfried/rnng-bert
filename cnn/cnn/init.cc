@@ -34,10 +34,6 @@ static void RemoveArgs(int& argc, char**& argv, int& argi, int n) {
 
 unsigned Initialize(int& argc, char**& argv, unsigned random_seed, bool shared_parameters) {
   vector<Device*> gpudevices;
-#if HAVE_CUDA
-  cerr << "[cnn] initializing CUDA\n";
-  gpudevices = Initialize_GPU(argc, argv);
-#endif
   string mem_descriptor = "512,512,512";
   //unsigned long num_mb = 512UL;
   int argi = 1;
@@ -88,6 +84,10 @@ unsigned Initialize(int& argc, char**& argv, unsigned random_seed, bool shared_p
     mb_bwd = stoi(mem_strs[1]);
     mb_params = stoi(mem_strs[2]);
   }
+#if HAVE_CUDA
+  cerr << "[cnn] initializing CUDA\n";
+  gpudevices = Initialize_GPU(argc, argv, mb_fwd, mb_bwd, mb_params);
+#endif
 
   devices.push_back(new Device_CPU(mb_fwd, mb_bwd, mb_params, shared_parameters));
   int default_index = 0;
