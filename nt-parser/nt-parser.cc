@@ -151,6 +151,19 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   }
 }
 
+vector<float> action_mask(const vector<unsigned>& valid_actions) {
+  vector<float> mask(adict.size(), -numeric_limits<float>::infinity());
+  for (auto a: valid_actions) {
+    mask[a] = 0;
+  }
+  return mask;
+}
+
+Expression log_softmax_constrained(const Expression& logits, const vector<unsigned>& valid_actions) {
+  Expression mask = input(*logits.pg, Dim({adict.size()}), action_mask(valid_actions));
+  return log(softmax(logits + mask));
+}
+
 // checks to see if a proposed action is valid in discriminative models
 static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsigned bsize, unsigned ssize, unsigned nopen_parens, unsigned ncons_nt) {
     bool is_shift = action == SHIFT_ACTION;
@@ -281,8 +294,8 @@ struct AbstractParser {
           correct_action = dynamic_oracle->oracle_action(*state);
         }
         if (streaming_gold_prob) {
-          Expression gold_prob = exp(pick(adiste, correct_action));
-          streaming_gold_prob->standardize_and_update(as_scalar(gold_prob.value()));
+          Expression log_gold_prob = pick(adiste, correct_action);
+          streaming_gold_prob->standardize_and_update(exp(as_scalar(log_gold_prob.value())));
         }
       }
 
@@ -312,7 +325,8 @@ struct AbstractParser {
         if (ALPHA != 1.0f) {
           // Expression r_t_smoothed = r_t * ALPHA;
           // Expression adiste_smoothed = log_softmax(r_t_smoothed, current_valid_actions);
-          Expression adiste_smoothed = log_softmax(adiste * ALPHA, valid_actions);
+          //Expression adiste_smoothed = log_softmax(adiste * ALPHA, valid_actions);
+          Expression adiste_smoothed = log_softmax_constrained(adiste * ALPHA, valid_actions);
           dist_to_sample = as_vector(hg->incremental_forward());
         } else {
           dist_to_sample = adist;
@@ -1171,7 +1185,8 @@ struct ParserState : public AbstractParserState {
     if (UNNORMALIZED)
       return r_t;
     else
-      return log_softmax(r_t, valid_actions);
+    //  return log_softmax(r_t, valid_actions);
+      return log_softmax_constrained(r_t, valid_actions);
   }
 
   std::shared_ptr<AbstractParserState> perform_action(unsigned action) const override {
@@ -1369,7 +1384,8 @@ struct EnsembledParserState : public AbstractParserState {
         combined_log_probs = sum(all_log_probs);
         break;
     }
-    return log_softmax(combined_log_probs, valid_actions);
+    //return log_softmax(combined_log_probs, valid_actions);
+    return log_softmax_constrained(combined_log_probs, valid_actions);
   }
 
   std::shared_ptr<AbstractParserState> perform_action(unsigned action) const override {
@@ -2057,6 +2073,7 @@ int main(int argc, char** argv) {
                                                                   max_margin_training // loss_augmented
             );
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
+            loss = result_and_nlp.second;
           } else {
             DynamicOracle dynamic_oracle(sentence, actions);
             auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
@@ -2075,6 +2092,7 @@ int main(int argc, char** argv) {
                                  result_and_nlp.first.end()) == actions);
             }
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
+            loss = result_and_nlp.second;
           }
           //loss_v = as_scalar(result_and_nlp.second.value());
         }

@@ -275,5 +275,23 @@ void pnlsoftmax_backward(int n, int elem_idx, const float* x0, const float* dEdf
   fixup_pnl<<<1,1>>>(dEdf, dEdx, elem_idx);
 }
 
+__global__ void ker_pick(int elem_idx, const float *x0, float* res) {
+  if (threadIdx.x == 0) res[0] = x0[elem_idx];
+}
+
+void pick(int n, int elem_idx, const float *x0, float* res) {
+  assert(elem_idx < n);
+  ker_pick<<<1,1>>>(elem_idx, x0, res);
+}
+
+__global__ void ker_pick_backward(int elem_idx, const float *dEdf, float *dEdxi) {
+  if (threadIdx.x == 0) dEdxi[elem_idx] += dEdf[0];
+}
+
+void pick_backward(int n, int elem_idx, const float *dEdf, float *dEdxi) {
+  assert(elem_idx < n);
+  ker_pick_backward<<<1,1>>>(elem_idx, dEdf, dEdxi);
+}
+
 } // namespace gpu
 } // namespace cnn

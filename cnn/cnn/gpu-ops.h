@@ -29,6 +29,9 @@ void pnlsoftmax_backward(int n, int elem_idx, const float* x0, const float* dEdf
 
 void sgd_update(int n, const float* g, float* x, float scale, float lambda);
 
+void pick(int n, int elem_idx, const float *x0, float* res);
+void pick_backward(int n, int elem_idx, const float *dEdf, float *dEdxi);
+
 } // namespace gpu
 } // namespace cnn
 
