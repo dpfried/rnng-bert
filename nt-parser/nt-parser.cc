@@ -160,8 +160,9 @@ vector<float> action_mask(const vector<unsigned>& valid_actions) {
 }
 
 Expression log_softmax_constrained(const Expression& logits, const vector<unsigned>& valid_actions) {
-  Expression mask = input(*logits.pg, Dim({adict.size()}), action_mask(valid_actions));
-  return log(softmax(logits + mask));
+  //Expression mask = input(*logits.pg, Dim({adict.size()}), action_mask(valid_actions));
+  //return log(softmax(logits + mask));
+  return log(softmax(logits));
 }
 
 // checks to see if a proposed action is valid in discriminative models
@@ -2143,7 +2144,9 @@ int main(int argc, char** argv) {
             }
 
             assert(!batch_losses.empty());
-            Expression batch_loss = average(batch_losses);
+            //Expression batch_loss = average(batch_losses); // average segfaults on GPU!
+            assert(batch_losses.size() == 1);
+            Expression batch_loss = batch_losses.back();
             double batch_loss_v = as_scalar(batch_loss.value());
             hg.backward();
             optimizer->update(1.0);

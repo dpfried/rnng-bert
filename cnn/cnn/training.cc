@@ -18,8 +18,7 @@ float Trainer::clip_gradients() {
   if (clipping_enabled) {
     float gg = model->gradient_l2_norm();
     if (isnan(gg) || isinf(gg)) {
-      cerr << "Magnitude of gradient is bad: " << gg << endl;
-      abort();
+      throw std::runtime_error("Magnitude of gradient is bad: " + to_string(gg));
     }
     if (gg > clip_threshold) {
       ++clips;
@@ -34,17 +33,28 @@ void SimpleSGDTrainer::update(real scale) {
 }
 
 void SimpleSGDTrainer::update(const std::vector<LookupParameters*> &lookup_params, const std::vector<Parameters*> &params, real scale) {
-  const float gscale = clip_gradients();
+  float gscale;
+  bool good_grad = false;
+  try {
+    gscale = clip_gradients();
+    good_grad = true;
+  } catch (const std::runtime_error& error) {
+    good_grad = false;
+    cerr << "gradient error: " << error.what() << endl;
+  }
   for (auto p : params) {
+    if (good_grad) {
 #if HAVE_CUDA
     gpu::sgd_update(p->values.d.size(), p->g.v, p->values.v, eta * scale * gscale, lambda);
 #else
     auto reg = (p->values.vec()) * lambda;
     p->values.vec() -= ((eta * scale * gscale) * p->g.vec() + reg);
 #endif
+    }
     p->clear();
   }
   for (auto p : lookup_params) {
+    if (good_grad) {
     for (auto i : p->non_zero_grads) {
 #if HAVE_CUDA
       gpu::sgd_update(p->values[i].d.size(), p->grads[i].v, p->values[i].v, eta * scale * gscale, lambda);
@@ -52,6 +62,7 @@ void SimpleSGDTrainer::update(const std::vector<LookupParameters*> &lookup_param
       auto reg = (p->values[i].vec()) * lambda;
       p->values[i].vec() -= (p->grads[i].vec() * (eta * scale * gscale) + reg);
 #endif
+    }
     }
     p->clear();
   }
