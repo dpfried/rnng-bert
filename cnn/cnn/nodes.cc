@@ -690,7 +690,8 @@ void Dropout::backward_impl(const vector<const Tensor*>& xs,
                        Tensor& dEdxi) const {
   Tensor m(dim, (float*)aux_mem);
 #ifdef HAVE_CUDA
-  gpu::vcwise_product(dEdf.d.size(), dEdf.v, m.v, fx.v);
+//  gpu::vcwise_product(dEdf.d.size(), dEdf.v, m.v, fx.v);
+  gpu::vcwise_product_backward(dEdxi.d.size(), dEdf.v, m.v, dEdxi.v);
 #else
   dEdxi.vec() += dEdf.vec().cwiseProduct(m.vec());
 #endif
