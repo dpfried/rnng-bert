@@ -114,6 +114,9 @@ size_t LookupParameters::size() const {
 void LookupParameters::g_squared_l2norm(float* sqnorm) const {
 #if HAVE_CUDA
   bool acc = false;
+  if (non_zero_grads.empty()) {
+    cudaMemsetAsync(sqnorm, 0, sizeof(float));
+  }
   for (auto i : non_zero_grads) {
     gpu::l2_norm_reducer(grads[i].d.size(), grads[i].v, sqnorm, true, acc);
     acc = true;
