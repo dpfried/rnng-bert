@@ -43,10 +43,12 @@ struct Parameters : public ParametersBase {
   Dim dim;
   Tensor values;
   Tensor g;
+  std::string name;
  private:
   Parameters() {}
   explicit Parameters(const Dim& d, float minmax); // initialize with ~U(-minmax,+minmax)
                                  // or Glorot initialization if minmax = 0
+  explicit Parameters(const Dim& d, const std::string& name, float minmax); // initialize with ~U(-minmax,+minmax)
   friend class boost::serialization::access;
   template<class Archive> void serialize(Archive& ar, const unsigned int) {
     ar & dim;
@@ -108,6 +110,7 @@ class Model {
   void reset_gradient();
   // set scale to use custom initialization
   Parameters* add_parameters(const Dim& d, float scale = 0.0f);
+  Parameters* add_parameters(const Dim& d, const std::string& name, float scale = 0.0f);
   LookupParameters* add_lookup_parameters(unsigned n, const Dim& d);
   // project weights so their L2 norm = radius
   void project_weights(float radius = 1.0f);

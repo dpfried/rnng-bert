@@ -706,35 +706,35 @@ struct ParserBuilder : public AbstractParser {
       p_nt(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})), // nonterminal embeddings
       p_ntup(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})), // nonterminal embeddings when used in a composed representation
       p_a(model->add_lookup_parameters(ACTION_SIZE, {ACTION_DIM})),
-      p_pbias(model->add_parameters({HIDDEN_DIM})),
-      p_A(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
-      p_B(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
-      p_S(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM})),
-      p_w2l(model->add_parameters({LSTM_INPUT_DIM, INPUT_DIM})),
-      p_ib(model->add_parameters({LSTM_INPUT_DIM})),
-      p_cbias(model->add_parameters({LSTM_INPUT_DIM})),
-      p_p2a(model->add_parameters({ACTION_SIZE, HIDDEN_DIM})),
-      p_action_start(model->add_parameters({ACTION_DIM})),
-      p_abias(model->add_parameters({ACTION_SIZE})),
+      p_pbias(model->add_parameters({HIDDEN_DIM}, "pbias")),
+      p_A(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM}, "A")),
+      p_B(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM}, "B")),
+      p_S(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM}, "S")),
+      p_w2l(model->add_parameters({LSTM_INPUT_DIM, INPUT_DIM}, "w2l")),
+      p_ib(model->add_parameters({LSTM_INPUT_DIM}, "ib")),
+      p_cbias(model->add_parameters({LSTM_INPUT_DIM}, "cbias")),
+      p_p2a(model->add_parameters({ACTION_SIZE, HIDDEN_DIM}, "p2a")),
+      p_action_start(model->add_parameters({ACTION_DIM}, "action_start")),
+      p_abias(model->add_parameters({ACTION_SIZE}, "abias")),
 
-      p_buffer_guard(model->add_parameters({LSTM_INPUT_DIM})),
-      p_stack_guard(model->add_parameters({LSTM_INPUT_DIM})),
+      p_buffer_guard(model->add_parameters({LSTM_INPUT_DIM}, "buffer_guard")),
+      p_stack_guard(model->add_parameters({LSTM_INPUT_DIM}, "stack_guard")),
 
-      p_cW(model->add_parameters({LSTM_INPUT_DIM, LSTM_INPUT_DIM * 2})) {
+      p_cW(model->add_parameters({LSTM_INPUT_DIM, LSTM_INPUT_DIM * 2}, "cW")) {
     if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-      p_ptbias = model->add_parameters({LSTM_INPUT_DIM}); // preterminal bias (used with IMPLICIT_REDUCE_AFTER_SHIFT)
-      p_ptW = model->add_parameters({LSTM_INPUT_DIM, 2*LSTM_INPUT_DIM});    // preterminal W (used with IMPLICIT_REDUCE_AFTER_SHIFT)
+      p_ptbias = model->add_parameters({LSTM_INPUT_DIM}, "ptbias"); // preterminal bias (used with IMPLICIT_REDUCE_AFTER_SHIFT)
+      p_ptW = model->add_parameters({LSTM_INPUT_DIM, 2*LSTM_INPUT_DIM}, "ptW");    // preterminal W (used with IMPLICIT_REDUCE_AFTER_SHIFT)
     }
     if (USE_POS) {
       p_pos = model->add_lookup_parameters(POS_SIZE, {POS_DIM});
-      p_p2w = model->add_parameters({LSTM_INPUT_DIM, POS_DIM});
+      p_p2w = model->add_parameters({LSTM_INPUT_DIM, POS_DIM}, "p2w");
     }
     buffer_lstm = new LSTMBuilder(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model);
     if (pretrained.size() > 0) {
       p_t = model->add_lookup_parameters(VOCAB_SIZE, {PRETRAINED_DIM});
       for (auto it : pretrained)
         p_t->Initialize(it.first, it.second);
-      p_t2l = model->add_parameters({LSTM_INPUT_DIM, PRETRAINED_DIM});
+      p_t2l = model->add_parameters({LSTM_INPUT_DIM, PRETRAINED_DIM}, "t2l");
     } else {
       p_t = nullptr;
       p_t2l = nullptr;
@@ -2148,6 +2148,7 @@ int main(int argc, char** argv) {
             assert(batch_losses.size() == 1);
             Expression batch_loss = batch_losses.back();
             double batch_loss_v = as_scalar(batch_loss.value());
+            cerr << "batch loss: " << batch_loss_v << endl;
             hg.backward();
             optimizer->update(1.0);
           }
@@ -2231,6 +2232,7 @@ int main(int argc, char** argv) {
               cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
               cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
               cerr << "mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std << " mean gold prob: " << streaming_gold_prob.mean_value() << " stddev gold prob: " << streaming_gold_prob.std;
+              /*
               if (metrics.f1>bestf1) {
                 cerr << "  new best...writing model to " << fname << ".bin ...\n";
                 best_dev_err = err;
@@ -2245,21 +2247,8 @@ int main(int argc, char** argv) {
                   oa << model << *optimizer;
                   oa << termdict << adict << ntermdict << posdict;
                 }
-                // system((string("cp ") + pfx + string(" ") + pfx + string(".best")).c_str());
-                // Create a soft link to the most recent model in order to make it
-                // easier to refer to it in a shell script.
-                /*
-                if (!softlinkCreated) {
-                  string softlink = " latest_model";
-                  if (system((string("rm -f ") + softlink).c_str()) == 0 &&
-                      system((string("ln -s ") + fname + softlink).c_str()) == 0) {
-                    cerr << "Created " << softlink << " as a soft link to " << fname
-                         << " for convenience." << endl;
-                  }
-                  softlinkCreated = true;
-                }
-                */
               }
+            */
             }
             time_start = chrono::system_clock::now();
           }

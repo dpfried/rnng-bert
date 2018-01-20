@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <iostream>
 
+#include <string>
 #include <fstream>
 #include <sstream>
 #include <boost/archive/text_iarchive.hpp>
@@ -22,7 +23,7 @@ namespace cnn {
 
 ParametersBase::~ParametersBase() {}
 
-Parameters::Parameters(const Dim& d, float scale) : dim(d) {
+Parameters::Parameters(const Dim& d, const std::string& name, float scale) : dim(d), name(name) {
   values.d = g.d = d;
   values.v = static_cast<float*>(ps->allocate(d.size() * sizeof(float)));
   if (scale) {
@@ -34,6 +35,8 @@ Parameters::Parameters(const Dim& d, float scale) : dim(d) {
   g.v = static_cast<float*>(ps->allocate(d.size() * sizeof(float)));
   TensorTools::Zero(g);
 }
+
+Parameters::Parameters(const Dim& d, float scale) : Parameters(d, "", scale) {}
 
 size_t Parameters::size() const { return dim.size(); }
 
@@ -199,11 +202,15 @@ float Model::gradient_l2_norm() const {
 #endif
 }
 
-Parameters* Model::add_parameters(const Dim& d, float scale) {
-  Parameters* p = new Parameters(d, scale);
+Parameters* Model::add_parameters(const Dim& d, const std::string& name, float scale) {
+  Parameters* p = new Parameters(d, name, scale);
   all_params.push_back(p);
   params.push_back(p);
   return p;
+}
+
+Parameters* Model::add_parameters(const Dim& d, float scale) {
+  return add_parameters(d, "", scale);
 }
 
 LookupParameters* Model::add_lookup_parameters(unsigned n, const Dim& d) {

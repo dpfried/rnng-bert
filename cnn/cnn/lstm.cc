@@ -21,21 +21,21 @@ LSTMBuilder::LSTMBuilder(unsigned layers,
   unsigned layer_input_dim = input_dim;
   for (unsigned i = 0; i < layers; ++i) {
     // i
-    Parameters* p_x2i = model->add_parameters({hidden_dim, layer_input_dim});
-    Parameters* p_h2i = model->add_parameters({hidden_dim, hidden_dim});
-    Parameters* p_c2i = model->add_parameters({hidden_dim, hidden_dim});
-    Parameters* p_bi = model->add_parameters({hidden_dim});
+    Parameters* p_x2i = model->add_parameters({hidden_dim, layer_input_dim}, "x2i");
+    Parameters* p_h2i = model->add_parameters({hidden_dim, hidden_dim}, "h2i");
+    Parameters* p_c2i = model->add_parameters({hidden_dim, hidden_dim}, "c2i");
+    Parameters* p_bi = model->add_parameters({hidden_dim}, "bi");
 
     // o
-    Parameters* p_x2o = model->add_parameters({hidden_dim, layer_input_dim});
-    Parameters* p_h2o = model->add_parameters({hidden_dim, hidden_dim});
-    Parameters* p_c2o = model->add_parameters({hidden_dim, hidden_dim});
-    Parameters* p_bo = model->add_parameters({hidden_dim});
+    Parameters* p_x2o = model->add_parameters({hidden_dim, layer_input_dim}, "x2o");
+    Parameters* p_h2o = model->add_parameters({hidden_dim, hidden_dim}, "h2o");
+    Parameters* p_c2o = model->add_parameters({hidden_dim, hidden_dim}, "c2o");
+    Parameters* p_bo = model->add_parameters({hidden_dim}, "bo");
 
     // c
-    Parameters* p_x2c = model->add_parameters({hidden_dim, layer_input_dim});
-    Parameters* p_h2c = model->add_parameters({hidden_dim, hidden_dim});
-    Parameters* p_bc = model->add_parameters({hidden_dim});
+    Parameters* p_x2c = model->add_parameters({hidden_dim, layer_input_dim}, "x2c");
+    Parameters* p_h2c = model->add_parameters({hidden_dim, hidden_dim}, "h2c");
+    Parameters* p_bc = model->add_parameters({hidden_dim}, "bc");
     layer_input_dim = hidden_dim;  // output (hidden) from 1st layer is input to next
 
     vector<Parameters*> ps = {p_x2i, p_h2i, p_c2i, p_bi, p_x2o, p_h2o, p_c2o, p_bo, p_x2c, p_h2c, p_bc};

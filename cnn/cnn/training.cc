@@ -42,13 +42,31 @@ void SimpleSGDTrainer::update(const std::vector<LookupParameters*> &lookup_param
     good_grad = false;
     cerr << "gradient error: " << error.what() << endl;
   }
+  cerr << "params and grads:" << endl;
   for (auto p : params) {
+      vector<real> val(p->values.d.size());
+      vector<real> grad(p->g.d.size());
+#if HAVE_CUDA
+      CUDA_CHECK(cudaMemcpy(&val[0], p->values.v, sizeof(float) * val.size(), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(&grad[0], p->g.v, sizeof(float) * grad.size(), cudaMemcpyDeviceToHost));
+#else
+      memcpy(&val[0], p->values.v, sizeof(float) * val.size());
+      memcpy(&grad[0], p->g.v, sizeof(float) * grad.size());
+#endif
+      cerr << "param:\t" << p->name << "\t" << p->dim << endl;
+      unsigned count = 0;
+    for (unsigned i = 0; i < val.size(); i++) {
+        count++;
+        if (count > 100) break;
+        cerr << i << "\t" << val[i] << "\t" << grad[i] << endl;
+    }
+    cerr << endl;
     if (good_grad) {
 #if HAVE_CUDA
-    gpu::sgd_update(p->values.d.size(), p->g.v, p->values.v, eta * scale * gscale, lambda);
+    //gpu::sgd_update(p->values.d.size(), p->g.v, p->values.v, eta * scale * gscale, lambda);
 #else
-    auto reg = (p->values.vec()) * lambda;
-    p->values.vec() -= ((eta * scale * gscale) * p->g.vec() + reg);
+    //auto reg = (p->values.vec()) * lambda;
+    //p->values.vec() -= ((eta * scale * gscale) * p->g.vec() + reg);
 #endif
     }
     p->clear();
@@ -57,10 +75,10 @@ void SimpleSGDTrainer::update(const std::vector<LookupParameters*> &lookup_param
     if (good_grad) {
     for (auto i : p->non_zero_grads) {
 #if HAVE_CUDA
-      gpu::sgd_update(p->values[i].d.size(), p->grads[i].v, p->values[i].v, eta * scale * gscale, lambda);
+      //gpu::sgd_update(p->values[i].d.size(), p->grads[i].v, p->values[i].v, eta * scale * gscale, lambda);
 #else
-      auto reg = (p->values[i].vec()) * lambda;
-      p->values[i].vec() -= (p->grads[i].vec() * (eta * scale * gscale) + reg);
+      //auto reg = (p->values[i].vec()) * lambda;
+      //p->values[i].vec() -= (p->grads[i].vec() * (eta * scale * gscale) + reg);
 #endif
     }
     }
