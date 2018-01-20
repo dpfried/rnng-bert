@@ -2148,7 +2148,7 @@ int main(int argc, char** argv) {
             assert(batch_losses.size() == 1);
             Expression batch_loss = batch_losses.back();
             double batch_loss_v = as_scalar(batch_loss.value());
-            cerr << "batch loss: " << batch_loss_v << endl;
+            //cerr << "batch loss: " << batch_loss_v << endl;
             hg.backward();
             optimizer->update(1.0);
           }
@@ -2231,7 +2231,7 @@ int main(int argc, char** argv) {
               Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev");
               cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
               cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
-              cerr << "mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std << " mean gold prob: " << streaming_gold_prob.mean_value() << " stddev gold prob: " << streaming_gold_prob.std;
+              cerr << "mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std << " mean gold prob: " << streaming_gold_prob.mean_value() << " stddev gold prob: " << streaming_gold_prob.std << endl;
               /*
               if (metrics.f1>bestf1) {
                 cerr << "  new best...writing model to " << fname << ".bin ...\n";

@@ -42,8 +42,9 @@ void SimpleSGDTrainer::update(const std::vector<LookupParameters*> &lookup_param
     good_grad = false;
     cerr << "gradient error: " << error.what() << endl;
   }
-  cerr << "params and grads:" << endl;
+  //cerr << "params and grads:" << endl;
   for (auto p : params) {
+    /*
       vector<real> val(p->values.d.size());
       vector<real> grad(p->g.d.size());
 #if HAVE_CUDA
@@ -61,12 +62,13 @@ void SimpleSGDTrainer::update(const std::vector<LookupParameters*> &lookup_param
         cerr << i << "\t" << val[i] << "\t" << grad[i] << endl;
     }
     cerr << endl;
+    */
     if (good_grad) {
 #if HAVE_CUDA
-    //gpu::sgd_update(p->values.d.size(), p->g.v, p->values.v, eta * scale * gscale, lambda);
+    gpu::sgd_update(p->values.d.size(), p->g.v, p->values.v, eta * scale * gscale, lambda);
 #else
-    //auto reg = (p->values.vec()) * lambda;
-    //p->values.vec() -= ((eta * scale * gscale) * p->g.vec() + reg);
+    auto reg = (p->values.vec()) * lambda;
+    p->values.vec() -= ((eta * scale * gscale) * p->g.vec() + reg);
 #endif
     }
     p->clear();
@@ -75,10 +77,10 @@ void SimpleSGDTrainer::update(const std::vector<LookupParameters*> &lookup_param
     if (good_grad) {
     for (auto i : p->non_zero_grads) {
 #if HAVE_CUDA
-      //gpu::sgd_update(p->values[i].d.size(), p->grads[i].v, p->values[i].v, eta * scale * gscale, lambda);
+      gpu::sgd_update(p->values[i].d.size(), p->grads[i].v, p->values[i].v, eta * scale * gscale, lambda);
 #else
-      //auto reg = (p->values[i].vec()) * lambda;
-      //p->values[i].vec() -= (p->grads[i].vec() * (eta * scale * gscale) + reg);
+      auto reg = (p->values[i].vec()) * lambda;
+      p->values[i].vec() -= (p->grads[i].vec() * (eta * scale * gscale) + reg);
 #endif
     }
     }
