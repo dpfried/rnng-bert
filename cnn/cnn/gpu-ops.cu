@@ -275,6 +275,80 @@ void pnlsoftmax_backward(int n, int elem_idx, const float* x0, const float* dEdf
   fixup_pnl<<<1,1>>>(dEdf, dEdx, elem_idx);
 }
 
+__global__ void ker_sum_array(int n, const float* x0, float* res) {
+  __shared__ float buf[256];
+  for (int i = threadIdx.x; i < 256; i += blockDim.x) {
+    float acc = 0.0;
+    for (int pos = i; pos < n; pos += 256) {
+      const float d = x0[pos];
+      acc += d;
+    }
+    buf[i] = acc;
+  }
+  for (int stride = 128; stride > 0; stride >>= 1) {
+    __syncthreads();
+    for (int i = threadIdx.x; i < stride; i += blockDim.x)
+      buf[i] += buf[stride + i];
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    res[0] = buf[0];
+  }
+}
+
+__global__ void ker_nlsoftmax(int n, const float *x0, float* res) {
+  __shared__ float buf[256];
+  for (int i = threadIdx.x; i < 256; i += blockDim.x) {
+    float me = __int_as_float(0xff800000);
+    for (int pos = i; pos < n; pos += 256) {
+      const float d = x0[pos];
+      me = d > me ? d : me;
+    }
+    buf[i] = me;
+  }
+  for (int stride = 128; stride > 0; stride >>= 1) {
+    __syncthreads();
+    for (int i = threadIdx.x; i < stride; i += blockDim.x)
+      buf[i] = buf[i] > buf[stride + i] ? buf[i] : buf[stride + i];
+  }
+  __syncthreads();
+  const float max_elem = buf[0];
+  for (int i = threadIdx.x; i < 256; i += blockDim.x) {
+    float sum = 0;
+    for (int pos = i; pos < n; pos += 256)
+      sum += expf(x0[pos] - max_elem);
+    buf[i] = sum;
+  }
+  for (int stride = 128; stride > 0; stride >>= 1) {
+    __syncthreads();
+    for (int i = threadIdx.x; i < stride; i += blockDim.x)
+      buf[i] += buf[stride + i];
+  }
+  __syncthreads();
+  float lz = log(buf[0]) + max_elem;
+  int i = threadIdx.x + blockIdx.x * blockDim.x;
+  while (i < n) {
+    res[i] = x0[i] - lz;
+    i += gridDim.x * blockDim.x;
+  }
+}
+
+void nlsoftmax(int n, const float* x0, float* y) {
+  auto tb = SizeToBlockThreadPair(n);
+  ker_nlsoftmax<<<tb.first,tb.second>>>(n, x0, y);
+}
+
+void nlsoftmax_backward(int n, const float* fx, const float* dEdf, float* dEdx) {
+  auto tb = SizeToBlockThreadPair(n);
+  float* neg_off_diag_sum_dev; 
+  cudaMalloc((void**) &neg_off_diag_sum_dev, sizeof(float));
+  ker_sum_array<<<tb.first, tb.second>>>(n, dEdf, neg_off_diag_sum_dev);
+  float neg_off_diag_sum;
+  cudaMemcpy(&neg_off_diag_sum, neg_off_diag_sum_dev, sizeof(float), cudaMemcpyDeviceToHost);
+  cudaFree(neg_off_diag_sum_dev);
+  accBinaryExprKernel<<<tb.first, tb.second>>>(n, fx, dEdf, dEdx, FLogSoftmaxBackward(-neg_off_diag_sum));
+}
+
 __global__ void ker_pick(int elem_idx, const float *x0, float* res) {
   if (threadIdx.x == 0) res[0] = x0[elem_idx];
 }

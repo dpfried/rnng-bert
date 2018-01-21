@@ -26,6 +26,8 @@ void softmax(int n, const float* x0, float* y);
 void softmax_backward(int n, const float* x0, const float* dEdf, float* dEdx);
 void pnlsoftmax(int n, int elem_idx, const float* x0, float* y, float* logz);
 void pnlsoftmax_backward(int n, int elem_idx, const float* x0, const float* dEdf, const float* logz, float* dEdx);
+void nlsoftmax(int n, const float* x0, float* y);
+void nlsoftmax_backward(int n, const float* fx, const float* dEdf, float* dEdx);
 
 void sgd_update(int n, const float* g, float* x, float scale, float lambda);
 

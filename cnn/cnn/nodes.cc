@@ -11,6 +11,12 @@
 #include "cnn/gpu-ops.h"
 #endif
 
+
+/*
+#include <Eigen/Eigen>
+#include <unsupported/Eigen/CXX11/Tensor>
+ */
+
 using namespace std;
 
 // notes on implementing differentiable components
@@ -1465,7 +1471,7 @@ void LogSoftmax::forward_impl(const vector<const Tensor*>& xs, Tensor& fx) const
   assert(xs.size() == 1);
   if (xs[0]->d.cols() == 1) {
 #if HAVE_CUDA
-    throw std::runtime_error("LogSoftmax::forward not yet implemented for CUDA");
+    gpu::nlsoftmax(xs[0]->d.size(), xs[0]->v, fx.v);
 #else
     auto x = **xs[0];
     *fx = x.unaryExpr(FLogSoftmaxNormalize(logsumexp(x)));
@@ -1482,7 +1488,7 @@ void LogSoftmax::backward_impl(const vector<const Tensor*>& xs,
                           Tensor& dEdxi) const {
   if (xs[0]->d.cols() == 1) {
 #if HAVE_CUDA
-    throw std::runtime_error("LogSoftmax::backward not yet implemented for CUDA");
+    gpu::nlsoftmax_backward(fx.d.size(), fx.v, dEdf.v, dEdxi.v);
 #else
     //float off_diag_sum = -(*fx).binaryExpr(*dEdf, FWeightedError()).sum();
     float off_diag_sum = -(*dEdf).sum();

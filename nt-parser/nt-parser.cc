@@ -161,9 +161,9 @@ vector<float> action_mask(const vector<unsigned>& valid_actions) {
 
 Expression log_softmax_constrained(const Expression& logits, const vector<unsigned>& valid_actions) {
   Expression mask = input(*logits.pg, Dim({adict.size()}), action_mask(valid_actions));
-  //return log_softmax(logits + mask);
+  return log_softmax(logits + mask);
   //return log_softmax(logits, valid_actions);
-  return log(softmax(logits));
+  //return log(softmax(logits));
 }
 
 // checks to see if a proposed action is valid in discriminative models
