@@ -1484,7 +1484,8 @@ void LogSoftmax::backward_impl(const vector<const Tensor*>& xs,
 #if HAVE_CUDA
     throw std::runtime_error("LogSoftmax::backward not yet implemented for CUDA");
 #else
-    float off_diag_sum = -(*fx).binaryExpr(*dEdf, FWeightedError()).sum();
+    //float off_diag_sum = -(*fx).binaryExpr(*dEdf, FWeightedError()).sum();
+    float off_diag_sum = -(*dEdf).sum();
     *dEdxi += (*fx).binaryExpr(*dEdf, FLogSoftmaxBackward(off_diag_sum));
 #endif
   } else {
