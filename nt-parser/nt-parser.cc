@@ -137,6 +137,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("unnormalized", "do not locally normalize score distributions")
           ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
           ("batch_size", po::value<unsigned>()->default_value(1),  "number of training examples to use to compute each gradient update")
+          ("compute_distribution_stats", "compute entropy and gold probabilities for action distributions")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1650,6 +1651,8 @@ int main(int argc, char** argv) {
   if (conf.count("words"))
     parser::ReadEmbeddings_word2vec(conf["words"].as<string>(), &termdict, &pretrained);
 
+  bool compute_distribution_stats = conf.count("compute_distribution_stats");
+
   // freeze dictionaries so we don't accidentaly load OOVs
   termdict.Freeze();
   termdict.SetUnk("UNK"); // we don't actually expect to use this often
@@ -2198,8 +2201,13 @@ int main(int argc, char** argv) {
               auto t_start = chrono::high_resolution_clock::now();
               vector<vector<unsigned>> predicted;
 
-              StreamingStatistics streaming_entropy;
-              StreamingStatistics streaming_gold_prob;
+              StreamingStatistics* streaming_entropy = nullptr;
+              StreamingStatistics* streaming_gold_prob = nullptr;
+
+              if (compute_distribution_stats) {
+                streaming_entropy = new StreamingStatistics();
+                streaming_gold_prob = new StreamingStatistics();
+              }
 
               for (unsigned sii = 0; sii < dev_size; ++sii) {
                 const auto& sentence=dev_corpus.sents[sii];
@@ -2217,11 +2225,11 @@ int main(int argc, char** argv) {
                   llh += lp;
                 }
                    */
-                llh += get_neg_log_likelihood(parser, sentence, actions, &right, &streaming_gold_prob);
+                llh += get_neg_log_likelihood(parser, sentence, actions, &right, streaming_gold_prob);
 
 
                 //ComputationGraph hg;
-                vector<unsigned> pred = decode(parser, sentence, &streaming_entropy).first;
+                vector<unsigned> pred = decode(parser, sentence, streaming_entropy).first;
                 predicted.push_back(pred);
                 //vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,vector<int>(),&right,true);
                 trs += actions.size();
@@ -2232,7 +2240,11 @@ int main(int argc, char** argv) {
               Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev");
               cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
               cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
-              cerr << "mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std << " mean gold prob: " << streaming_gold_prob.mean_value() << " stddev gold prob: " << streaming_gold_prob.std << endl;
+              if (compute_distribution_stats) {
+                cerr << "mean entropy: " << streaming_entropy->mean_value() << " stddev entropy: " << streaming_entropy->std << " mean gold prob: " << streaming_gold_prob->mean_value() << " stddev gold prob: " << streaming_gold_prob->std << endl;
+                delete streaming_entropy;
+                delete streaming_gold_prob;
+              }
               if (metrics.f1>bestf1) {
                 cerr << "  new best...writing model to " << fname << ".bin ...\n";
                 best_dev_err = err;
