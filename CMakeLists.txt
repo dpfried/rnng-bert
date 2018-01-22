@@ -119,7 +119,7 @@ endif()
 
 # look for Boost
 set(Boost_REALPATH ON)
-find_package(Boost COMPONENTS program_options iostreams serialization REQUIRED)
+find_package(Boost COMPONENTS program_options iostreams serialization system filesystem REQUIRED)
 include_directories(${Boost_INCLUDE_DIR})
 set(LIBS ${LIBS} ${Boost_LIBRARIES})
 

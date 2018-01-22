@@ -19,6 +19,7 @@
 #include <boost/archive/text_oarchive.hpp>
 #include <boost/archive/text_iarchive.hpp>
 #include <boost/program_options.hpp>
+#include <boost/filesystem.hpp>
 
 #include "cnn/init.h"
 #include "cnn/training.h"
@@ -37,7 +38,9 @@
 #include "nt-parser/eval.h"
 #include "nt-parser/stack.h"
 #include "nt-parser/tree.h"
-#include "streaming-statistics.h"
+#include "nt-parser/training-position.h"
+#include "nt-parser/streaming-statistics.h"
+#include "nt-parser/utils.h"
 
 // dictionaries
 cnn::Dict termdict, ntermdict, adict, posdict, non_unked_termdict;
@@ -139,6 +142,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("batch_size", po::value<unsigned>()->default_value(1),  "number of training examples to use to compute each gradient update")
           ("compute_distribution_stats", "compute entropy and gold probabilities for action distributions")
           ("set_iter", po::value<int>(),  "")
+          ("save_frequency_minutes", po::value<unsigned>()->default_value(30),  "save model roughly every this many minutes (if it hasn't been saved by a dev decode)")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1837,6 +1841,8 @@ int main(int argc, char** argv) {
     unique_ptr<Trainer> optimizer = optimizer_name == "sgd" 
                                     ? unique_ptr<Trainer>(new SimpleSGDTrainer(&model, 1e-6, conf["sgd_e0"].as<float>())) 
                                     : unique_ptr<Trainer>(new AdamTrainer(&model)); //(&model);
+    parser::TrainingPosition training_position;
+
 
     if (optimizer_name == "sgd") {
       optimizer->eta_decay = 0.05;
@@ -1845,18 +1851,18 @@ int main(int argc, char** argv) {
     unsigned batch_size = conf["batch_size"].as<unsigned>();
 
     if (conf.count("model")) {
-      cerr << "before load model" << endl;
+      //cerr << "before load model" << endl;
       ifstream in(conf["model"].as<string>().c_str());
       if (conf.count("text_format")) {
         boost::archive::text_iarchive ia(in);
-        ia >> model >> *optimizer;
+        ia >> model >> *optimizer >> training_position;
         //ia >> model;
       } else {
         boost::archive::binary_iarchive ia(in);
-        ia >> model >> *optimizer;
+        ia >> model >> *optimizer >> training_position;
         //ia >> model;
       }
-      cerr << "after load model" << endl;
+      //cerr << "after load model" << endl;
     } else {
       cerr << "using " << optimizer_name << " for training" << endl;
     }
@@ -1864,17 +1870,6 @@ int main(int argc, char** argv) {
     //AdamTrainer sgd(&model);
     //MomentumSGDTrainer sgd(&model);
     //sgd.eta_decay = 0.08;
-
-    unsigned tot_seen = 0;
-    unsigned sents_since_last_status = 0;
-    int iter = -1;
-    if (conf.count("set_iter")) {
-      iter = conf["set_iter"].as<int>();
-      tot_seen = (unsigned) (iter + 1) * status_every_i_iterations;
-    }
-
-    double best_dev_err = 9e99;
-    double bestf1=0.0;
 
     bool min_risk_training = conf.count("min_risk_training") > 0;
     bool max_margin_training = conf.count("max_margin_training") > 0;
@@ -1907,6 +1902,24 @@ int main(int argc, char** argv) {
     //double tot_lad_score = 0.0;
     //double tot_gold_score = 0.0;
     //unsigned violations = 0;
+
+    unsigned sents_since_last_status = 0;
+
+    assert(!conf.count("set_iter"));
+
+    /*
+    if (conf.count("set_iter")) {
+      // todo: if support this for backward compat, also set the epoch and sentence
+      training_position.iter = conf["set_iter"].as<int>();
+      training_position.tot_seen = (unsigned) (training_position.iter + 1) * status_every_i_iterations;
+    }
+    */
+
+    unsigned save_frequency_minutes = conf["save_frequency_minutes"].as<unsigned>();
+
+//    double best_dev_err = 9e99;
+//    double bestf1=0.0;
+
 
     auto train_sentence = [&](ComputationGraph& hg, const parser::Sentence& sentence, const vector<int>& actions, double* right) -> pair<Expression, MatchCounts> {
         Expression loss = input(hg, 0.0);
@@ -2109,10 +2122,56 @@ int main(int argc, char** argv) {
         return pair<Expression, MatchCounts>(loss, sentence_match_counts);
     };
 
-    auto train_block = [&](const parser::TopDownOracle& corpus, vector<unsigned>::iterator indices_begin, vector<unsigned>::iterator indices_end, int epoch_size) {
+
+    auto save_model = [&](const string& base_filename, const string& save_type, const string& info, bool remove_old) {
+        string prefix = base_filename + "_" + save_type;
+        assert(prefix.find(' ') == std::string::npos);
+        std::vector<boost::filesystem::path> old_files = utils::glob_files(prefix + "_*.bin");
+
+        string save_name = prefix;
+        if (info != "") save_name += "_" + info;
+        boost::filesystem::path file_path(save_name + ".bin");
+        cerr << "writing model " << save_name << ".bin" << "\t";
+
+        ofstream out(save_name + ".bin");
+        if (conf.count("text_format")) {
+          boost::archive::text_oarchive oa(out);
+          oa << model << *optimizer << training_position;
+          oa << termdict << adict << ntermdict << posdict;
+        } else {
+          boost::archive::binary_oarchive oa(out);
+          oa << model << *optimizer << training_position;
+          oa << termdict << adict << ntermdict << posdict;
+        }
+
+        if (remove_old) {
+          if (old_files.size() > 1)  {
+            cerr << "multiple old files exist; not removing: ";
+            for (auto path: old_files) cerr << path.filename().string() << " ";
+          } else if (old_files.size() == 1) {
+            if (!equivalent(file_path, old_files[0])) {
+              cerr << "removing file " << old_files[0].string();
+              if (!boost::filesystem::remove(old_files[0])) {
+                cerr << "unsuccessful";
+              }
+            } else {
+              cerr << "old file has same name; not removing" << endl;
+            }
+          }
+        }
+        cerr << endl;
+
+    };
+
+    auto train_block = [&](const parser::TopDownOracle& corpus, vector<unsigned>::iterator indices_begin, vector<unsigned>::iterator indices_end, int epoch_size, unsigned start_sentence = 0) {
       unsigned sentence_count = std::distance(indices_begin, indices_end);
       status_every_i_iterations = min(status_every_i_iterations, sentence_count);
       cerr << "Number of sentences in current block: " << sentence_count << endl;
+        /*
+      cerr << "First sentence: ";
+      for (auto& str: corpus.sents[*indices_begin].raw) cerr << str << " ";
+      cerr << endl;
+         */
       unsigned trs = 0;
       unsigned words = 0;
       double right = 0;
@@ -2124,10 +2183,18 @@ int main(int argc, char** argv) {
 
       //cerr << "TRAINING STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << endl;
       auto time_start = chrono::system_clock::now();
+      auto last_save_time = chrono::system_clock::now();
 
         MatchCounts block_match_counts;
 
-        vector<unsigned>::iterator index_iter = indices_begin;
+        cerr << "staring at sentence " << start_sentence << endl;
+        vector<unsigned>::iterator index_iter = indices_begin + start_sentence;
+        training_position.sentence = start_sentence;
+        cerr << "first sentence (" << training_position.sentence << "): ";
+        for (auto& word_id: corpus.sents[*index_iter].raw) {
+          cerr << termdict.Convert(word_id) << " ";
+        }
+        cerr << endl;
         while (true) {
           {
             ComputationGraph hg;
@@ -2148,12 +2215,11 @@ int main(int argc, char** argv) {
               words += sentence.size();
               sents++;
               index_iter++;
-              tot_seen++;
+              training_position.sentence++;
+              training_position.tot_seen++;
               sents_since_last_status++;
             }
 
-            assert(!batch_losses.empty());
-            //Expression batch_loss = average(batch_losses); // average segfaults on GPU!
             assert(batch_losses.size() == 1);
             Expression batch_loss = batch_losses.back();
             double batch_loss_v = as_scalar(batch_loss.value());
@@ -2163,11 +2229,11 @@ int main(int argc, char** argv) {
           }
 
           if (sents_since_last_status >= status_every_i_iterations) {
-            ++iter;
+            training_position.iter++;
             optimizer->status();
             auto time_now = chrono::system_clock::now();
             auto dur = chrono::duration_cast<chrono::milliseconds>(time_now - time_start);
-            cerr << "update #" << iter << " (epoch " << (static_cast<double>(tot_seen) / epoch_size) << ")";
+            cerr << "update #" << training_position.iter << " (epoch " << (static_cast<double>(training_position.tot_seen) / epoch_size) << ")";
             /*" |time=" << put_time(localtime(&time_now), "%c %Z") << ")\tllh: "<< */
             /*
           if (max_margin_training) {
@@ -2197,7 +2263,7 @@ int main(int argc, char** argv) {
             //tot_gold_score = tot_lad_score = 0.0;
             //violations = 0;
 
-            if (iter % 25 == 0) { // report on dev set
+            if (training_position.iter % 25 == 0) { // report on dev set
               unsigned dev_size = dev_corpus.size();
               double llh = 0;
               double trs = 0;
@@ -2222,14 +2288,14 @@ int main(int argc, char** argv) {
                 DynamicOracle oracle(dev_corpus.sents[sii], dev_corpus.actions[sii]);
 
                 dwords += sentence.size();
-                  /*
-                {
-                  ComputationGraph hg;
-                  parser.abstract_log_prob_parser(&hg, sentence, actions, &right, true, false, false, 0.0, nullptr, false, nullptr, &streaming_gold_prob);
-                  double lp = as_scalar(hg.incremental_forward());
-                  llh += lp;
-                }
-                   */
+                /*
+              {
+                ComputationGraph hg;
+                parser.abstract_log_prob_parser(&hg, sentence, actions, &right, true, false, false, 0.0, nullptr, false, nullptr, &streaming_gold_prob);
+                double lp = as_scalar(hg.incremental_forward());
+                llh += lp;
+              }
+                 */
                 llh += get_neg_log_likelihood(parser, sentence, actions, &right, streaming_gold_prob);
 
 
@@ -2244,25 +2310,33 @@ int main(int argc, char** argv) {
 
               Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev");
               cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
-              cerr << "  **dev (iter=" << iter << " epoch=" << (static_cast<double>(tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
+              cerr << "  **dev (iter=" << training_position.iter << " epoch=" << (static_cast<double>(training_position.tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
               if (compute_distribution_stats) {
                 cerr << "mean entropy: " << streaming_entropy->mean_value() << " stddev entropy: " << streaming_entropy->std << " mean gold prob: " << streaming_gold_prob->mean_value() << " stddev gold prob: " << streaming_gold_prob->std << endl;
                 delete streaming_entropy;
                 delete streaming_gold_prob;
               }
-              if (metrics.f1>bestf1) {
-                cerr << "  new best...writing model to " << fname << ".bin ...\n";
-                best_dev_err = err;
-                bestf1=metrics.f1;
-                ofstream out(fname + ".bin");
-                if (conf.count("text_format")) {
-                  boost::archive::text_oarchive oa(out);
-                  oa << model << *optimizer;
-                  oa << termdict << adict << ntermdict << posdict;
+              string model_tag = "it-" + to_string(training_position.iter) + "-f1-" + utils::to_string_precision(metrics.f1, 2);
+              unsigned minutes_since_save = chrono::duration_cast<chrono::minutes>(chrono::system_clock::now() - last_save_time).count();
+              if (minutes_since_save >= save_frequency_minutes){
+                  cerr << "  " << minutes_since_save << " minutes since save... ";
+                save_model(fname, "periodic", model_tag , true);
+                last_save_time = chrono::system_clock::now();
+              }
+              if (metrics.f1>training_position.best_dev_f1) {
+                training_position.best_dev_error = err;
+                training_position.best_dev_f1=metrics.f1;
+                cerr << "  new best... ";
+                save_model(fname, "best-epoch-" + to_string(training_position.epoch), model_tag, true);
+                last_save_time = chrono::system_clock::now();
+                if (index_iter != indices_end) {
+                  cerr << "next sentence: (" << training_position.sentence << ") ";
+                  for (auto &word_id: corpus.sents[*index_iter].raw) {
+                    cerr << termdict.Convert(word_id) << " ";
+                  }
+                  cerr << endl;
                 } else {
-                  boost::archive::binary_oarchive oa(out);
-                  oa << model << *optimizer;
-                  oa << termdict << adict << ntermdict << posdict;
+                  cerr << "end of block" << endl;
                 }
               }
             }
@@ -2275,30 +2349,67 @@ int main(int argc, char** argv) {
         }
     };
 
-    int epoch = 0;
+    unsigned start_epoch = training_position.epoch;
+    training_position.epoch = 0;
+    unsigned shuffle_count = 0;
+    while (training_position.epoch < start_epoch) {
+      assert(!has_gold_training_data); // not implemented, should also shuffle silver data, possibly one more time depending on whether training_position.sentence is at least the gold_corpus size
+      parser::TopDownOracle* main_corpus = &corpus;
+      vector<unsigned> main_indices(main_corpus->size());
+      std::iota(main_indices.begin(), main_indices.end(), 0);
+      std::random_shuffle(main_indices.begin(), main_indices.end());
+      training_position.epoch++;
+      shuffle_count++;
+    }
+    cerr << "shuffle count: " << shuffle_count << endl;
+
+    /*
+    // simulate, todo: delete this!
+    for (unsigned i = 0; i < 5; i++) {
+      parser::TopDownOracle* main_corpus = &corpus;
+      vector<unsigned> main_indices(main_corpus->size());
+      std::iota(main_indices.begin(), main_indices.end(), 0);
+      std::random_shuffle(main_indices.begin(), main_indices.end());
+      training_position.epoch++;
+      optimizer->update_epoch();
+      training_position.iter += main_indices.size() / 25;
+      training_position.tot_seen += main_indices.size();
+    }
+    */
 
     while (!requested_stop) {
       parser::TopDownOracle* main_corpus = &corpus;
 
       int sentence_count = 0;
 
+      unsigned start_sentence = 0;
+      if (training_position.sentence != 0) {
+        start_sentence = training_position.sentence;
+        training_position.sentence = 0;
+      }
+
       if (has_gold_training_data) {
+        assert(start_sentence == 0); // not implemented
+        training_position.in_silver_block = true;
         main_corpus = &gold_corpus;
         vector<unsigned> silver_indices(corpus.size());
         std::iota(silver_indices.begin(), silver_indices.end(), 0);
         std::random_shuffle(silver_indices.begin(), silver_indices.end());
         unsigned offset = std::min(corpus.size(), gold_corpus.size() * SILVER_BLOCKS_PER_GOLD);
-        train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, offset + gold_corpus.size());
+        train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, offset + gold_corpus.size(), start_sentence);
         sentence_count += offset;
+        training_position.in_silver_block = false;
       }
 
       vector<unsigned> main_indices(main_corpus->size());
       std::iota(main_indices.begin(), main_indices.end(), 0);
       std::random_shuffle(main_indices.begin(), main_indices.end());
       sentence_count += main_indices.size();
-      train_block(*main_corpus, main_indices.begin(), main_indices.end(), sentence_count);
-
+      train_block(*main_corpus, main_indices.begin(), main_indices.end(), sentence_count, start_sentence);
       optimizer->update_epoch();
+
+      training_position.epoch++;
+      training_position.sentence = 0;
 
       /*
       ostringstream epoch_os;
@@ -2311,7 +2422,6 @@ int main(int argc, char** argv) {
       oa << termdict << adict << ntermdict << posdict;
       */
 
-      epoch++;
     }
   } // should do training?
 
