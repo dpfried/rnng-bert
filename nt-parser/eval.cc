@@ -6,7 +6,7 @@
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/file_descriptor.hpp>
 #include <fstream>
-#include <regex>
+#include <boost/regex.hpp>
 #include <utility>
 
 using namespace std;
@@ -20,10 +20,10 @@ pair<Metrics, vector<MatchCounts>> metrics_from_evalb(const string& ref_fname, c
     std::ifstream evalfile(evalbout_fname);
 
     // adapted from https://github.com/mitchellstern/neural-parser/blob/master/src/common/evaluation.cpp
-    std::regex recall_regex{R"(Bracketing Recall\s+=\s+(\d+\.\d+))"};
-    std::regex precision_regex{R"(Bracketing Precision\s+=\s+(\d+\.\d+))"};
-    std::regex fmeasure_regex{R"(Bracketing FMeasure\s+=\s+(\d+\.\d+))"};
-    std::regex complete_match_regex{R"(Complete match\s+=\s+(\d+\.\d+))"};
+    boost::regex recall_regex{R"(Bracketing Recall\s+=\s+(\d+\.\d+))"};
+    boost::regex precision_regex{R"(Bracketing Precision\s+=\s+(\d+\.\d+))"};
+    boost::regex fmeasure_regex{R"(Bracketing FMeasure\s+=\s+(\d+\.\d+))"};
+    boost::regex complete_match_regex{R"(Complete match\s+=\s+(\d+\.\d+))"};
 
     Metrics results(0.0, 0.0, 0.0);
 
@@ -95,14 +95,14 @@ pair<Metrics, vector<MatchCounts>> metrics_from_evalb(const string& ref_fname, c
     }
 
     while (std::getline(evalfile, line)) {
-        std::smatch match;
-        if (std::regex_match(line, match, recall_regex))
+        boost::smatch match;
+        if (boost::regex_match(line, match, recall_regex))
             results.recall = std::stod(match[1].str());
-        else if (std::regex_match(line, match, precision_regex))
+        else if (boost::regex_match(line, match, precision_regex))
             results.precision = std::stod(match[1].str());
-        else if (std::regex_match(line, match, fmeasure_regex)) {
+        else if (boost::regex_match(line, match, fmeasure_regex)) {
             results.f1 = std::stod(match[1].str());
-        } else if (std::regex_match(line, match, complete_match_regex)) {
+        } else if (boost::regex_match(line, match, complete_match_regex)) {
             results.complete_match = std::stod(match[1].str());
             break;
         }
