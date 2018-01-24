@@ -1747,6 +1747,7 @@ int main(int argc, char** argv) {
   };
 
 
+
   auto get_neg_log_likelihood = [&](AbstractParser& parser, const parser::Sentence& sentence, const vector<int>& actions, double* right, StreamingStatistics* streaming_gold_prob = nullptr) {
     ComputationGraph hg;
     parser.abstract_log_prob_parser(&hg, sentence, actions, right, true, false, false, 0.0, nullptr, false, nullptr, streaming_gold_prob);
@@ -1827,6 +1828,40 @@ int main(int argc, char** argv) {
       return results.first;
   };
 
+  struct DecodeStats {
+    DecodeStats(const Metrics &metrics, double llh, double perplexity, double err) :
+            metrics(metrics), llh(llh), perplexity(perplexity), err(err) {}
+    const Metrics metrics;
+    const double llh;
+    const double perplexity;
+    const double err;
+  };
+
+  auto dev_decode = [&](AbstractParser& parser, StreamingStatistics* streaming_entropy, StreamingStatistics* streaming_gold_prob) {
+      unsigned dev_size = dev_corpus.size();
+      vector<vector<unsigned>> predicted;
+
+      double trs = 0;
+      double right = 0;
+      double dwords = 0;
+      double llh = 0;
+
+      for (unsigned sii = 0; sii < dev_size; ++sii) {
+        const auto& sentence=dev_corpus.sents[sii];
+        const vector<int>& actions=dev_corpus.actions[sii];
+        DynamicOracle oracle(dev_corpus.sents[sii], dev_corpus.actions[sii]);
+
+        dwords += sentence.size();
+        llh += get_neg_log_likelihood(parser, sentence, actions, &right, streaming_gold_prob);
+
+        vector<unsigned> pred = decode(parser, sentence, streaming_entropy).first;
+        predicted.push_back(pred);
+        trs += actions.size();
+      }
+      Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev");
+      return DecodeStats(metrics, llh, exp(llh / dwords), (trs - right) / trs);
+  };
+
 
   //TRAINING
   if (conf.count("train")) {
@@ -1842,6 +1877,7 @@ int main(int argc, char** argv) {
                                     ? unique_ptr<Trainer>(new SimpleSGDTrainer(&model, 1e-6, conf["sgd_e0"].as<float>())) 
                                     : unique_ptr<Trainer>(new AdamTrainer(&model)); //(&model);
     parser::TrainingPosition training_position;
+    StreamingStatistics streaming_f1;
 
 
     if (optimizer_name == "sgd") {
@@ -1855,14 +1891,17 @@ int main(int argc, char** argv) {
       ifstream in(conf["model"].as<string>().c_str());
       if (conf.count("text_format")) {
         boost::archive::text_iarchive ia(in);
-        ia >> model >> *optimizer >> training_position;
+        ia >> model >> *optimizer >> training_position >> streaming_f1;
         //ia >> model;
       } else {
         boost::archive::binary_iarchive ia(in);
-        ia >> model >> *optimizer >> training_position;
+        ia >> model >> *optimizer >> training_position >> streaming_f1;
         //ia >> model;
       }
-      //cerr << "after load model" << endl;
+      cerr << "streaming f1 mean: " << streaming_f1.mean_value();
+      cerr << " streaming f1 std mean: " << streaming_f1.total_standardized / streaming_f1.num_samples;
+      cerr << endl;
+      cerr << "after load model" << endl;
     } else {
       cerr << "using " << optimizer_name << " for training" << endl;
     }
@@ -1897,23 +1936,32 @@ int main(int argc, char** argv) {
       assert(exploration_type == DynamicOracle::ExplorationType::none || exploration_type == DynamicOracle::ExplorationType::greedy);
     }
 
-    StreamingStatistics streaming_f1;
-
     //double tot_lad_score = 0.0;
     //double tot_gold_score = 0.0;
     //unsigned violations = 0;
 
     unsigned sents_since_last_status = 0;
 
-    assert(!conf.count("set_iter"));
+    //assert(!conf.count("set_iter"));
 
-    /*
     if (conf.count("set_iter")) {
+      assert(!has_gold_training_data);
       // todo: if support this for backward compat, also set the epoch and sentence
       training_position.iter = conf["set_iter"].as<int>();
       training_position.tot_seen = (unsigned) (training_position.iter + 1) * status_every_i_iterations;
+      training_position.epoch = training_position.tot_seen / corpus.size();
+      training_position.sentence = training_position.tot_seen % corpus.size();
+      DecodeStats dev_decode_stats = dev_decode(parser, nullptr, nullptr);
+      training_position.best_dev_f1 = dev_decode_stats.metrics.f1;
+      training_position.best_dev_error = dev_decode_stats.err;
+      cerr << "resuming parser at ";
+      cerr << " iter: " << training_position.iter;
+      cerr << " tot_seen: " << training_position.tot_seen;
+      cerr << " epoch: " << training_position.epoch;
+      cerr << " sentence: " << training_position.sentence;
+      cerr << " dev f1: " << training_position.best_dev_f1;
+      cerr << " dev err: " << training_position.best_dev_error;
     }
-    */
 
     unsigned save_frequency_minutes = conf["save_frequency_minutes"].as<unsigned>();
 
@@ -2136,13 +2184,16 @@ int main(int argc, char** argv) {
         ofstream out(save_name + ".bin");
         if (conf.count("text_format")) {
           boost::archive::text_oarchive oa(out);
-          oa << model << *optimizer << training_position;
+          oa << model << *optimizer << training_position << streaming_f1;
           oa << termdict << adict << ntermdict << posdict;
         } else {
           boost::archive::binary_oarchive oa(out);
-          oa << model << *optimizer << training_position;
+          oa << model << *optimizer << training_position << streaming_f1;
           oa << termdict << adict << ntermdict << posdict;
         }
+        cerr << "streaming f1 mean: " << streaming_f1.mean_value();
+        cerr << " streaming f1 std mean: " << streaming_f1.total_standardized / streaming_f1.num_samples;
+        cerr << endl;
 
         if (remove_old) {
           if (old_files.size() > 1)  {
@@ -2264,68 +2315,44 @@ int main(int argc, char** argv) {
             //violations = 0;
 
             if (training_position.iter % 25 == 0) { // report on dev set
-              unsigned dev_size = dev_corpus.size();
-              double llh = 0;
-              double trs = 0;
-              double right = 0;
-              double dwords = 0;
               auto t_start = chrono::high_resolution_clock::now();
-              vector<vector<unsigned>> predicted;
-
               StreamingStatistics* streaming_entropy = nullptr;
               StreamingStatistics* streaming_gold_prob = nullptr;
-
               if (compute_distribution_stats) {
                 streaming_entropy = new StreamingStatistics();
                 streaming_gold_prob = new StreamingStatistics();
               }
-
-              for (unsigned sii = 0; sii < dev_size; ++sii) {
-                const auto& sentence=dev_corpus.sents[sii];
-                const vector<int>& actions=dev_corpus.actions[sii];
-
-//              cerr << "checking symbolic parser via actions_to_brackets" << endl;
-                DynamicOracle oracle(dev_corpus.sents[sii], dev_corpus.actions[sii]);
-
-                dwords += sentence.size();
-                /*
-              {
-                ComputationGraph hg;
-                parser.abstract_log_prob_parser(&hg, sentence, actions, &right, true, false, false, 0.0, nullptr, false, nullptr, &streaming_gold_prob);
-                double lp = as_scalar(hg.incremental_forward());
-                llh += lp;
-              }
-                 */
-                llh += get_neg_log_likelihood(parser, sentence, actions, &right, streaming_gold_prob);
-
-
-                //ComputationGraph hg;
-                vector<unsigned> pred = decode(parser, sentence, streaming_entropy).first;
-                predicted.push_back(pred);
-                //vector<unsigned> pred = parser.log_prob_parser(&hg,sentence,vector<int>(),&right,true);
-                trs += actions.size();
-              }
+              DecodeStats dev_decode_stats = dev_decode(parser, streaming_entropy, streaming_gold_prob);
               auto t_end = chrono::high_resolution_clock::now();
-              double err = (trs - right) / trs;
 
-              Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev");
-              cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
-              cerr << "  **dev (iter=" << training_position.iter << " epoch=" << (static_cast<double>(training_position.tot_seen) / epoch_size) << ")\tllh=" << llh << " ppl: " << exp(llh / dwords) << " f1: " << metrics.f1 << " err: " << err << "\t[" << dev_size << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << endl;
+              cerr << "recall=" << dev_decode_stats.metrics.recall
+                   << ", precision=" << dev_decode_stats.metrics.precision
+                   << ", F1=" << dev_decode_stats.metrics.f1
+                   << ", complete match=" << dev_decode_stats.metrics.complete_match
+                   << endl;
+              cerr << "  **dev (iter=" << training_position.iter
+                   << " epoch=" << (static_cast<double>(training_position.tot_seen) / epoch_size)
+                   << ")\tllh=" << llh
+                   << " ppl: " << dev_decode_stats.perplexity
+                   << " f1: " << dev_decode_stats.metrics.f1
+                   << " err: " << dev_decode_stats.err
+                   << "\t[" << dev_corpus.size() << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]"
+                   << endl;
               if (compute_distribution_stats) {
                 cerr << "mean entropy: " << streaming_entropy->mean_value() << " stddev entropy: " << streaming_entropy->std << " mean gold prob: " << streaming_gold_prob->mean_value() << " stddev gold prob: " << streaming_gold_prob->std << endl;
                 delete streaming_entropy;
                 delete streaming_gold_prob;
               }
-              string model_tag = "it-" + to_string(training_position.iter) + "-f1-" + utils::to_string_precision(metrics.f1, 2);
+              string model_tag = "it-" + to_string(training_position.iter) + "-f1-" + utils::to_string_precision(dev_decode_stats.metrics.f1, 2);
               unsigned minutes_since_save = chrono::duration_cast<chrono::minutes>(chrono::system_clock::now() - last_save_time).count();
               if (minutes_since_save >= save_frequency_minutes){
                   cerr << "  " << minutes_since_save << " minutes since save... ";
                 save_model(fname, "periodic", model_tag , true);
                 last_save_time = chrono::system_clock::now();
               }
-              if (metrics.f1>training_position.best_dev_f1) {
-                training_position.best_dev_error = err;
-                training_position.best_dev_f1=metrics.f1;
+              if (dev_decode_stats.metrics.f1 > training_position.best_dev_f1) {
+                training_position.best_dev_error = dev_decode_stats.err;
+                training_position.best_dev_f1=dev_decode_stats.metrics.f1;
                 cerr << "  new best... ";
                 save_model(fname, "best-epoch-" + to_string(training_position.epoch), model_tag, true);
                 last_save_time = chrono::system_clock::now();

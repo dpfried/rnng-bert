@@ -41,26 +41,26 @@ echo $output_prefix
 
 export MKL_NUM_THREADS=4
 
-# build/nt-parser/nt-parser \
-#     --cnn-seed $dynet_seed \
-#     --cnn-mem 2000,2000,1000 \
-#     -x \
-#     -T corpora/train.oracle \
-#     -d corpora/dev.oracle \
-#     -C corpora/dev.stripped \
-#     -t \
-#     -P \
-#     --pretrained_dim 100 \
-#     -w embeddings/sskip.100.filtered.vectors \
-#     --lstm_input_dim $dim \
-#     --hidden_dim $dim \
-#     -D 0.2 \
-#     --min_risk_training \
-#     --min_risk_method $method \
-#     --min_risk_candidates $candidates \
-#     --min_risk_include_gold \
-#     --model_output_file $output_prefix \
-#     --optimizer $optimizer \
-#     --batch_size $batch_size \
-#     > ${output_prefix}.stdout \
-#     2> ${output_prefix}.stderr
+build/nt-parser/nt-parser \
+    --cnn-seed $dynet_seed \
+    --cnn-mem 1000,1000,500 \
+    -x \
+    -T corpora/train.oracle \
+    -d corpora/dev.oracle \
+    -C corpora/dev.stripped \
+    -t \
+    -P \
+    --pretrained_dim 100 \
+    -w embeddings/sskip.100.filtered.vectors \
+    --lstm_input_dim $dim \
+    --hidden_dim $dim \
+    -D 0.2 \
+    --min_risk_training \
+    --min_risk_method $method \
+    --min_risk_candidates $candidates \
+    --min_risk_include_gold \
+    --model_output_file $output_prefix \
+    --optimizer $optimizer \
+    --batch_size $batch_size \
+    > ${output_prefix}.stdout \
+    2> ${output_prefix}.stderr

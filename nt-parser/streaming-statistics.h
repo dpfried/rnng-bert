@@ -37,6 +37,18 @@ struct StreamingStatistics {
       return total_standardized / num_samples;
 
   }
+
+private:
+  friend class boost::serialization::access;
+  template<class Archive>
+  void serialize(Archive& ar, const unsigned int) {
+      ar & total;
+      ar & total_standardized;
+      ar & m2;
+      ar & mean;
+      ar & std;
+      ar & num_samples;
+  }
 };
 
 #endif //CNN_STREAMING_STATISTICS_H
