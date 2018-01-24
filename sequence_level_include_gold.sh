@@ -1,4 +1,5 @@
 #!/bin/bash
+source activate.sh
 dynet_seed=$1
 method=$2
 candidates=$3
