@@ -20,6 +20,7 @@
 #include <boost/archive/text_iarchive.hpp>
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 
 #include "cnn/init.h"
 #include "cnn/training.h"
@@ -143,6 +144,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("compute_distribution_stats", "compute entropy and gold probabilities for action distributions")
           ("set_iter", po::value<int>(),  "")
           ("save_frequency_minutes", po::value<unsigned>()->default_value(30),  "save model roughly every this many minutes (if it hasn't been saved by a dev decode)")
+          ("spmrl", "Use the SPMRL variant of EVALB")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1540,6 +1542,10 @@ cout << endl;
   return parse_linearized(linearized);
 }
 
+void check_spmrl(const string& path, bool is_spmrl) {
+  assert(is_spmrl == boost::starts_with(path, "french_"));
+}
+
 int main(int argc, char** argv) {
   unsigned random_seed = cnn::Initialize(argc, argv);
 
@@ -1569,6 +1575,8 @@ int main(int argc, char** argv) {
   SILVER_BLOCKS_PER_GOLD = conf["silver_blocks_per_gold"].as<unsigned>();
 
   UNNORMALIZED = conf.count("unnormalized");
+
+  bool spmrl = conf.count("spmrl");
 
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
@@ -1642,12 +1650,16 @@ int main(int argc, char** argv) {
   parser::TopDownOracle dev_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   parser::TopDownOracle test_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
   parser::TopDownOracle gold_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
+
+  check_spmrl(conf["training_data"].as<string>(), spmrl);
+  check_spmrl(conf["bracketing_dev_data"].as<string>(), spmrl);
   corpus.load_oracle(conf["training_data"].as<string>(), true, discard_train_sents);
   corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
 
   bool has_gold_training_data = false;
 
   if (conf.count("gold_training_data")) {
+    check_spmrl(conf["gold_training_data"].as<string>(), spmrl);
     gold_corpus.load_oracle(conf["gold_training_data"].as<string>(), true, discard_train_sents);
     gold_corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
     has_gold_training_data = true;
@@ -1683,10 +1695,12 @@ int main(int argc, char** argv) {
 
   if (conf.count("dev_data")) {
     cerr << "Loading validation set\n";
+    check_spmrl(conf["dev_data"].as<string>(), spmrl);
     dev_corpus.load_oracle(conf["dev_data"].as<string>(), false, false);
   }
   if (conf.count("test_data")) {
     cerr << "Loading test set\n";
+    check_spmrl(conf["test_data"].as<string>(), spmrl);
     test_corpus.load_oracle(conf["test_data"].as<string>(), false, false);
   }
 
@@ -1786,7 +1800,7 @@ int main(int argc, char** argv) {
         Tree pred_tree = to_tree(vector<int>(pred_parse.begin(), pred_parse.end()), sentence);
         Tree gold_tree = to_tree(gold_parse, sentence);
 
-        MatchCounts this_counts = pred_tree.compare(gold_tree, true);
+        MatchCounts this_counts = pred_tree.compare(gold_tree, spmrl);
         all_match_counts.push_back(this_counts);
         match_counts += this_counts;
 
@@ -1799,8 +1813,8 @@ int main(int argc, char** argv) {
       cerr << name << " parses in " << pred_fname << endl;
       cerr << name << " output in " << evalb_fname << endl;
 
-      pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(gold_fname, pred_fname, evalb_fname);
-      //pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.devdata, pred_fname, evalb_fname + "_corpus");
+      pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(gold_fname, pred_fname, evalb_fname, spmrl);
+      //pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.devdata, pred_fname, evalb_fname + "_corpus", spmrl);
 
       if (abs(match_counts.metrics().f1 - results.first.f1) > 1e-2) {
         cerr << "warning: score mismatch" << endl;
@@ -1813,18 +1827,19 @@ int main(int argc, char** argv) {
       }
       //cerr << "evalb corpus\trecall=" << corpus_results.first.recall << ", precision=" << corpus_results.first.precision << ", F1=" << corpus_results.first.f1 << "\n";
 
-      /*
       for (unsigned i = 0; i < all_match_counts.size(); i++) {
         if (all_match_counts[i] != results.second[i]) {
-          cout << "mismatch for " << (i+1) << endl;
-          cout << all_match_counts[i].correct << " " << all_match_counts[i].gold << " " << all_match_counts[i].predicted << endl;
-          cout << results.second[i].correct << " " << results.second[i].gold << " " << results.second[i].predicted << endl;
+          cerr << "mismatch for " << (i+1) << endl;
+          cerr << all_match_counts[i].correct << " " << all_match_counts[i].gold << " " << all_match_counts[i].predicted << endl;
+          cerr << results.second[i].correct << " " << results.second[i].gold << " " << results.second[i].predicted << endl;
           Tree pred_tree = to_tree(vector<int>(pred_parses[i].begin(), pred_parses[i].end()), sentences[i]);
           Tree gold_tree = to_tree(gold_parses[i], sentences[i]);
-          pred_tree.compare(gold_tree, true, true);
+          pred_tree.compare(gold_tree, spmrl, true);
+        } else {
+
         }
       }
-      */
+
       return results.first;
   };
 
@@ -1976,7 +1991,7 @@ int main(int argc, char** argv) {
 
         auto get_f1_and_update_mc = [&](Tree& gold_tree, const parser::Sentence& sentence, const vector<unsigned> actions) {
             Tree pred_tree = to_tree(vector<int>(actions.begin(), actions.end()), sentence);
-            MatchCounts match_counts = pred_tree.compare(gold_tree, true);
+            MatchCounts match_counts = pred_tree.compare(gold_tree, spmrl, false);
             sentence_match_counts += match_counts;
             return (float) match_counts.metrics().f1 / 100.0f;
         };

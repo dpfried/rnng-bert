@@ -77,6 +77,6 @@ ostream& operator<<(ostream& os, const MatchCounts& counts) {
 }
  */
 
-pair<Metrics, vector<MatchCounts>> metrics_from_evalb(const std::string& ref_fname, const std::string& hyp_fname, const std::string& evalbout_fname);
+pair<Metrics, vector<MatchCounts>> metrics_from_evalb(const std::string& ref_fname, const std::string& hyp_fname, const std::string& evalbout_fname, bool spmrl);
 
 #endif

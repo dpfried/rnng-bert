@@ -83,13 +83,13 @@ public:
       return (unsigned) _right_span;
   }
 
-  BracketCounts brackets(bool advp_prt=true) {
+  BracketCounts brackets(bool advp_prt=true, bool remove_punct=true) {
       BracketCounts bracket_counts;
-      update_bracket_counts(bracket_counts, advp_prt);
+      update_bracket_counts(bracket_counts, advp_prt, remove_punct);
       return bracket_counts;
   }
 
-  void update_bracket_counts(BracketCounts& bracket_counts, bool advp_prt=true) {
+  void update_bracket_counts(BracketCounts& bracket_counts, bool advp_prt, bool remove_punct) {
       if (leaf_index >= 0) return;
 
       string nonterm = symbol;
@@ -99,11 +99,13 @@ public:
       unsigned left = left_span();
       unsigned right = right_span();
 
-      while(left < right_span() && PUNCTUATION.find((*sentence)[left]) != PUNCTUATION.end()) {
-          left++;
-      }
-      while(right > left_span() && PUNCTUATION.find((*sentence)[right]) != PUNCTUATION.end()) {
-          right--;
+      if (remove_punct) {
+          while (left < right_span() && PUNCTUATION.find((*sentence)[left]) != PUNCTUATION.end()) {
+              left++;
+          }
+          while (right > left_span() && PUNCTUATION.find((*sentence)[right]) != PUNCTUATION.end()) {
+              right--;
+          }
       }
 
       if (left <= right && nonterm != "(TOP") {
@@ -111,13 +113,15 @@ public:
           bracket_counts[key]++;
       }
       for (auto child: children) {
-          child.update_bracket_counts(bracket_counts, advp_prt);
+          child.update_bracket_counts(bracket_counts, advp_prt, remove_punct);
       }
   }
 
-  MatchCounts compare(Tree& gold, bool advp_prt=true, bool verbose=false) {
-      BracketCounts predicted_brackets = brackets(advp_prt);
-      BracketCounts gold_brackets = gold.brackets(advp_prt);
+  MatchCounts compare(Tree& gold, bool spmrl, bool verbose=false) {
+      bool advp_prt = !spmrl;
+      bool remove_punct = !spmrl;
+      BracketCounts predicted_brackets = brackets(advp_prt, remove_punct);
+      BracketCounts gold_brackets = gold.brackets(advp_prt, remove_punct);
 
       if (verbose) {
           cout << "predicted" << endl;
