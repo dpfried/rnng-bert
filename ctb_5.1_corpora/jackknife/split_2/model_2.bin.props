@@ -1,0 +1,35 @@
+## tagger training invoked at Thu Jan 25 01:36:21 PST 2018 with arguments:
+                   model = split_2/model_2.bin
+                    arch = generic,suffix(4),prefix(4),unicodeshapes(-1,1),unicodeshapeconjunction(-1,1),words(-2,-2),words(2,2)
+            wordFunction = edu.stanford.nlp.util.UTF8EquivalenceFunction
+               trainFile = format=TREES,split_2/train_2.gold.stripped
+         closedClassTags = 
+ closedClassTagThreshold = 40
+ curWordMinFeatureThresh = 1
+                   debug = false
+             debugPrefix = 
+            tagSeparator = #
+                encoding = utf-8
+              iterations = 100
+                    lang = chinese
+    learnClosedClassTags = false
+        minFeatureThresh = 3
+           openClassTags = 
+rareWordMinFeatureThresh = 3
+          rareWordThresh = 20
+                  search = qn
+                    sgml = false
+            sigmaSquared = 0.0
+                   regL1 = 0.75
+               tagInside = 
+                tokenize = false
+        tokenizerFactory = 
+        tokenizerOptions = 
+                 verbose = false
+          verboseResults = true
+    veryCommonWordThresh = 250
+                xmlInput = null
+              outputFile = 
+            outputFormat = slashTags
+     outputFormatOptions = 
+                nthreads = 1
