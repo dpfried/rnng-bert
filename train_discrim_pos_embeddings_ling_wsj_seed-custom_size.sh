@@ -1,8 +1,9 @@
 #!/bin/bash
+source activate.sh
 dynet_seed=$1
 lstm_input_dim=$2
 hidden_dim=$lstm_input_dim
-out_dir="expts_dec-17/"
+out_dir="expts_jan-18/"
 mkdir $out_dir
 
 output_prefix=${out_dir}/discrim_wsj_embeddings_${dynet_seed}_lstm_input_dim=${lstm_input_dim}_hidden_dim=${hidden_dim}

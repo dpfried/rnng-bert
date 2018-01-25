@@ -19,7 +19,7 @@ optimizer=sgd
 batch_size=1
 
 hidden_dim=$lstm_input_dim
-#out_dir="expts_jan-18/"
+#out_dir="sequence_level/"
 out_dir="restart_test/"
 mkdir $out_dir 2> /dev/null
 export MKL_NUM_THREADS=4

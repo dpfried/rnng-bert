@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #XXSBATCH --gres=gpu:1
-#SBATCH --time=30:00:00
+#SBATCH --time=71:59:00
 #SBATCH --mail-user=dfried@berkeley.edu
 #SBATCH --mail-type=all
 
