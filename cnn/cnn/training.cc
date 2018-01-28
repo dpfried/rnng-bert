@@ -45,24 +45,24 @@ void SimpleSGDTrainer::update(const std::vector<LookupParameters*> &lookup_param
   //cerr << "params and grads:" << endl;
   for (auto p : params) {
     /*
-      vector<real> val(p->values.d.size());
-      vector<real> grad(p->g.d.size());
-#if HAVE_CUDA
-      CUDA_CHECK(cudaMemcpy(&val[0], p->values.v, sizeof(float) * val.size(), cudaMemcpyDeviceToHost));
-      CUDA_CHECK(cudaMemcpy(&grad[0], p->g.v, sizeof(float) * grad.size(), cudaMemcpyDeviceToHost));
-#else
-      memcpy(&val[0], p->values.v, sizeof(float) * val.size());
-      memcpy(&grad[0], p->g.v, sizeof(float) * grad.size());
-#endif
-      cerr << "param:\t" << p->name << "\t" << p->dim << endl;
-      unsigned count = 0;
-    for (unsigned i = 0; i < val.size(); i++) {
-        count++;
-        if (count > 100) break;
-        cerr << i << "\t" << val[i] << "\t" << grad[i] << endl;
-    }
-    cerr << endl;
-    */
+        vector<real> val(p->values.d.size());
+        vector<real> grad(p->g.d.size());
+  #if HAVE_CUDA
+        CUDA_CHECK(cudaMemcpy(&val[0], p->values.v, sizeof(float) * val.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&grad[0], p->g.v, sizeof(float) * grad.size(), cudaMemcpyDeviceToHost));
+  #else
+        memcpy(&val[0], p->values.v, sizeof(float) * val.size());
+        memcpy(&grad[0], p->g.v, sizeof(float) * grad.size());
+  #endif
+        cerr << "param:\t" << p->name << "\t" << p->dim << endl;
+        unsigned count = 0;
+      for (unsigned i = 0; i < val.size(); i++) {
+          count++;
+          if (count > 100) break;
+          cerr << i << "\t" << val[i] << "\t" << grad[i] << endl;
+      }
+      cerr << endl;
+      */
     if (good_grad) {
 #if HAVE_CUDA
     gpu::sgd_update(p->values.d.size(), p->g.v, p->values.v, eta * scale * gscale, lambda);
@@ -73,7 +73,27 @@ void SimpleSGDTrainer::update(const std::vector<LookupParameters*> &lookup_param
     }
     p->clear();
   }
+  //cerr << "lookup params and grads:" << endl;
   for (auto p : lookup_params) {
+/*
+      vector<real> val(min(p->values[0].d.size(), (unsigned) 100));
+      vector<real> grad(min(p->grads[0].d.size(), (unsigned) 100));
+#if HAVE_CUDA
+      CUDA_CHECK(cudaMemcpy(&val[0], p->values[0].v, sizeof(float) * val.size(), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(&grad[0], p->grads[0].v, sizeof(float) * grad.size(), cudaMemcpyDeviceToHost));
+#else
+      memcpy(&val[0], p->values[0].v, sizeof(float) * val.size());
+      memcpy(&grad[0], p->grads[0].v, sizeof(float) * grad.size());
+#endif
+      cerr << "param:\t" << p->dim << "\t" << p->values.size() << "elements" << endl;
+      unsigned count = 0;
+      for (unsigned i = 0; i < val.size(); i++) {
+          count++;
+          if (count > 100) break;
+          cerr << i << "\t" << val[i] << "\t" << grad[i] << endl;
+      }
+      cerr << endl;
+      */
     if (good_grad) {
     for (auto i : p->non_zero_grads) {
 #if HAVE_CUDA
