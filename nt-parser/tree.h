@@ -9,6 +9,8 @@
 #include <set>
 #include <map>
 #include "nt-parser/eval.h"
+#include "nt-parser/oracle.h"
+#include "oracle.h"
 
 #ifndef CNN_TREE_H
 #define CNN_TREE_H
@@ -81,6 +83,14 @@ public:
           _right_span = children.back().right_span();
       }
       return (unsigned) _right_span;
+  }
+
+  const string& get_symbol() const {
+      return symbol;
+  }
+
+  const vector<Tree>& get_children() const {
+      return children;
   }
 
   BracketCounts brackets(bool advp_prt=true, bool remove_punct=true) {
@@ -191,7 +201,6 @@ tuple<Tree, unsigned, unsigned> parse_linearized_helper(const vector<string>& li
         } else if (next_symbol[0] == ')') {
             break;
         } else {
-            vector<string> child_leaves;
             sentence->push_back(next_symbol);
             children.push_back(Tree(next_symbol, vector<Tree>(), sentence, leaf_index));
             leaf_index++;
@@ -203,6 +212,32 @@ tuple<Tree, unsigned, unsigned> parse_linearized_helper(const vector<string>& li
 Tree parse_linearized(const vector<string>& linearized_tree_tokens) {
     shared_ptr<vector<string>> sentence = make_shared<vector<string>>();
     return get<0>(parse_linearized_helper(linearized_tree_tokens, sentence, 0, 0));
+}
+
+Tree parse_inorder(const vector<string>& tree_tokens) {
+    shared_ptr<vector<string>> sentence = make_shared<vector<string>>();
+    list<Tree> stack;
+    vector<list<Tree>::iterator> nt_starts;
+
+    unsigned leaf_index = 0;
+    for (auto& tok: tree_tokens) {
+        if (tok[0] == '(') {
+            auto nt_start = stack.insert(prev(stack.end()), Tree(tok, vector<Tree>(), sentence, -1));
+            nt_starts.push_back(nt_start);
+        } else if (tok[0] == ')') {
+            auto nt_start = nt_starts.back();
+            Tree nt(nt_start->get_symbol(), vector<Tree>(next(nt_start), stack.end()), sentence, -1);
+            stack.erase(nt_start, stack.end());
+            nt_starts.pop_back();
+            stack.push_back(nt);
+        } else {
+            sentence->push_back(tok);
+            stack.push_back(Tree(tok, vector<Tree>(), sentence, leaf_index));
+            leaf_index += 1;
+        }
+    }
+    assert(stack.size() == 1);
+    return stack.back();
 }
 
 #endif //CNN_TREE_H

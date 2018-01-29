@@ -1,15 +1,19 @@
 import sys
 import get_dictionary
 from get_dictionary import is_next_open_bracket, get_between_brackets
+import types
 
 # tokens is a list of tokens, so no need to split it again
-def unkify(tokens, words_dict):
+def unkify(tokens, words_dict, lang='en'):
     final = []
     for token in tokens:
         # only process the train singletons and unknown words
         if len(token.rstrip()) == 0:
             final.append('UNK')
         elif not(token.rstrip() in words_dict):
+	    if lang == "ch":
+		final.append('UNK')
+		continue;
             numCaps = 0
             hasDigit = False
             hasDash = False
@@ -194,17 +198,55 @@ def get_actions(line):
     assert i == max_idx
     return output_actions, max_open_nts, max_cons_nts, max_same_cons_nts
 
+# modified from https://github.com/LeonCrashCode/InOrderParser
+def construct(actions, trees):
+    while len(actions) > 0:
+	act = actions[0]
+	actions = actions[1:]
+	if act[0] == 'N':
+		tree = [act]
+		actions, tree = construct(actions,tree)
+		trees.append(tree)
+	elif act[0] == 'S':
+		trees.append(act)
+	elif act[0] == 'R':
+		break;
+	else:
+		assert False
+    return actions, trees
+
+def get_in_order_actions(trees, actions):
+    if type(trees[1]) == types.ListType:
+	actions = get_in_order_actions(trees[1], actions)
+    else:
+	actions.append(trees[1])
+
+    assert type(trees[0]) == types.StringType
+    actions.append("NT"+trees[0][2:])
+    
+    for item in trees[2:]:
+	if type(item) == types.ListType:
+		actions = get_in_order_actions(item, actions)
+	else:
+		actions.append(item)
+    actions.append("REDUCE")
+    return actions	
+
 def main():
-    if len(sys.argv) != 3:
-        raise NotImplementedError('Program only takes two arguments:  dictionary file and dev file (for vocabulary mapping purposes)')
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("dictionary_file")
+    parser.add_argument("corpus_file")
+    parser.add_argument("--in_order", action='store_true')
+    args = parser.parse_args()
     # train_file = open(sys.argv[1], 'r')
     # words_list = set(get_dictionary.get_dict(train_file))
     # train_file.close()
-    dictionary_file = open(sys.argv[1], 'r')
+    dictionary_file = open(args.dictionary_file, 'r')
     words_list = set(line.strip() for line in dictionary_file)
     dictionary_file.close()
 
-    dev_file = open(sys.argv[2], 'r')
+    dev_file = open(args.corpus_file, 'r')
     # dev_lines = dev_file.readlines()
     line_ctr = 0
     max_open_nts = 0
@@ -241,8 +283,13 @@ def main():
         if mscn > max_same_cons_nts:
             max_same_cons_nts = mscn
             max_same_cons_nts_ix = line_ctr
+        if args.in_order:
+            _, trees = construct(output_actions, [])
+            output_actions = get_in_order_actions(trees[0], [])
         for action in output_actions:
             print action
+        if args.in_order:
+            print 'TERM'
         print ''
     print >> sys.stderr, "max open nts: %d, line %d" % (max_open_nts, max_open_nts_ix)
     print >> sys.stderr, "max cons nts: %d, line %d" % (max_cons_nts, max_cons_nts_ix)

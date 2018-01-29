@@ -62,6 +62,7 @@ unsigned MAX_CONS_NT = 8;
 
 unsigned SHIFT_ACTION = UINT_MAX;
 unsigned REDUCE_ACTION = UINT_MAX;
+unsigned TERM_ACTION = UINT_MAX; // only used for in-order
 
 float ALPHA = 1.f;
 float DYNAMIC_EXPLORATION_PROBABILITY = 1.f;
@@ -80,6 +81,8 @@ bool NO_STACK = false;
 unsigned SILVER_BLOCKS_PER_GOLD = 10;
 
 bool UNNORMALIZED = false;
+
+bool IN_ORDER = false;
 
 using namespace cnn::expr;
 using namespace cnn;
@@ -145,6 +148,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("set_iter", po::value<int>(),  "")
           ("save_frequency_minutes", po::value<unsigned>()->default_value(30),  "save model roughly every this many minutes (if it hasn't been saved by a dev decode)")
           ("spmrl", "Use the SPMRL variant of EVALB")
+          ("inorder", "super experimental implementation of Liu and Zhang 2017, breaks many of the other flags")
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -175,29 +179,66 @@ Expression log_softmax_constrained(const Expression& logits, const vector<unsign
 }
 
 // checks to see if a proposed action is valid in discriminative models
-static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsigned bsize, unsigned ssize, unsigned nopen_parens, unsigned ncons_nt) {
-    bool is_shift = action == SHIFT_ACTION;
-    bool is_reduce = action == REDUCE_ACTION;
-    bool is_nt = !(is_shift | is_reduce);
+static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsigned bsize, unsigned ssize, unsigned nopen_parens, unsigned ncons_nt, unsigned unary) {
+  bool is_shift = action == SHIFT_ACTION;
+  bool is_reduce = action == REDUCE_ACTION;
+  bool is_term = IN_ORDER ? action == TERM_ACTION : false;
+  bool is_nt = !(is_shift | is_reduce | is_term);
 
+  if (IN_ORDER) {
+    assert(is_shift || is_reduce || is_nt || is_term) ;
+    static const unsigned MAX_OPEN_NTS = 100;
+    static const unsigned MAX_UNARY = 3;
+//  if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
+    if (is_term){
+      if(ssize == 2 && bsize == 1 && prev_a == 'R') return false;
+      return true;
+    }
+
+    if(ssize == 1){
+      if(!is_shift) return true;
+      return false;
+    }
+
+    if (is_shift){
+      if(bsize == 1) return true;
+      if(nopen_parens == 0) return true;
+      return false;
+    }
+
+    if (is_nt) {
+      if(bsize == 1 && unary >= MAX_UNARY) return true;
+      if(prev_a == 'N') return true;
+      return false;
+    }
+
+    if (is_reduce){
+      if(unary > MAX_UNARY) return true;
+      if(nopen_parens == 0) return true;
+      return false;
+    }
+    assert(false); // should never reach here
+
+  } else { // standard top-down RNNG
+    assert(is_shift || is_reduce || is_nt) ;
     static const unsigned MAX_OPEN_NTS = 100;
     if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
     if (is_nt && ncons_nt >= MAX_CONS_NT) return true;
     if (ssize == 1) {
-        if (!is_nt) return true;
-        return false;
+      if (!is_nt) return true;
+      return false;
     }
 
     if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-        // if a SHIFT has an implicit REDUCE, then only shift after an NT:
-        if (is_shift && prev_a != 'N') return true;
+      // if a SHIFT has an implicit REDUCE, then only shift after an NT:
+      if (is_shift && prev_a != 'N') return true;
     }
 
     // be careful with top-level parens- you can only close them if you
     // have fully processed the buffer
     if (nopen_parens == 1 && bsize > 1) {
-        if (IMPLICIT_REDUCE_AFTER_SHIFT && is_shift) return true;
-        if (is_reduce) return true;
+      if (IMPLICIT_REDUCE_AFTER_SHIFT && is_shift) return true;
+      if (is_reduce) return true;
     }
 
     // you can't reduce after an NT action
@@ -209,28 +250,42 @@ static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsig
     // TODO should we control the depth of the parse in some way? i.e., as long as there
     // are items in the buffer, we can do an NT operation, which could cause trouble
     return false;
+  }
+}
+
+void print_tree(const Tree& tree, const parser::Sentence& sentence, bool output_tags, ostream& out_stream) {
+  for (auto& tok: linearize_tree(tree, sentence, output_tags, true)) {
+    out_stream << tok << " ";
+  }
+  out_stream << endl;
 }
 
 void print_parse(const vector<unsigned>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
-  int ti = 0;
-  for (auto a : actions) {
-    if (adict.Convert(a)[0] == 'N') {
-      out_stream << " (" << ntermdict.Convert(action2NTindex.find(a)->second);
-    } else if (adict.Convert(a)[0] == 'S') {
-      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-        out_stream << termdict.Convert(sentence.raw[ti++]) << ")";
-      } else {
-        if (ptb_output_format) {
-          string preterminal = posdict.Convert(sentence.pos[ti]);
-          out_stream << " (" << preterminal << ' ' << non_unked_termdict.Convert(sentence.non_unked_raw[ti]) << ")";
-          ti++;
-        } else { // use this branch to surpress preterminals
-          out_stream << ' ' << termdict.Convert(sentence.raw[ti++]);
+  if (IN_ORDER) {
+    Tree tree = to_tree_u(actions, sentence);
+    print_tree(tree, sentence, ptb_output_format, out_stream);
+  } else {
+    int ti = 0;
+    for (auto a : actions) {
+      if (adict.Convert(a)[0] == 'N') {
+        out_stream << " (" << ntermdict.Convert(action2NTindex.find(a)->second);
+      } else if (adict.Convert(a)[0] == 'S') {
+        if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+          out_stream << termdict.Convert(sentence.raw[ti++]) << ")";
+        } else {
+          if (ptb_output_format) {
+            string preterminal = posdict.Convert(sentence.pos[ti]);
+            out_stream << " (" << preterminal << ' ' << non_unked_termdict.Convert(sentence.non_unked_raw[ti])
+                       << ")";
+            ti++;
+          } else { // use this branch to surpress preterminals
+            out_stream << ' ' << termdict.Convert(sentence.raw[ti++]);
+          }
         }
-      }
-    } else out_stream << ')';
+      } else out_stream << ')';
+    }
+    out_stream << endl;
   }
-  out_stream << endl;
 }
 
 void print_parse(const vector<int>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
@@ -289,6 +344,7 @@ struct AbstractParser {
 
     while(!state->is_finished()) {
       vector<unsigned> valid_actions = state->get_valid_actions();
+      assert(!valid_actions.empty());
 
       Expression adiste = state->get_action_log_probs(valid_actions);
 
@@ -656,6 +712,8 @@ std::shared_ptr<SymbolicParserState> initialize_symbolic_parser_state(const pars
 
   unsigned words_shifted = 0;
 
+  unsigned unary = 0;
+
   return std::make_shared<SymbolicParserState>(
           Stack<int>(bufferi),
           Stack<int>(stacki),
@@ -669,7 +727,8 @@ std::shared_ptr<SymbolicParserState> initialize_symbolic_parser_state(const pars
           action,
           completed_brackets,
           open_brackets,
-          words_shifted
+          words_shifted,
+          unary
   );
 
 }
@@ -925,7 +984,8 @@ struct SymbolicParserState: public AbstractParserState {
           unsigned action,
           Stack<Bracket> completed_brackets,
           Stack<OpenBracket> open_brackets,
-          unsigned words_shifted
+          unsigned words_shifted,
+          unsigned unary
   ) :
           bufferi(bufferi),
           stacki(stacki),
@@ -939,14 +999,19 @@ struct SymbolicParserState: public AbstractParserState {
           action(action),
           completed_brackets(completed_brackets),
           open_brackets(open_brackets),
-          words_shifted(words_shifted)
+          words_shifted(words_shifted),
+          unary(unary)
   {};
 
   const Stack<int> bufferi;
   const Stack<int> stacki;
 
   bool is_finished() const override {
-    return stacki.size() == 2 && bufferi.size() == 1;
+    if (IN_ORDER) {
+      return prev_a == 'T';
+    } else {
+      return stacki.size() == 2 && bufferi.size() == 1;
+    }
   }
 
   bool word_completed() const override {
@@ -965,8 +1030,12 @@ struct SymbolicParserState: public AbstractParserState {
     return words_shifted;
   }
 
+  unsigned get_unary() const override {
+    return unary;
+  }
+
   bool action_is_valid(unsigned action) const override {
-    return not IsActionForbidden_Discriminative(action, prev_a, bufferi.size(), stacki.size(), nopen_parens, cons_nt_count);
+    return not IsActionForbidden_Discriminative(action, prev_a, bufferi.size(), stacki.size(), nopen_parens, cons_nt_count, unary);
   }
 
   vector<unsigned> get_valid_actions() const override {
@@ -998,6 +1067,7 @@ struct SymbolicParserState: public AbstractParserState {
     Stack<OpenBracket> new_open_brackets(open_brackets);
 
     unsigned new_words_shifted = words_shifted;
+    unsigned new_unary = unary;
 
     bool was_word_completed = false;
 
@@ -1019,13 +1089,18 @@ struct SymbolicParserState: public AbstractParserState {
         new_is_open_paren = new_is_open_paren.push_back(-1);
         was_word_completed = (new_bufferi.size() > 1);
       }
+      if (IN_ORDER) {
+        new_unary = 0;
+      }
       new_words_shifted += 1;
       new_cons_nt_count = 0;
-    }
-
-    else if (ac == 'N') { // NT
+    } else if (ac == 'N') { // NT
       ++new_nopen_parens;
-      assert(bufferi.size() > 1);
+      if (IN_ORDER) {
+        assert(stacki.size() > 1);
+      } else {
+        assert(bufferi.size() > 1);
+      }
       auto it = action2NTindex.find(action);
       assert(it != action2NTindex.end());
       int nt_index = it->second;
@@ -1034,10 +1109,12 @@ struct SymbolicParserState: public AbstractParserState {
       new_is_open_paren = new_is_open_paren.push_back(nt_index);
       new_cons_nt_count += 1;
       new_open_brackets = new_open_brackets.push_back(OpenBracket(nt_index, words_shifted));
-    }
-
-    else { // REDUCE
+    } else if (ac == 'R') { // REDUCE
       --new_nopen_parens;
+      if (IN_ORDER) {
+        if (prev_a == 'N') new_unary += 1;
+        if (prev_a == 'R') new_unary = 0;
+      }
       assert(stacki.size() > 2); // dummy symbol means > 2 (not >= 2)
 
       // find what paren we are closing
@@ -1050,7 +1127,11 @@ struct SymbolicParserState: public AbstractParserState {
         temp_is_open_paren = temp_is_open_paren.pop_back();
       }
       int nchildren = is_open_paren.size() - i - 1;
-      assert(nchildren > 0);
+      if (IN_ORDER) {
+        assert(nchildren + 1 > 0);
+      } else {
+        assert(nchildren > 0);
+      }
       //cerr << "  number of children to reduce: " << nchildren << endl;
 
       // REMOVE EVERYTHING FROM THE STACK THAT IS GOING
@@ -1063,6 +1144,13 @@ struct SymbolicParserState: public AbstractParserState {
       new_is_open_paren = new_is_open_paren.pop_back(); // nt symbol
       assert(new_stacki.back() == -1);
       new_stacki = new_stacki.pop_back(); // nonterminal dummy
+
+      if (IN_ORDER) {
+        new_stacki = new_stacki.pop_back(); // leftmost
+        new_is_open_paren = new_is_open_paren.pop_back(); // leftmost
+        nchildren++; // not used here, but to parallel the structure in the stack function, where the incremented version is used to build the stack
+      }
+
       new_stacki = new_stacki.push_back(999); // who knows, should get rid of this
       new_is_open_paren = new_is_open_paren.push_back(-1); // we just closed a paren at this position
       if (new_stacki.size() <= 2) {
@@ -1071,6 +1159,8 @@ struct SymbolicParserState: public AbstractParserState {
       new_cons_nt_count = 0;
       new_completed_brackets = new_completed_brackets.push_back(close_bracket(new_open_brackets.back(), words_shifted));
       new_open_brackets = new_open_brackets.pop_back();
+    } else { // TERM
+      assert(IN_ORDER);
     }
 
     return std::make_shared<SymbolicParserState>(
@@ -1086,7 +1176,8 @@ struct SymbolicParserState: public AbstractParserState {
             action,
             new_completed_brackets,
             new_open_brackets,
-            new_words_shifted
+            new_words_shifted,
+            new_unary
     );
   }
 
@@ -1112,6 +1203,8 @@ struct SymbolicParserState: public AbstractParserState {
   const Stack<OpenBracket> open_brackets;
 
   const unsigned words_shifted;
+
+  const unsigned unary;
 
 };
 
@@ -1151,7 +1244,10 @@ struct ParserState : public AbstractParserState {
   const Stack<int> is_open_paren;
 
   bool is_finished() const override {
-    return stack.size() == 2 && buffer.size() == 1;
+    if (!IN_ORDER) {
+      assert((stack.size() == 2 && buffer.size() == 1) == symbolic_parser_state->is_finished());
+    }
+    return symbolic_parser_state->is_finished();
   }
 
   bool word_completed() const override {
@@ -1168,6 +1264,10 @@ struct ParserState : public AbstractParserState {
 
   unsigned int get_words_shifted() const override {
     return symbolic_parser_state->get_words_shifted();
+  }
+
+  unsigned get_unary() const override {
+    return symbolic_parser_state->get_unary();
   }
 
   bool action_is_valid(unsigned action) const override {
@@ -1253,7 +1353,11 @@ struct ParserState : public AbstractParserState {
     }
 
     else if (ac == 'N') { // NT
-      assert(buffer.size() > 1);
+      if (IN_ORDER) {
+        assert(stack.size() > 1);
+      } else {
+        assert(buffer.size() > 1);
+      }
       auto it = action2NTindex.find(action);
       assert(it != action2NTindex.end());
       int nt_index = it->second;
@@ -1264,9 +1368,7 @@ struct ParserState : public AbstractParserState {
         new_stack_state = parser->stack_lstm.state();
       }
       new_is_open_paren = new_is_open_paren.push_back(nt_index);
-    }
-
-    else { // REDUCE
+    } else if (ac == 'R'){ // REDUCE
       assert(stack.size() > 2); // dummy symbol means > 2 (not >= 2)
 
       // find what paren we are closing
@@ -1280,7 +1382,11 @@ struct ParserState : public AbstractParserState {
       }
       Expression nonterminal = lookup(*parser->hg, parser->p_ntup, temp_is_open_paren.back());
       int nchildren = is_open_paren.size() - i - 1;
-      assert(nchildren > 0);
+      if (IN_ORDER) {
+        assert(nchildren + 1 > 0);
+      } else {
+        assert(nchildren > 0);
+      }
       //cerr << "  number of children to reduce: " << nchildren << endl;
       vector<Expression> children(nchildren);
       parser->const_lstm_fwd.start_new_sequence();
@@ -1296,10 +1402,19 @@ struct ParserState : public AbstractParserState {
       }
       new_is_open_paren = new_is_open_paren.pop_back(); // nt symbol
       new_stack = new_stack.pop_back(); // nonterminal dummy
+
       if (NO_STACK) {
         new_stack = new_stack.push_back(Expression()); // placeholder since we check size
       } else {
         new_stack_state = parser->stack_lstm.head_of(new_stack_state); // nt symbol
+
+        if (IN_ORDER) {
+          children.push_back(new_stack.back()); // leftmost
+          new_stack = new_stack.pop_back(); // leftmost
+          new_stack_state = parser->stack_lstm.head_of(new_stack_state); // leftmost
+          new_is_open_paren = new_is_open_paren.pop_back(); // leftmost
+          nchildren++;
+        }
 
         // BUILD TREE EMBEDDING USING BIDIR LSTM
         parser->const_lstm_fwd.add_input(nonterminal);
@@ -1321,6 +1436,8 @@ struct ParserState : public AbstractParserState {
         new_stack = new_stack.push_back(composed);
       }
       new_is_open_paren = new_is_open_paren.push_back(-1); // we just closed a paren at this position
+    } else { // TERM
+      assert(IN_ORDER);
     }
 
     return std::make_shared<ParserState>(
@@ -1377,6 +1494,10 @@ struct EnsembledParserState : public AbstractParserState {
 
   unsigned int get_words_shifted() const override {
     return states.front()->get_words_shifted();
+  }
+
+  unsigned get_unary() const override {
+    return states.front()->get_unary();
   }
 
   Expression get_action_log_probs(const vector<unsigned>& valid_actions) const override {
@@ -1518,28 +1639,88 @@ void signal_callback_handler(int /* signum */) {
   requested_stop = true;
 }
 
-Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence) {
-  vector<string> linearized;
+vector<string> string_representation(const vector<int>& actions, const parser::Sentence& sentence) {
+  vector<string> string_rep;
   unsigned ti = 0;
   for (int a: actions) {
     string token;
     if (adict.Convert(a)[0] == 'N') {
-      linearized.push_back("(" + ntermdict.Convert(action2NTindex.find(a)->second));
+      string_rep.push_back("(" + ntermdict.Convert(action2NTindex.find(a)->second));
     }
     else if (adict.Convert(a)[0] == 'S') {
-      linearized.push_back(posdict.Convert(sentence.pos[ti++]));
+      string_rep.push_back(posdict.Convert(sentence.pos[ti++]));
       if (IMPLICIT_REDUCE_AFTER_SHIFT) {
+        string_rep.push_back(")");
+      }
+    } else if (adict.Convert(a)[0] == 'T') {
+      assert(IN_ORDER);
+      // todo: check that we're at the end
+      break;
+    } else {
+      string_rep.push_back(")");
+    }
+  }
+  return string_rep;
+}
+
+vector<string> string_representation_u(const vector<unsigned>& actions, const parser::Sentence& sentence) {
+  vector<int> converted(actions.begin(), actions.end());
+  return string_representation(converted, sentence);
+}
+
+Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence) {
+  vector<string> string_rep = string_representation(actions, sentence);
+  if (IN_ORDER) {
+    //cerr << "parsing in order" << endl;
+    return parse_inorder(string_rep);
+  } else {
+    //cerr << "parsing linearized" << endl;
+    return parse_linearized(string_rep);
+  }
+}
+
+Tree to_tree_u(const vector<unsigned>& actions, const parser::Sentence& sentence) {
+  vector<int> converted(actions.begin(), actions.end());
+  return to_tree(converted, sentence);
+}
+
+void linearize_tree_helper(const Tree& node, const parser::Sentence& sentence, unsigned* words_shifted, vector<string>& linearized, bool include_tags, bool condense_parens) {
+  const vector<Tree>& children = node.get_children();
+  if (children.empty()) {
+    string terminal = non_unked_termdict.Convert(sentence.non_unked_raw[*words_shifted]);
+    if (include_tags) {
+      string pos = posdict.Convert(sentence.pos[*words_shifted]);
+      linearized.push_back("(" + pos);
+      if (condense_parens) {
+        linearized.push_back(terminal + ")");
+      } else {
+        linearized.push_back(terminal);
         linearized.push_back(")");
       }
+    } else {
+      linearized.push_back(terminal);
+    }
+    (*words_shifted)++;
+  } else {
+    linearized.push_back(node.get_symbol()); // should include the (
+    for (const Tree& child: children) {
+        linearize_tree_helper(child, sentence, words_shifted, linearized, include_tags, condense_parens);
+    }
+    if (condense_parens) {
+      string back = linearized.back();
+      linearized.pop_back();
+      linearized.push_back(back + ")");
     } else {
       linearized.push_back(")");
     }
   }
-  /*
-for (auto& sym: linearized) cout << sym << " ";
-cout << endl;
-   */
-  return parse_linearized(linearized);
+}
+
+vector<string> linearize_tree(const Tree& tree, const parser::Sentence& sentence, bool include_tags, bool condense_parens) {
+  vector<string> linearized;
+  unsigned words_shifted = 0;
+  linearize_tree_helper(tree, sentence, &words_shifted, linearized, include_tags, condense_parens);
+  return linearized;
 }
 
 void check_spmrl(const string& path, bool is_spmrl) {
@@ -1549,7 +1730,7 @@ void check_spmrl(const string& path, bool is_spmrl) {
 int main(int argc, char** argv) {
   unsigned random_seed = cnn::Initialize(argc, argv);
 
-  cerr << "COMMAND LINE:"; 
+  cerr << "COMMAND LINE:";
   for (unsigned i = 0; i < static_cast<unsigned>(argc); ++i) cerr << ' ' << argv[i];
   cerr << endl;
   unsigned status_every_i_iterations = 100;
@@ -1576,7 +1757,13 @@ int main(int argc, char** argv) {
 
   UNNORMALIZED = conf.count("unnormalized");
 
+  IN_ORDER = conf.count("inorder");
   bool spmrl = conf.count("spmrl");
+
+  if (IN_ORDER) {
+    assert(!IMPLICIT_REDUCE_AFTER_SHIFT);
+  }
+
 
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
@@ -1653,14 +1840,14 @@ int main(int argc, char** argv) {
 
   check_spmrl(conf["training_data"].as<string>(), spmrl);
   check_spmrl(conf["bracketing_dev_data"].as<string>(), spmrl);
-  corpus.load_oracle(conf["training_data"].as<string>(), true, discard_train_sents);
+  corpus.load_oracle(conf["training_data"].as<string>(), true, discard_train_sents, IN_ORDER);
   corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
 
   bool has_gold_training_data = false;
 
   if (conf.count("gold_training_data")) {
     check_spmrl(conf["gold_training_data"].as<string>(), spmrl);
-    gold_corpus.load_oracle(conf["gold_training_data"].as<string>(), true, discard_train_sents);
+    gold_corpus.load_oracle(conf["gold_training_data"].as<string>(), true, discard_train_sents, IN_ORDER);
     gold_corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
     has_gold_training_data = true;
   }
@@ -1682,6 +1869,10 @@ int main(int argc, char** argv) {
   SHIFT_ACTION = adict.Convert("SHIFT");
   REDUCE_ACTION = adict.Convert("REDUCE");
 
+  if (IN_ORDER) {
+    TERM_ACTION = adict.Convert("TERM");
+  }
+
   {  // compute the singletons in the parser's training data
     /*
     unordered_map<unsigned, unsigned> counts;
@@ -1696,12 +1887,12 @@ int main(int argc, char** argv) {
   if (conf.count("dev_data")) {
     cerr << "Loading validation set\n";
     check_spmrl(conf["dev_data"].as<string>(), spmrl);
-    dev_corpus.load_oracle(conf["dev_data"].as<string>(), false, false);
+    dev_corpus.load_oracle(conf["dev_data"].as<string>(), false, false, IN_ORDER);
   }
   if (conf.count("test_data")) {
     cerr << "Loading test set\n";
     check_spmrl(conf["test_data"].as<string>(), spmrl);
-    test_corpus.load_oracle(conf["test_data"].as<string>(), false, false);
+    test_corpus.load_oracle(conf["test_data"].as<string>(), false, false, IN_ORDER);
   }
 
   non_unked_termdict.Freeze();
@@ -1739,7 +1930,6 @@ int main(int argc, char** argv) {
   unsigned block_count = conf["block_count"].as<unsigned>();
   unsigned block_num = conf["block_num"].as<unsigned>();
 
-
   auto decode = [&](AbstractParser& parser, const parser::Sentence& sentence, StreamingStatistics* streaming_entropy = nullptr) {
       double right = 0;
       // get parse and negative log probability
@@ -1759,8 +1949,6 @@ int main(int argc, char** argv) {
                                                false, false, 0.0, nullptr, false, streaming_entropy, nullptr);
       }
   };
-
-
 
   auto get_neg_log_likelihood = [&](AbstractParser& parser, const parser::Sentence& sentence, const vector<int>& actions, double* right, StreamingStatistics* streaming_gold_prob = nullptr) {
     ComputationGraph hg;
@@ -1804,8 +1992,10 @@ int main(int argc, char** argv) {
         all_match_counts.push_back(this_counts);
         match_counts += this_counts;
 
-        print_parse(pred_parse, sentence, true, pred_out);
-        print_parse(gold_parse, sentence, true, gold_out);
+        //print_parse(pred_parse, sentence, true, pred_out);
+        //print_parse(gold_parse, sentence, true, gold_out);
+        print_tree(pred_tree, sentence, true, pred_out);
+        print_tree(gold_tree, sentence, true, gold_out);
       }
 
       pred_out.close();
@@ -1888,8 +2078,8 @@ int main(int argc, char** argv) {
 
     Model model;
     ParserBuilder parser(&model, pretrained);
-    unique_ptr<Trainer> optimizer = optimizer_name == "sgd" 
-                                    ? unique_ptr<Trainer>(new SimpleSGDTrainer(&model, 1e-6, conf["sgd_e0"].as<float>())) 
+    unique_ptr<Trainer> optimizer = optimizer_name == "sgd"
+                                    ? unique_ptr<Trainer>(new SimpleSGDTrainer(&model, 1e-6, conf["sgd_e0"].as<float>()))
                                     : unique_ptr<Trainer>(new AdamTrainer(&model)); //(&model);
     parser::TrainingPosition training_position;
     StreamingStatistics streaming_f1;

@@ -20,6 +20,7 @@ struct AbstractParserState {
   virtual Stack<Bracket> get_completed_brackets() const = 0;
   virtual Stack<OpenBracket> get_open_brackets() const = 0;
   virtual unsigned get_words_shifted() const = 0;
+  virtual unsigned get_unary() const = 0;
 };
 
 struct SymbolicParserState;
@@ -45,5 +46,9 @@ struct DynamicOracle {
 
   unsigned oracle_action(const AbstractParserState& parser_state);
 };
+
+vector<string> linearize_tree(const Tree& tree, const parser::Sentence& sentence, bool include_tags, bool condense_parens);
+Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence);
+Tree to_tree_u(const vector<unsigned>& actions, const parser::Sentence& sentence);
 
 #endif //CNN_NT_PARSER_H

@@ -48,7 +48,7 @@ class TopDownOracle : public Oracle {
   // will be read, and both will be available. if false, then only the mapped
   // tokens will be available
   void load_bdata(const std::string& file);
-  void load_oracle(const std::string& file, bool is_training, bool discard_sentences);
+  void load_oracle(const std::string& file, bool is_training, bool discard_sentences, bool in_order);
   cnn::Dict* nd; // dictionary of nonterminal types
 };
 

@@ -41,14 +41,18 @@ void TopDownOracle::load_bdata(const string& file) {
    devdata=file;
 }
 
-void TopDownOracle::load_oracle(const string& file, bool is_training, bool discard_sentences) {
+void TopDownOracle::load_oracle(const string& file, bool is_training, bool discard_sentences, bool in_order) {
   cerr << "Loading top-down oracle from " << file << " [" << (is_training ? "training" : "non-training") << "] ...\n";
   cnn::compressed_ifstream in(file.c_str());
   assert(in);
   const string kREDUCE = "REDUCE";
   const string kSHIFT = "SHIFT";
+  const string kTERM = "TERM";
   const int kREDUCE_INT = ad->Convert("REDUCE");
   const int kSHIFT_INT = ad->Convert("SHIFT");
+  // only add to the dictionary if we need it
+  const int kTERM_INT = in_order ? ad->Convert(kTERM) : std::numeric_limits<int>::max();
+
   int lc = 0;
   string line;
   vector<int> cur_acts;
@@ -109,6 +113,9 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
       } else if (line == kSHIFT) {
         cur_acts.push_back(kSHIFT_INT);
         termc++;
+      } else if (line == kTERM) {
+        assert(in_order);
+        cur_acts.push_back(kTERM_INT);
       } else {
         cerr << "Malformed input in line " << lc << endl;
         abort();
