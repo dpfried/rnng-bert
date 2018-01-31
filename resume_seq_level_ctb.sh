@@ -18,11 +18,11 @@ dim=$3
 optimizer=sgd
 batch_size=1
 
-out_dir="sequence_level/"
+out_dir="expts_ctb/sequence_level"
 #out_dir="restart_test/"
-mkdir $out_dir 2> /dev/null
-export MKL_NUM_THREADS=4
+mkdir -p $out_dir 2> /dev/null
 
+export MKL_NUM_THREADS=4
 
 output_prefix="${out_dir}/${dynet_seed}_method=${method}_candidates=${candidates}_opt=${optimizer}_include-gold"
 
@@ -57,13 +57,13 @@ build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
     --cnn-mem 2000,2000,1000 \
     -x \
-    -T corpora/train.oracle \
-    -d corpora/dev.oracle \
-    -C corpora/dev.stripped \
+    -T ctb_corpora/tx-pos.oracle \
+    -d ctb_corpora/dx-pos.oracle \
+    -C ctb_corpora/dx-pos.stripped \
     -t \
     -P \
-    --pretrained_dim 100 \
-    -w embeddings/sskip.100.filtered.vectors \
+    --pretrained_dim 80 \
+    -w embeddings/zzgiga.sskip.80.filtered.vectors \
     --lstm_input_dim $dim \
     --hidden_dim $dim \
     -D 0.2 \

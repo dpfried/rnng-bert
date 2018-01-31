@@ -19,7 +19,7 @@ optimizer=sgd
 batch_size=1
 
 out_dir="sequence_level"
-mkdir -p $out_dir
+mkdir -p $out_dir 2> /dev/null
 
 output_prefix="${out_dir}/${dynet_seed}_method=${method}_candidates=${candidates}_opt=${optimizer}_include-gold"
 
