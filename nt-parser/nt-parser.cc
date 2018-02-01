@@ -45,8 +45,13 @@
 
 // dictionaries
 cnn::Dict termdict, ntermdict, adict, posdict, non_unked_termdict;
+cnn::Dict morphology_classes;
+std::unordered_map<std::string, cnn::Dict> morphology_dicts;
+std::unordered_map<std::string, std::vector<bool>> morphology_singletons;
 
 const unsigned START_OF_SENTENCE_ACTION = std::numeric_limits<unsigned>::max();
+
+const string UNK = "UNK";
 
 volatile bool requested_stop = false;
 unsigned IMPLICIT_REDUCE_AFTER_SHIFT = 0;
@@ -57,6 +62,7 @@ unsigned ACTION_DIM = 36;
 unsigned PRETRAINED_DIM = 50;
 unsigned LSTM_INPUT_DIM = 60;
 unsigned POS_DIM = 10;
+unsigned MORPH_DIM = 10;
 
 unsigned MAX_CONS_NT = 8;
 
@@ -76,6 +82,7 @@ std::map<int,int> action2NTindex;  // pass in index of action NT(X), return inde
 std::map<int,int> ntIndex2Action;  // pass in index of X, return index of action NT(X)
 
 bool USE_POS = false;  // in discriminative parser, incorporate POS information in token embedding
+bool USE_MORPH_FEATURES = false;
 bool USE_PRETRAINED = false;  // in discriminative parser, use pretrained word embeddings (not updated)
 bool NO_STACK = false;
 unsigned SILVER_BLOCKS_PER_GOLD = 10;
@@ -110,9 +117,11 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
           ("model,m", po::value<string>(), "Load saved model from this file")
           ("use_pos_tags,P", "make POS tags visible to parser")
+          ("use_morph_features", "make morphological features visible to parser")
           ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
           ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
           ("pos_dim", po::value<unsigned>()->default_value(12), "POS dimension")
+          ("morph_dim", po::value<unsigned>()->default_value(10), "morph features dimension (if use_morph_features is set)")
           ("input_dim", po::value<unsigned>()->default_value(32), "input embedding size")
           ("hidden_dim", po::value<unsigned>()->default_value(64), "hidden dimension")
           ("pretrained_dim", po::value<unsigned>()->default_value(50), "pretrained input dimension")
@@ -761,8 +770,10 @@ struct ParserBuilder : public AbstractParser {
   Parameters* p_abias;  // action bias
   Parameters* p_buffer_guard;  // end of buffer
   Parameters* p_stack_guard;  // end of stack
-
   Parameters* p_cW;
+
+  std::unordered_map<std::string, LookupParameters*> p_morph_embeddings;
+  std::unordered_map<std::string, Parameters*> p_morph_W;
 
   explicit ParserBuilder(Model* model, const unordered_map<unsigned, vector<float>>& pretrained) :
       stack_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model),
@@ -807,12 +818,21 @@ struct ParserBuilder : public AbstractParser {
       p_t = nullptr;
       p_t2l = nullptr;
     }
+    if (USE_MORPH_FEATURES) {
+      for (unsigned i = 0; i < morphology_classes.size(); i++) {
+        const string& _class = morphology_classes.Convert(i);
+        auto& morph_dict = morphology_dicts[_class];
+        p_morph_embeddings[_class] = model->add_lookup_parameters(morph_dict.size() + 1, {MORPH_DIM}); // + 1 for none
+        p_morph_W[_class] = model->add_parameters({LSTM_INPUT_DIM, MORPH_DIM}, "morph_" + _class);
+      }
+    }
   }
 
   // instance variables for each sentence
   ComputationGraph* hg;
   bool apply_dropout;
   Expression pbias, S, B, A, ptbias, ptW, p2w, ib, cbias, w2l, t2l, p2a, abias, action_start, cW;
+  unordered_map<string, Expression> morph_W;
 
   std::shared_ptr<AbstractParserState> new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) override {
     this->hg = hg;
@@ -862,6 +882,9 @@ struct ParserBuilder : public AbstractParser {
     abias = parameter(*hg, p_abias);
     action_start = parameter(*hg, p_action_start);
     cW = parameter(*hg, p_cW);
+    for (auto& pair: p_morph_W) {
+      morph_W[pair.first] = parameter(*hg, pair.second);
+    }
 
     action_lstm.add_input(action_start);
 
@@ -883,6 +906,22 @@ struct ParserBuilder : public AbstractParser {
       if (USE_POS) {
         args.push_back(p2w);
         args.push_back(lookup(*hg, p_pos, sent.pos[i]));
+      }
+      if (USE_MORPH_FEATURES) {
+        auto feat_mapping = sent.morphology_features[i];
+        for (unsigned idx = 0; idx < morphology_classes.size(); idx++) {
+          const string& class_ = morphology_classes.Convert(idx);
+          auto& morph_dict = morphology_dicts[class_];
+          const auto& morph_singletons = morphology_singletons[class_];
+          unsigned feature_idx = feat_mapping.count(idx) ? feat_mapping[idx] : morph_dict.size();
+          if (build_training_graph && !is_evaluation && morph_singletons.size() > feature_idx && morph_singletons[feature_idx] && rand01() > 0.5) {
+            int unk_index = morph_dict.Convert(UNK);
+            assert(unk_index >= 0);
+            feature_idx = (unsigned) unk_index;
+          }
+          args.push_back(morph_W[class_]);
+          args.push_back(lookup(*hg, p_morph_embeddings[class_], feature_idx));
+        }
       }
       buffer[sent.size() - i] = rectify(affine_transform(args));
     }
@@ -1739,6 +1778,7 @@ int main(int argc, char** argv) {
   InitCommandLine(argc, argv, &conf);
   IMPLICIT_REDUCE_AFTER_SHIFT = conf.count("explicit_terminal_reduce") == 0;
   USE_POS = conf.count("use_pos_tags");
+  USE_MORPH_FEATURES = conf.count("use_morph_features");
   if (conf.count("dropout"))
     DROPOUT = conf["dropout"].as<float>();
   LAYERS = conf["layers"].as<unsigned>();
@@ -1748,6 +1788,7 @@ int main(int argc, char** argv) {
   ACTION_DIM = conf["action_dim"].as<unsigned>();
   LSTM_INPUT_DIM = conf["lstm_input_dim"].as<unsigned>();
   POS_DIM = conf["pos_dim"].as<unsigned>();
+  MORPH_DIM = conf["morph_dim"].as<unsigned>();
   USE_PRETRAINED = conf.count("words");
   NO_STACK = conf.count("no_stack");
 
@@ -1833,21 +1874,21 @@ int main(int argc, char** argv) {
 
   bool discard_train_sents = (conf.count("train") == 0);
 
-  parser::TopDownOracle corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
-  parser::TopDownOracle dev_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
-  parser::TopDownOracle test_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
-  parser::TopDownOracle gold_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict);
+  parser::TopDownOracle corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict, &morphology_classes, &morphology_dicts, &morphology_singletons);
+  parser::TopDownOracle dev_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict, &morphology_classes, &morphology_dicts, &morphology_singletons);
+  parser::TopDownOracle test_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict, &morphology_classes, &morphology_dicts, &morphology_singletons);
+  parser::TopDownOracle gold_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict, &morphology_classes, &morphology_dicts, &morphology_singletons);
 
   check_spmrl(conf["training_data"].as<string>(), spmrl);
   check_spmrl(conf["bracketing_dev_data"].as<string>(), spmrl);
-  corpus.load_oracle(conf["training_data"].as<string>(), true, discard_train_sents, IN_ORDER);
+  corpus.load_oracle(conf["training_data"].as<string>(), true, discard_train_sents, IN_ORDER, USE_MORPH_FEATURES);
   corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
 
   bool has_gold_training_data = false;
 
   if (conf.count("gold_training_data")) {
     check_spmrl(conf["gold_training_data"].as<string>(), spmrl);
-    gold_corpus.load_oracle(conf["gold_training_data"].as<string>(), true, discard_train_sents, IN_ORDER);
+    gold_corpus.load_oracle(conf["gold_training_data"].as<string>(), true, discard_train_sents, IN_ORDER, USE_MORPH_FEATURES);
     gold_corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
     has_gold_training_data = true;
   }
@@ -1859,12 +1900,18 @@ int main(int argc, char** argv) {
 
   // freeze dictionaries so we don't accidentaly load OOVs
   termdict.Freeze();
-  termdict.SetUnk("UNK"); // we don't actually expect to use this often
+  termdict.SetUnk(UNK); // we don't actually expect to use this often
      // since the Oracles are required to be "pre-UNKified", but this prevents
      // problems with UNKifying the lowercased data which needs to be loaded
   adict.Freeze();
   ntermdict.Freeze();
   posdict.Freeze();
+
+  morphology_classes.Freeze();
+  for (auto& pair: morphology_dicts) {
+    pair.second.Freeze();
+    pair.second.SetUnk(UNK);
+  }
 
   SHIFT_ACTION = adict.Convert("SHIFT");
   REDUCE_ACTION = adict.Convert("REDUCE");
@@ -1887,12 +1934,12 @@ int main(int argc, char** argv) {
   if (conf.count("dev_data")) {
     cerr << "Loading validation set\n";
     check_spmrl(conf["dev_data"].as<string>(), spmrl);
-    dev_corpus.load_oracle(conf["dev_data"].as<string>(), false, false, IN_ORDER);
+    dev_corpus.load_oracle(conf["dev_data"].as<string>(), false, false, IN_ORDER, USE_MORPH_FEATURES);
   }
   if (conf.count("test_data")) {
     cerr << "Loading test set\n";
     check_spmrl(conf["test_data"].as<string>(), spmrl);
-    test_corpus.load_oracle(conf["test_data"].as<string>(), false, false, IN_ORDER);
+    test_corpus.load_oracle(conf["test_data"].as<string>(), false, false, IN_ORDER, USE_MORPH_FEATURES);
   }
 
   non_unked_termdict.Freeze();
@@ -2451,6 +2498,20 @@ int main(int argc, char** argv) {
           cerr << termdict.Convert(word_id) << " ";
         }
         cerr << endl;
+        /*
+        if (USE_MORPH_FEATURES) {
+          for (auto& feature_map: corpus.sents[*index_iter].morphology_features) {
+            for (auto& pair: feature_map) {
+              const string& _class = morphology_classes.Convert(pair.first);
+              auto& dict = morphology_dicts[_class];
+              const string& feature = dict.Convert(pair.second);
+              cerr << _class << "=" << feature << "|";
+            }
+            cerr << " ";
+          }
+          cerr << endl;
+        }
+         */
         while (true) {
           {
             ComputationGraph hg;

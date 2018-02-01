@@ -11,9 +11,9 @@ def unkify(tokens, words_dict, lang='en'):
         if len(token.rstrip()) == 0:
             final.append('UNK')
         elif not(token.rstrip() in words_dict):
-	    if lang == "ch":
-		final.append('UNK')
-		continue;
+            if lang == "ch":
+                final.append('UNK')
+                continue;
             numCaps = 0
             hasDigit = False
             hasDash = False
@@ -95,35 +95,25 @@ def get_tag_token_pairs(line):
             output.append(get_between_brackets(line_strip, i))
     return output
 
-def get_tags_tokens_lowercase(line):
+def get_tags_tokens_lowercase_morphfeats(line):
     output = get_tag_token_pairs(line)
     #print 'output:',output
     output_tags = []
     output_tokens = []
     output_lowercase = []
+    output_morphfeats = []
     for terminal in output:
-        terminal_split = terminal.split()
-        assert len(terminal_split) == 2 # each terminal contains a POS tag and word
-        output_tags.append(terminal_split[0])
-        output_tokens.append(terminal_split[1])
-        output_lowercase.append(terminal_split[1].lower())
-
-    return [output_tags, output_tokens, output_lowercase]
-
-def get_tags_tokens_morphfeats(line):
-    output = get_tag_token_pairs(line)
-    output_tags = []
-    output_tokens = []
-    output_morph_feats = []
-    for terminal in output:
-        terminal_split = terminal.split()
-        assert(len(terminal_split)) == 2
-        tag, morph_feats = terminal_split[0].split('##')[:2]
+        tag_and_feats, token = terminal.split()
+        if '##' in tag_and_feats:
+            tag, morph_feats, rest = tag_and_feats.split('##')
+            assert not rest
+            output_morphfeats.append(morph_feats)
+        else:
+            tag = tag_and_feats
         output_tags.append(tag)
-        output_tokens.append(terminal_split[1])
-        output_morph_feats.append('|'.join([feat for feat in morph_feats.split('|')
-                                            if not feat.startswith("lem=")]))
-    return output_tags, output_tokens, output_morph_feats
+        output_tokens.append(token)
+        output_lowercase.append(token.lower())
+    return [output_tags, output_tokens, output_lowercase, output_morphfeats]
 
 def get_nonterminal(line, start_idx):
     assert line[start_idx] == '(' # make sure it's an open bracket
@@ -134,7 +124,6 @@ def get_nonterminal(line, start_idx):
         assert not(char == '(') and not(char == ')')
         output.append(char)
     return ''.join(output)
-
 
 def get_actions(line):
     output_actions = []
@@ -155,6 +144,8 @@ def get_actions(line):
         if line_strip[i] == '(':
             if is_next_open_bracket(line_strip, i): # open non-terminal
                 curr_NT = get_nonterminal(line_strip, i)
+                if '-' in curr_NT:
+                    curr_NT = curr_NT.split('-')[0]
                 output_actions.append('NT(' + curr_NT + ')')
 
                 if curr_NT == last_nt:
@@ -201,36 +192,36 @@ def get_actions(line):
 # modified from https://github.com/LeonCrashCode/InOrderParser
 def construct(actions, trees):
     while len(actions) > 0:
-	act = actions[0]
-	actions = actions[1:]
-	if act[0] == 'N':
-		tree = [act]
-		actions, tree = construct(actions,tree)
-		trees.append(tree)
-	elif act[0] == 'S':
-		trees.append(act)
-	elif act[0] == 'R':
-		break;
-	else:
-		assert False
+        act = actions[0]
+        actions = actions[1:]
+        if act[0] == 'N':
+                tree = [act]
+                actions, tree = construct(actions,tree)
+                trees.append(tree)
+        elif act[0] == 'S':
+                trees.append(act)
+        elif act[0] == 'R':
+                break;
+        else:
+                assert False
     return actions, trees
 
 def get_in_order_actions(trees, actions):
     if type(trees[1]) == types.ListType:
-	actions = get_in_order_actions(trees[1], actions)
+        actions = get_in_order_actions(trees[1], actions)
     else:
-	actions.append(trees[1])
+        actions.append(trees[1])
 
     assert type(trees[0]) == types.StringType
     actions.append("NT"+trees[0][2:])
     
     for item in trees[2:]:
-	if type(item) == types.ListType:
-		actions = get_in_order_actions(item, actions)
-	else:
-		actions.append(item)
+        if type(item) == types.ListType:
+                actions = get_in_order_actions(item, actions)
+        else:
+                actions.append(item)
     actions.append("REDUCE")
-    return actions	
+    return actions      
 
 def main():
     import argparse
@@ -238,6 +229,7 @@ def main():
     parser.add_argument("dictionary_file")
     parser.add_argument("corpus_file")
     parser.add_argument("--in_order", action='store_true')
+    parser.add_argument("--morph_features", action='store_true')
     args = parser.parse_args()
     # train_file = open(sys.argv[1], 'r')
     # words_list = set(get_dictionary.get_dict(train_file))
@@ -265,7 +257,7 @@ def main():
             raise NotImplementedError('Unbalanced number of parenthesis in line ' + str(line_ctr))
         # first line: the bracketed tree itself itself
         print '# ' + line.rstrip()
-        tags, tokens, lowercase = get_tags_tokens_lowercase(line)
+        tags, tokens, lowercase, morphfeats = get_tags_tokens_lowercase_morphfeats(line)
         assert len(tags) == len(tokens)
         assert len(tokens) == len(lowercase)
         print ' '.join(tags)
@@ -273,6 +265,7 @@ def main():
         print ' '.join(lowercase)
         unkified = unkify(tokens, words_list)
         print ' '.join(unkified)
+        print ' '.join(morphfeats)
         output_actions, mon, mcn, mscn = get_actions(line)
         if mon > max_open_nts:
             max_open_nts = mon

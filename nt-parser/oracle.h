@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <map>
 
 namespace cnn { class Dict; }
 
@@ -16,21 +17,27 @@ struct Sentence {
   bool SizesMatch() const { return raw.size() == unk.size() && raw.size() == lc.size() && raw.size() == pos.size(); }
   size_t size() const { return raw.size(); }
   std::vector<int> raw, unk, lc, pos, non_unked_raw;
+  std::vector<std::unordered_map<unsigned, unsigned>> morphology_features;
 };
 
 // base class for transition based parse oracles
 struct Oracle {
   virtual ~Oracle();
-  Oracle(cnn::Dict* dict, cnn::Dict* adict, cnn::Dict* pdict, cnn::Dict* non_unked_dict) : d(dict), ad(adict), pd(pdict), nud(non_unked_dict), sents() {}
+  Oracle(cnn::Dict* dict, cnn::Dict* adict, cnn::Dict* pdict, cnn::Dict* non_unked_dict) :
+          d(dict),
+          ad(adict),
+          pd(pdict),
+          nud(non_unked_dict),
+          sents() {}
   unsigned size() const { return sents.size(); }
   cnn::Dict* d;  // dictionary of terminal symbols
   cnn::Dict* ad; // dictionary of action types
   cnn::Dict* pd; // dictionary of POS tags (preterminal symbols)
   cnn::Dict* nud; // dictionary of non-unked terminal symbols
+  std::unordered_map<unsigned, unsigned> raw_term_counts; // mapping from feature types to features
   std::string devdata;
   std::vector<Sentence> sents;
   std::vector<std::vector<int>> actions;
-  std::unordered_map<unsigned, unsigned> raw_term_counts;
  protected:
   static void ReadSentenceView(const std::string& line, cnn::Dict* dict, std::vector<int>* sent);
 };
@@ -42,14 +49,20 @@ struct Oracle {
 // tokens with OOVs replaced
 class TopDownOracle : public Oracle {
  public:
-  TopDownOracle(cnn::Dict* termdict, cnn::Dict* adict, cnn::Dict* pdict, cnn::Dict* non_unked_dict, cnn::Dict* nontermdict) :
-      Oracle(termdict, adict, pdict, non_unked_dict), nd(nontermdict) {}
+  TopDownOracle(cnn::Dict* termdict, cnn::Dict* adict, cnn::Dict* pdict, cnn::Dict* non_unked_dict, cnn::Dict* nontermdict, cnn::Dict* morphology_classes,
+                std::unordered_map<std::string, cnn::Dict>* morphology_dicts, std::unordered_map<std::string, std::vector<bool>>* morphology_singletons) :
+      Oracle(termdict, adict, pdict, non_unked_dict), nd(nontermdict), morphology_classes(morphology_classes), morphology_dicts(morphology_dicts), morphology_singletons(morphology_singletons) {}
   // if is_training is true, then both the "raw" tokens and the mapped tokens
   // will be read, and both will be available. if false, then only the mapped
   // tokens will be available
   void load_bdata(const std::string& file);
-  void load_oracle(const std::string& file, bool is_training, bool discard_sentences, bool in_order);
+  void load_oracle(const std::string& file, bool is_training, bool discard_sentences, bool in_order, bool read_morphology_features);
   cnn::Dict* nd; // dictionary of nonterminal types
+  cnn::Dict* morphology_classes;
+  std::unordered_map<std::string, cnn::Dict>* morphology_dicts;
+  std::unordered_map<std::string, std::vector<bool>>* morphology_singletons;
+protected:
+  void ReadMorphologyFeatures(const std::string& line, std::vector<std::unordered_map<unsigned, unsigned>>* morphology_feats);
 };
 
 // oracle that predicts nonterminal symbols with a NT(X) action

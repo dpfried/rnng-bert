@@ -3,9 +3,12 @@
 #include <cassert>
 #include <fstream>
 #include <string>
+#include <unordered_map>
 
 #include "cnn/dict.h"
 #include "nt-parser/compressed-fstream.h"
+
+#include <boost/algorithm/string.hpp>
 
 using namespace std;
 
@@ -37,11 +40,71 @@ void Oracle::ReadSentenceView(const std::string& line, cnn::Dict* dict, vector<i
   assert(sent->size() > 0); // empty sentences not allowed
 }
 
+void TopDownOracle::ReadMorphologyFeatures(const std::string& line, std::vector<std::unordered_map<unsigned, unsigned>>* morphology_feats) {
+  std::vector<std::string> features_by_word;
+  std::string trimmed_line = boost::trim_copy(line);
+  boost::split(features_by_word, trimmed_line, boost::is_space(), boost::token_compress_on);
+  for (const string& word_features: features_by_word) {
+    std::vector<std::string> features_by_class;
+    boost::split(features_by_class, word_features, boost::is_any_of("|"));
+
+    std::unordered_map<unsigned, unsigned> word_feature_map;
+
+    for (std::string& class_feature: features_by_class) {
+      //std::vector<std::string> class_and_feature;
+      //boost::split(class_and_feature, class_feature, boost::is_any_of("="));
+      /*
+      if (class_and_feature.size() != 2) {
+        if (class_feature != "_") {
+          cerr << "line: " << line << endl;
+          cerr << "class_feature: " << class_feature << endl;
+        }
+        assert(class_feature == "_");
+        continue;
+      }
+      std::string _class = class_and_feature.at(0);
+      std::string feature = class_and_feature.at(1);
+      */
+      auto pos = class_feature.find('=');
+      if (pos == std::string::npos) {
+        continue;
+      }
+      std::string _class = class_feature.substr(0, pos);
+      std::string feature = class_feature.substr(pos+1);
+
+      if (!morphology_dicts->count(_class)) {
+        (*morphology_dicts)[_class] = cnn::Dict();
+      }
+      if (!morphology_singletons->count(_class)) {
+        (*morphology_singletons)[_class] = std::vector<bool>();
+      }
+      int class_index = morphology_classes->Convert(_class);
+      auto& dict = (*morphology_dicts)[_class];
+      int feature_index = dict.Convert(feature);
+      auto& singletons = (*morphology_singletons)[_class];
+      if (feature_index >= singletons.size()) {
+        singletons.push_back(true);
+        assert(singletons.size() == dict.size());
+        assert(singletons.size() == feature_index + 1);
+      } else {
+        singletons[feature_index] = false;
+      }
+      assert(class_index >= 0);
+      assert(feature_index >= 0);
+      assert(!word_feature_map.count((unsigned) class_index));
+      word_feature_map[(unsigned) class_index] = (unsigned) feature_index;
+    }
+
+    morphology_feats->push_back(word_feature_map);
+  }
+  assert(morphology_feats->size() > 0); // empty sentences not allowed
+}
+
 void TopDownOracle::load_bdata(const string& file) {
    devdata=file;
 }
 
-void TopDownOracle::load_oracle(const string& file, bool is_training, bool discard_sentences, bool in_order) {
+void TopDownOracle::load_oracle(const string& file, bool is_training, bool discard_sentences, bool in_order, bool read_morphology_features) {
   cerr << "Loading top-down oracle from " << file << " [" << (is_training ? "training" : "non-training") << "] ...\n";
   cnn::compressed_ifstream in(file.c_str());
   assert(in);
@@ -81,6 +144,11 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
       ReadSentenceView(line, d, &cur_sent.lc);
       getline(in, line);
       ReadSentenceView(line, d, &cur_sent.unk);
+      getline(in, line);
+      if (read_morphology_features) {
+        ReadMorphologyFeatures(line, &cur_sent.morphology_features);
+        assert(cur_sent.morphology_features.size() == cur_sent.raw.size());
+      }
     } else { // at test time, we ignore the raw strings and just use the "UNKified" versions
       ReadSentenceView(line, pd, &cur_sent.pos);
       getline(in, line);
@@ -90,6 +158,11 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
       getline(in, line);
       ReadSentenceView(line, d, &cur_sent.unk);
       cur_sent.raw = cur_sent.unk;
+      getline(in, line);
+      if (read_morphology_features) {
+        ReadMorphologyFeatures(line, &cur_sent.morphology_features);
+        assert(cur_sent.morphology_features.size() == cur_sent.raw.size());
+      }
     }
     for (auto word : cur_sent.raw) raw_term_counts[word]++;
     lc += 3;
