@@ -18,7 +18,7 @@ pair<Metrics, vector<MatchCounts>> metrics_from_evalb(const string& ref_fname, c
     if (spmrl) {
       cmd = "evalb_spmrl2013/evalb_spmrl -p evalb_spmrl2013/spmrl.prm " + ref_fname + " " + hyp_fname + " > " + evalbout_fname;
     } else {
-      cmd = "EVALB/evalb -p EVALB/COLLINS.prm " + ref_fname + " " + hyp_fname + " > " + evalbout_fname;
+      cmd = "EVALB/evalb -p EVALB/COLLINS_ch.prm " + ref_fname + " " + hyp_fname + " > " + evalbout_fname;
     }
     system(cmd.c_str());
 
