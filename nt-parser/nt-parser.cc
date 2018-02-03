@@ -85,6 +85,7 @@ bool USE_POS = false;  // in discriminative parser, incorporate POS information 
 bool USE_MORPH_FEATURES = false;
 bool USE_PRETRAINED = false;  // in discriminative parser, use pretrained word embeddings (not updated)
 bool NO_STACK = false;
+bool NO_ACTION_HISTORY = false;
 unsigned SILVER_BLOCKS_PER_GOLD = 10;
 
 bool UNNORMALIZED = false;
@@ -133,6 +134,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("beam_within_word", "greedy decode within word")
           ("beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
           ("no_stack,S", "Don't encode the stack")
+          ("no_action_history", "Don't encode the action history")
           ("text_format", "serialize models in text")
           ("factored_ensemble_beam", "do beam search in each model in the ensemble separately, then take the union and rescore with the entire ensemble")
           ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
@@ -800,10 +802,13 @@ struct ParserBuilder : public AbstractParser {
       p_stack_guard(model->add_parameters({LSTM_INPUT_DIM}, "stack_guard")),
 
       p_cW(model->add_parameters({LSTM_INPUT_DIM, LSTM_INPUT_DIM * 2}, "cW")) {
+
     if (IMPLICIT_REDUCE_AFTER_SHIFT) {
       p_ptbias = model->add_parameters({LSTM_INPUT_DIM}, "ptbias"); // preterminal bias (used with IMPLICIT_REDUCE_AFTER_SHIFT)
       p_ptW = model->add_parameters({LSTM_INPUT_DIM, 2*LSTM_INPUT_DIM}, "ptW");    // preterminal W (used with IMPLICIT_REDUCE_AFTER_SHIFT)
     }
+
+
     if (USE_POS) {
       p_pos = model->add_lookup_parameters(POS_SIZE, {POS_DIM});
       p_p2w = model->add_parameters({LSTM_INPUT_DIM, POS_DIM}, "p2w");
@@ -840,24 +845,24 @@ struct ParserBuilder : public AbstractParser {
 
     if (!NO_STACK) stack_lstm.new_graph(*hg);
     buffer_lstm->new_graph(*hg);
-    action_lstm.new_graph(*hg);
+    if (!NO_ACTION_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
 
     if (!NO_STACK) stack_lstm.start_new_sequence();
     buffer_lstm->start_new_sequence();
-    action_lstm.start_new_sequence();
+    if (!NO_ACTION_HISTORY) action_lstm.start_new_sequence();
 
     if (apply_dropout) {
       if (!NO_STACK) stack_lstm.set_dropout(DROPOUT);
       buffer_lstm->set_dropout(DROPOUT);
-      action_lstm.set_dropout(DROPOUT);
+      if (!NO_ACTION_HISTORY) action_lstm.set_dropout(DROPOUT);
       const_lstm_fwd.set_dropout(DROPOUT);
       const_lstm_rev.set_dropout(DROPOUT);
     } else {
       if (!NO_STACK) stack_lstm.disable_dropout();
       buffer_lstm->disable_dropout();
-      action_lstm.disable_dropout();
+      if (!NO_ACTION_HISTORY) action_lstm.disable_dropout();
       const_lstm_fwd.disable_dropout();
       const_lstm_rev.disable_dropout();
     }
@@ -886,7 +891,7 @@ struct ParserBuilder : public AbstractParser {
       morph_W[pair.first] = parameter(*hg, pair.second);
     }
 
-    action_lstm.add_input(action_start);
+    if (!NO_ACTION_HISTORY) action_lstm.add_input(action_start);
 
     vector<Expression> buffer(sent.size() + 1);  // variables representing word embeddings
     // precompute buffer representation from left to right
@@ -1319,16 +1324,27 @@ struct ParserState : public AbstractParserState {
 
   Expression get_action_log_probs(const vector<unsigned>& valid_actions) const override {
     Expression stack_summary = NO_STACK ? Expression() : parser->stack_lstm.get_h(stack_state).back();
-    Expression action_summary = parser->action_lstm.get_h(action_state).back();
+    Expression action_summary = NO_ACTION_HISTORY ? Expression() : parser->action_lstm.get_h(action_state).back();
     Expression buffer_summary = parser->buffer_lstm->get_h(buffer_state).back();
     if (parser->apply_dropout) { // TODO: don't the outputs of the LSTMs already have dropout applied?
       if (!NO_STACK) stack_summary = dropout(stack_summary, DROPOUT);
-      action_summary = dropout(action_summary, DROPOUT);
+      if (!NO_ACTION_HISTORY) action_summary = dropout(action_summary, DROPOUT);
       buffer_summary = dropout(buffer_summary, DROPOUT);
     }
-    Expression p_t = NO_STACK ?
-                     affine_transform({parser->pbias, parser->B, buffer_summary, parser->A, action_summary}) :
-                     affine_transform({parser->pbias, parser->S, stack_summary, parser->B, buffer_summary, parser->A, action_summary});
+
+    vector<Expression> elements{parser->pbias};
+    if (!NO_STACK) {
+      elements.push_back(parser->S);
+      elements.push_back(stack_summary);
+    }
+    elements.push_back(parser->B);
+    elements.push_back(buffer_summary);
+    if (!NO_ACTION_HISTORY) {
+      elements.push_back(parser->A);
+      elements.push_back(action_summary);
+    }
+
+    Expression p_t  = affine_transform(elements);
     Expression nlp_t = rectify(p_t);
     Expression r_t = affine_transform({parser->abias, parser->p2a, nlp_t});
     if (UNNORMALIZED)
@@ -1357,8 +1373,10 @@ struct ParserState : public AbstractParserState {
 
     // add current action to action LSTM
     Expression actione = lookup(*parser->hg, parser->p_a, action);
-    parser->action_lstm.add_input(action_state, actione);
-    new_action_state = parser->action_lstm.state();
+    if (!NO_ACTION_HISTORY) {
+      parser->action_lstm.add_input(action_state, actione);
+      new_action_state = parser->action_lstm.state();
+    }
 
     if (ac =='S' && ac2=='H') {  // SHIFT
       assert(buffer.size() > 1); // dummy symbol means > 1 (not >= 1)
@@ -1791,6 +1809,7 @@ int main(int argc, char** argv) {
   MORPH_DIM = conf["morph_dim"].as<unsigned>();
   USE_PRETRAINED = conf.count("words");
   NO_STACK = conf.count("no_stack");
+  NO_ACTION_HISTORY = conf.count("no_action_history");
 
   MAX_CONS_NT = conf["max_cons_nt"].as<unsigned>();
 
@@ -1865,6 +1884,7 @@ int main(int argc, char** argv) {
      << '_' << ACTION_DIM
      << '_' << LSTM_INPUT_DIM
      << (NO_STACK ? "_no-stack" : "")
+     << (NO_ACTION_HISTORY ? "_no-action-history" : "")
      << "-seed" << random_seed
      << "-pid" << getpid() << ".params";
 
@@ -1908,6 +1928,7 @@ int main(int argc, char** argv) {
   posdict.Freeze();
 
   morphology_classes.Freeze();
+  assert(morphology_dicts.size() == morphology_classes.size());
   for (auto& pair: morphology_dicts) {
     pair.second.Freeze();
     pair.second.SetUnk(UNK);
