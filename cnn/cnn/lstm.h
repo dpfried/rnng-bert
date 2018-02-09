@@ -60,6 +60,8 @@ struct LSTMBuilder : public RNNBuilder {
   std::vector<Expression> h0;
   std::vector<Expression> c0;
   unsigned layers;
+  unsigned input_dim;
+  unsigned hidden_dim;
   float dropout_rate;
 };
 

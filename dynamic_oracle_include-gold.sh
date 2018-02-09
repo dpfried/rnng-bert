@@ -11,7 +11,7 @@ fi
 
 out_dir="dynamic_oracle"
 mkdir -p $out_dir 2> /dev/null
-output_prefix="${out_dir}/${dynet_seed}_method=${method}_dpe=${dpe}_candidates=${candidates}"
+output_prefix="${out_dir}/${dynet_seed}_method=${method}_dpe=${dpe}_candidates=${candidates}_include-gold"
 
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
@@ -31,5 +31,6 @@ build/nt-parser/nt-parser \
     --dynamic_exploration $method \
     --dynamic_exploration_candidates $candidates \
     --dynamic_exploration_probability $dpe \
+    --dynamic_exploration_include_gold \
     > ${output_prefix}.stdout \
     2> ${output_prefix}.stderr

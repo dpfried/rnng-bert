@@ -150,6 +150,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("model_output_file", po::value<string>())
           ("optimizer", po::value<string>()->default_value("sgd"))
           ("max_margin_training", "min risk training (default F1)")
+          ("dynamic_exploration_include_gold", "use the true parse in the gradient updates")
+          ("dynamic_exploration_candidates", po::value<unsigned>()->default_value(1))
           ("dynamic_exploration", po::value<string>(), "if passed, should be greedy | sample")
           ("dynamic_exploration_probability", po::value<float>()->default_value(1.0), "with this probability, use the model probabilities to explore (with method given by --dynamic_exploration)")
           ("unnormalized", "do not locally normalize score distributions")
@@ -1873,6 +1875,13 @@ int main(int argc, char** argv) {
     exploration_type = exploration_types.at(exp_type);
   }
 
+  const unsigned exploration_candidates = conf["dynamic_exploration_candidates"].as<unsigned>();
+  assert(exploration_candidates > 0);
+  const bool exploration_include_gold = conf.count("dynamic_exploration_include_gold") > 0;
+  if (exploration_include_gold) {
+    assert(exploration_candidates > 1);
+  }
+
   ostringstream os;
   os << "ntparse"
      << (USE_POS ? "_pos" : "")
@@ -2404,7 +2413,7 @@ int main(int argc, char** argv) {
         }
           */
         else { // not min_risk
-          if (exploration_type == DynamicOracle::ExplorationType::none) {
+          if (exploration_type == DynamicOracle::ExplorationType::none || exploration_include_gold) {
             auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
                                                                   sentence,
                                                                   actions,
@@ -2417,26 +2426,30 @@ int main(int argc, char** argv) {
                                                                   max_margin_training // loss_augmented
             );
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
-            loss = result_and_nlp.second;
+            loss = loss + result_and_nlp.second * input(hg, 1.0 / exploration_candidates);
           } else {
             DynamicOracle dynamic_oracle(sentence, actions);
-            auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
-                                                                  sentence,
-                                                                  vector<int>(),
-                                                                  right,
-                                                                  false, // is_evaluation
-                                                                  exploration_type == DynamicOracle::ExplorationType::sample, //sample
-                                                                  label_smoothing,
-                                                                  label_smoothing_epsilon,
-                                                                  &dynamic_oracle,
-                                                                  max_margin_training // loss_augmented
-            );
-            if (DYNAMIC_EXPLORATION_PROBABILITY == 0.0f) {
-              assert(vector<int>(result_and_nlp.first.begin(),
-                                 result_and_nlp.first.end()) == actions);
+            unsigned candidates_to_generate = exploration_include_gold ? exploration_candidates - 1 : exploration_candidates;
+            for (unsigned i = 0; i < candidates_to_generate; i++) {
+              auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
+                                                                    sentence,
+                                                                    vector<int>(),
+                                                                    right,
+                                                                    false, // is_evaluation
+                                                                    exploration_type ==
+                                                                    DynamicOracle::ExplorationType::sample, //sample
+                                                                    label_smoothing,
+                                                                    label_smoothing_epsilon,
+                                                                    &dynamic_oracle,
+                                                                    max_margin_training // loss_augmented
+              );
+              if (DYNAMIC_EXPLORATION_PROBABILITY == 0.0f) {
+                assert(vector<int>(result_and_nlp.first.begin(),
+                                   result_and_nlp.first.end()) == actions);
+              }
+              get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
+              loss = loss + result_and_nlp.second * input(hg, 1.0 / exploration_candidates);
             }
-            get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
-            loss = result_and_nlp.second;
           }
           //loss_v = as_scalar(result_and_nlp.second.value());
         }
