@@ -2413,7 +2413,12 @@ int main(int argc, char** argv) {
         }
           */
         else { // not min_risk
-          if (exploration_type == DynamicOracle::ExplorationType::none || exploration_include_gold) {
+          bool run_gold = exploration_type == DynamicOracle::ExplorationType::none || exploration_include_gold;
+          bool run_explore = exploration_type != DynamicOracle::ExplorationType::none;
+          if (!run_explore) {
+            assert(exploration_candidates == 1);
+          }
+          if (run_gold) {
             auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
                                                                   sentence,
                                                                   actions,
@@ -2427,7 +2432,8 @@ int main(int argc, char** argv) {
             );
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
             loss = loss + result_and_nlp.second * input(hg, 1.0 / exploration_candidates);
-          } else {
+          }
+          if (run_explore) {
             DynamicOracle dynamic_oracle(sentence, actions);
             unsigned candidates_to_generate = exploration_include_gold ? exploration_candidates - 1 : exploration_candidates;
             for (unsigned i = 0; i < candidates_to_generate; i++) {
