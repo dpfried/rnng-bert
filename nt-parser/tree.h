@@ -110,10 +110,10 @@ public:
       unsigned right = right_span();
 
       if (remove_punct) {
-          while (left < right_span() && PUNCTUATION.find((*sentence)[left]) != PUNCTUATION.end()) {
+          while (left <= right_span() && left < sentence->size() && PUNCTUATION.find((*sentence)[left]) != PUNCTUATION.end()) {
               left++;
           }
-          while (right > left_span() && PUNCTUATION.find((*sentence)[right]) != PUNCTUATION.end()) {
+          while (right >= left_span() && right > 0 && PUNCTUATION.find((*sentence)[right]) != PUNCTUATION.end()) {
               right--;
           }
       }
