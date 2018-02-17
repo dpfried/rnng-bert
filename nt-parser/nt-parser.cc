@@ -1009,7 +1009,9 @@ struct EnsembledParser : public AbstractParser {
       for (vector<unsigned> candidate : all_candidates) {
         ComputationGraph hg;
         double right;
-        auto candidate_and_ensemble_nlp = abstract_log_prob_parser(&hg, sent, vector<int>(candidate.begin(), candidate.end()), &right, true, false);
+        auto candidate_and_ensemble_nlp = abstract_log_prob_parser(
+                &hg, sent, vector<int>(candidate.begin(), candidate.end()), &right, true, false
+        );
         candidates_and_nlps.push_back(candidate_and_ensemble_nlp);
       }
       sort(candidates_and_nlps.begin(), candidates_and_nlps.end(), [](const std::pair<vector<unsigned>, Expression>& t1, const std::pair<vector<unsigned>, Expression>& t2) {
@@ -2046,8 +2048,9 @@ int main(int argc, char** argv) {
         }
         return beam_results[0];
       } else {
-        return parser.abstract_log_prob_parser(&hg, sentence, vector<int>(), &right, true,
-                                               false, false, 0.0, nullptr, false, streaming_entropy, nullptr);
+        return parser.abstract_log_prob_parser(
+                &hg, sentence, vector<int>(), &right, true, false, false,
+                0.0, nullptr, false, false, streaming_entropy, nullptr);
       }
   };
 
