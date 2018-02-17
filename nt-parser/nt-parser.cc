@@ -149,7 +149,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("label_smoothing_epsilon", po::value<float>()->default_value(0.0f), "use epsilon interpolation with the uniform distribution in label smoothing")
           ("model_output_file", po::value<string>())
           ("optimizer", po::value<string>()->default_value("sgd"))
-          ("max_margin_training", "min risk training (default F1)")
+          ("max_margin_training", "")
+          ("softmax_margin_training", "")
           ("dynamic_exploration_include_gold", "use the true parse in the gradient updates")
           ("dynamic_exploration_candidates", po::value<unsigned>()->default_value(1))
           ("dynamic_exploration", po::value<string>(), "if passed, should be greedy | sample")
@@ -332,6 +333,7 @@ struct AbstractParser {
       float label_smoothing_epsilon = 0.0,
       DynamicOracle* dynamic_oracle = nullptr,
       bool loss_augmented = false,
+      bool softmax_margin = false,
       StreamingStatistics* streaming_entropy = nullptr,
       StreamingStatistics* streaming_gold_prob = nullptr
   ) {
@@ -344,7 +346,7 @@ struct AbstractParser {
       assert(build_training_graph);
     }
 
-    if (loss_augmented) {
+    if (loss_augmented || softmax_margin) {
       assert(build_training_graph);
     }
 
@@ -359,8 +361,6 @@ struct AbstractParser {
       vector<unsigned> valid_actions = state->get_valid_actions();
       assert(!valid_actions.empty());
 
-      Expression adiste = state->get_action_log_probs(valid_actions);
-
       unsigned correct_action;
       if (build_training_graph) {
         if (!correct_actions.empty()) {
@@ -372,19 +372,27 @@ struct AbstractParser {
         } else {
           correct_action = dynamic_oracle->oracle_action(*state);
         }
+      }
+      Expression adiste; // used for exploration
+      Expression adiste_augmented; // used for loss
+
+      if (loss_augmented || softmax_margin) {
+        vector<float> aug(possible_actions.size(), 1.0f);
+        aug[correct_action] = 0.0f;
+        std::tie(adiste, adiste_augmented) = state->get_action_log_probs(valid_actions, &aug);
+        //adiste = adiste + input(*hg, Dim({aug.size()}), aug);
+      } else {
+        std::tie(adiste, adiste_augmented) = state->get_action_log_probs(valid_actions, nullptr);
+      }
+
+      vector<float> adist = as_vector(adiste.value());
+
+      if (build_training_graph) {
         if (streaming_gold_prob) {
           Expression log_gold_prob = pick(adiste, correct_action);
           streaming_gold_prob->standardize_and_update(exp(as_scalar(log_gold_prob.value())));
         }
       }
-
-      if (loss_augmented) {
-        vector<float> aug(possible_actions.size(), 1.0f);
-        aug[correct_action] = 0.0f;
-        adiste = adiste + input(*hg, Dim({aug.size()}), aug);
-      }
-
-      vector<float> adist = as_vector(adiste.value());
 
       if (streaming_entropy) {
         double entropy = 0;
@@ -432,7 +440,7 @@ struct AbstractParser {
         if (model_action == correct_action) {
           (*right)++;
         } else {
-          scores.push_back(pick(adiste, correct_action) - pick(adiste, model_action));
+          scores.push_back(pick(adiste_augmented, correct_action) - pick(adiste_augmented, model_action));
         }
 
         if (dynamic_oracle && rand01() < DYNAMIC_EXPLORATION_PROBABILITY) {
@@ -444,14 +452,14 @@ struct AbstractParser {
         if (model_action == correct_action) { (*right)++; }
         if (label_smoothing) {
           assert(!UNNORMALIZED);
-          Expression cross_entropy = pick(adiste, correct_action) * input(*hg, (2 - label_smoothing_epsilon));
+          Expression cross_entropy = pick(adiste_augmented, correct_action) * input(*hg, (1 - label_smoothing_epsilon));
           // add uniform cross entropy
           for (unsigned a: valid_actions) {
-            cross_entropy = cross_entropy + pick(adiste, a) * input(*hg, label_smoothing_epsilon / valid_actions.size());
+            cross_entropy = cross_entropy + pick(adiste_augmented, a) * input(*hg, label_smoothing_epsilon / valid_actions.size());
           }
           scores.push_back(cross_entropy);
         } else {
-          scores.push_back(pick(adiste, correct_action));
+          scores.push_back(pick(adiste_augmented, correct_action));
         }
         if (dynamic_oracle && rand01() < DYNAMIC_EXPLORATION_PROBABILITY) {
           action_taken = model_action;
@@ -459,7 +467,8 @@ struct AbstractParser {
           action_taken = correct_action;
         }
       } else {
-        scores.push_back(pick(adiste, model_action));
+        // adiste should be the same as adiste_augmented in this case
+        scores.push_back(pick(adiste_augmented, model_action));
         action_taken = model_action;
       }
 
@@ -522,7 +531,7 @@ struct AbstractParser {
 
         std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
         vector<unsigned> valid_actions = current_parser_state->get_valid_actions();
-        Expression adiste = current_parser_state->get_action_log_probs(valid_actions);
+        Expression adiste = current_parser_state->get_action_log_probs(valid_actions, nullptr).first;
         vector<float> adist = as_vector(hg->incremental_forward());
 
         for (unsigned action: valid_actions) {
@@ -627,7 +636,7 @@ struct AbstractParser {
 
           std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
           vector<unsigned> valid_actions = current_parser_state->get_valid_actions();
-          Expression adiste = current_parser_state->get_action_log_probs(valid_actions);
+          Expression adiste = current_parser_state->get_action_log_probs(valid_actions, nullptr).first;
           vector<float> adist = as_vector(hg->incremental_forward());
 
           for (unsigned action: valid_actions) {
@@ -1093,7 +1102,7 @@ struct SymbolicParserState: public AbstractParserState {
     return valid_actions;
   }
 
-  Expression get_action_log_probs(const vector<unsigned>& valid_actions) const override {
+  std::pair<Expression, Expression> get_action_log_probs(const vector<unsigned>& valid_actions, vector<float>* augmentation) const override {
     throw std::runtime_error("get_action_log_probs not implemented for SymbolicParserState");
   }
 
@@ -1324,7 +1333,7 @@ struct ParserState : public AbstractParserState {
     return symbolic_parser_state->get_valid_actions();
   }
 
-  Expression get_action_log_probs(const vector<unsigned>& valid_actions) const override {
+  std::pair<Expression, Expression> get_action_log_probs(const vector<unsigned>& valid_actions, vector<float>* augmentation) const override {
     Expression stack_summary = NO_STACK ? Expression() : parser->stack_lstm.get_h(stack_state).back();
     Expression action_summary = NO_ACTION_HISTORY ? Expression() : parser->action_lstm.get_h(action_state).back();
     Expression buffer_summary = parser->buffer_lstm->get_h(buffer_state).back();
@@ -1349,11 +1358,17 @@ struct ParserState : public AbstractParserState {
     Expression p_t  = affine_transform(elements);
     Expression nlp_t = rectify(p_t);
     Expression r_t = affine_transform({parser->abias, parser->p2a, nlp_t});
+    Expression r_t_aug;
+    if (augmentation) {
+      r_t_aug = r_t + input(*r_t.pg, Dim({augmentation->size()}), *augmentation);
+    } else {
+      r_t_aug = r_t;
+    }
     if (UNNORMALIZED)
-      return r_t;
+      return std::pair<Expression, Expression>(r_t, r_t_aug);
     else
     //  return log_softmax(r_t, valid_actions);
-      return log_softmax_constrained(r_t, valid_actions);
+      return std::pair<Expression,Expression>(log_softmax_constrained(r_t, valid_actions), log_softmax_constrained(r_t_aug, valid_actions));
   }
 
   std::shared_ptr<AbstractParserState> perform_action(unsigned action) const override {
@@ -1559,23 +1574,32 @@ struct EnsembledParserState : public AbstractParserState {
     return states.front()->get_unary();
   }
 
-  Expression get_action_log_probs(const vector<unsigned>& valid_actions) const override {
+  std::pair<Expression, Expression> get_action_log_probs(const vector<unsigned>& valid_actions, vector<float>* augmentation) const override {
     vector<Expression> all_log_probs;
-    for (const std::shared_ptr<AbstractParserState>& state : states)
-      all_log_probs.push_back(state->get_action_log_probs(valid_actions));
+    vector<Expression> all_log_probs_aug;
+    for (const std::shared_ptr<AbstractParserState>& state : states) {
+      Expression adiste;
+      Expression adiste_aug;
+      std::tie(adiste, adiste_aug) = state->get_action_log_probs(valid_actions, augmentation);
+      all_log_probs.push_back(adiste);
+      all_log_probs_aug.push_back(adiste_aug);
+    }
     Expression combined_log_probs;
+    Expression combined_log_probs_aug;
     switch (parser->combine_type) {
       case EnsembledParser::CombineType::sum: {
         // combined_log_probs = logsumexp(all_log_probs); // numerically unstable
         combined_log_probs = logsumexp_stable(all_log_probs);
+        combined_log_probs_aug = logsumexp_stable(all_log_probs_aug);
         break;
       }
       case EnsembledParser::CombineType::product:
         combined_log_probs = sum(all_log_probs);
+        combined_log_probs_aug = sum(all_log_probs_aug);
         break;
     }
     //return log_softmax(combined_log_probs, valid_actions);
-    return log_softmax_constrained(combined_log_probs, valid_actions);
+    return pair<Expression, Expression>(log_softmax_constrained(combined_log_probs, valid_actions), log_softmax_constrained(combined_log_probs_aug, valid_actions));
   }
 
   std::shared_ptr<AbstractParserState> perform_action(unsigned action) const override {
@@ -2029,7 +2053,7 @@ int main(int argc, char** argv) {
 
   auto get_neg_log_likelihood = [&](AbstractParser& parser, const parser::Sentence& sentence, const vector<int>& actions, double* right, StreamingStatistics* streaming_gold_prob = nullptr) {
     ComputationGraph hg;
-    parser.abstract_log_prob_parser(&hg, sentence, actions, right, true, false, false, 0.0, nullptr, false, nullptr, streaming_gold_prob);
+    parser.abstract_log_prob_parser(&hg, sentence, actions, right, true, false, false, 0.0, nullptr, false, false, nullptr, streaming_gold_prob);
     return as_scalar(hg.incremental_forward());
   };
 
@@ -2194,6 +2218,7 @@ int main(int argc, char** argv) {
 
     bool min_risk_training = conf.count("min_risk_training") > 0;
     bool max_margin_training = conf.count("max_margin_training") > 0;
+    bool softmax_margin_training = conf.count("softmax_margin_training") > 0;
     string min_risk_method = conf["min_risk_method"].as<string>();
     unsigned min_risk_candidates = conf["min_risk_candidates"].as<unsigned>();
     bool min_risk_include_gold = conf.count("min_risk_include_gold") > 0;
@@ -2216,6 +2241,11 @@ int main(int argc, char** argv) {
       assert(UNNORMALIZED);
       assert(!min_risk_training);
       assert(exploration_type == DynamicOracle::ExplorationType::none || exploration_type == DynamicOracle::ExplorationType::greedy);
+    }
+
+    if (softmax_margin_training) {
+      assert(!min_risk_training);
+      assert(!UNNORMALIZED);
     }
 
     //double tot_lad_score = 0.0;
@@ -2428,7 +2458,8 @@ int main(int argc, char** argv) {
                                                                   label_smoothing,
                                                                   label_smoothing_epsilon,
                                                                   nullptr, // dynamic_oracle
-                                                                  max_margin_training // loss_augmented
+                                                                  max_margin_training, // loss_augmented
+                                                                  softmax_margin_training // softmax margin
             );
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
             loss = loss + result_and_nlp.second * input(hg, 1.0 / exploration_candidates);
@@ -2447,7 +2478,8 @@ int main(int argc, char** argv) {
                                                                     label_smoothing,
                                                                     label_smoothing_epsilon,
                                                                     &dynamic_oracle,
-                                                                    max_margin_training // loss_augmented
+                                                                    max_margin_training, // loss_augmented
+                                                                    softmax_margin_training
               );
               if (DYNAMIC_EXPLORATION_PROBABILITY == 0.0f) {
                 assert(vector<int>(result_and_nlp.first.begin(),

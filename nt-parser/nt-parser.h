@@ -11,7 +11,7 @@
 struct AbstractParserState {
   virtual bool is_finished() const = 0;
   virtual vector<unsigned> get_valid_actions() const = 0;
-  virtual Expression get_action_log_probs(const vector<unsigned>& valid_actions) const = 0;
+  virtual pair<Expression, Expression> get_action_log_probs(const vector<unsigned>& valid_actions, vector<float>* augmentation) const = 0;
   virtual std::shared_ptr<AbstractParserState> perform_action(unsigned action) const = 0;
   virtual void finish_sentence() const = 0;
   virtual bool word_completed() const = 0;
