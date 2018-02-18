@@ -30,6 +30,7 @@ def run_decode(model, dim, language, corpus, beam_size, inorder):
     else:
         assert corpus == "test"
         eval_corpus = test
+    latest_model_in_epoch = re.sub(r"(best-epoch-\d+_it-).*\.in", r"\1*.in", model)
     pretrained_dim, pretrained_file = embeddings_by_language[language]
     command = "source activate.sh; export MKL_NUM_THREADS=4; build/nt-parser/nt-parser \
 --cnn-mem 2000,0,500 \
@@ -45,7 +46,7 @@ def run_decode(model, dim, language, corpus, beam_size, inorder):
 --hidden_dim {} \
 --beam_size {} \
 -D 0.2".format(
-                model, train, eval_corpus, eval_corpus, pretrained_dim, pretrained_file, dim, dim, beam_size
+                latest_model_in_epoch, train, eval_corpus, eval_corpus, pretrained_dim, pretrained_file, dim, dim, beam_size
             )
     if inorder:
         command += " --inorder"
@@ -107,7 +108,16 @@ if __name__ == "__main__":
         epoch = max(ep for ep in model_dict if ep <= epoch)
         return model_dict[epoch]
 
-    static_models = models_by_epoch(os.path.join(root_dir, "expts_jan-18", "*dim=%s" % args.dim))
+    seed = 1
+    if args.language == 'english' and not args.inorder and not args.comparison:
+        if args.dim == 128:
+            seed = 8
+        elif args.dim == 256:
+            seed = 2
+        else:
+            raise ValueError("bad dim " + str(args.dim))
+
+    static_models = models_by_epoch(os.path.join(root_dir, "expts_jan-18", "*_%s_lstm_input_dim=%s" % (seed, args.dim)))
     assert static_models
 
     static_fastest_epoch = max(static_models.keys())
@@ -118,9 +128,10 @@ if __name__ == "__main__":
     reinforce_fastest_epoch = 0
     reinforce_slowest = None
     reinforce_slowest_epoch = 1e6
-    for candidates in [2, 5, 10] if (args.dim == 128 and not args.inorder) else [10]:
+    # TODO: added args.comparison check below becuse of english seed mismatch, take this out
+    for candidates in [2, 5, 10] if (args.dim == 128 and not args.inorder and args.comparison) else [10]:
         models = models_by_epoch(
-            os.path.join(root_dir, "sequence_level", "1_method=reinforce_candidates=%s_opt=sgd_include-gold_dim=%s" % (candidates, args.dim))
+            os.path.join(root_dir, "sequence_level", "%s_method=reinforce_candidates=%s_opt=sgd_include-gold_dim=%s" % (seed, candidates, args.dim))
         )
         assert models
         reinforce_models[candidates] = models
