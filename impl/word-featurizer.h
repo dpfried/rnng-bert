@@ -15,6 +15,9 @@ private:
   TF_Operation *word_features, *word_features_grad;
   TF_Operation *init_op, *train_op, *save_op, *restore_op;
   TF_Output checkpoint_name;
+  TF_Output new_learning_rate = {nullptr, 0};
+  TF_Output new_warmup_steps = {nullptr, 0};
+  TF_Operation *set_learning_rate_op, *set_warmup_steps_op;
 
   const int num_feeds_all = 4;
   const int num_fetches_all = 1;

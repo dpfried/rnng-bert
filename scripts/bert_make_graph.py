@@ -94,27 +94,21 @@ def create_optimizer(ys, grad_ys, init_lr=5e-4, num_warmup_steps=160):
     """Creates an optimizer training op."""
     global_step = tf.train.get_or_create_global_step()
 
-    # TODO(nikita): make ops for setting the optimizer hyperparameters
-    if False:
-        with sess.graph.as_default() as g, g.name_scope(None):
-            learning_rate_var = learning_rate = tf.get_variable(
-                "learning_rate",
-                shape=[],
-                dtype=tf.float32,
-                initializer=tf.constant_initializer(init_lr),
-                trainable=False,
-                collections=[tf.GraphKeys.GLOBAL_VARIABLES])
-            warmup_steps_var = warmup_steps_int = tf.get_variable(
-                "warmup_steps",
-                shape=[],
-                dtype=tf.int32,
-                initializer=tf.constant_initializer(num_warmup_steps, dtype=tf.int32),
-                trainable=False,
-                collections=[tf.GraphKeys.GLOBAL_VARIABLES])
-    else:
-        learning_rate = tf.constant(value=init_lr, shape=[], dtype=tf.float32)
-        warmup_steps_int = tf.constant(value=num_warmup_steps, shape=[], dtype=tf.int32)
-        learning_rate_var = warmup_steps_var = None
+    with sess.graph.as_default() as g, g.name_scope(None):
+        learning_rate_var = learning_rate = tf.get_variable(
+            "learning_rate",
+            shape=(),
+            dtype=tf.float32,
+            initializer=tf.constant_initializer(init_lr),
+            trainable=False,
+            collections=[tf.GraphKeys.GLOBAL_VARIABLES])
+        warmup_steps_var = warmup_steps_int = tf.get_variable(
+            "warmup_steps",
+            shape=(),
+            dtype=tf.int32,
+            initializer=tf.constant_initializer(num_warmup_steps, dtype=tf.int32),
+            trainable=False,
+            collections=[tf.GraphKeys.GLOBAL_VARIABLES])
 
     # Implements linear warmup. I.e., if global_step < num_warmup_steps, the
     # learning rate will be `global_step/num_warmup_steps * init_lr`.
@@ -162,11 +156,19 @@ def create_optimizer(ys, grad_ys, init_lr=5e-4, num_warmup_steps=160):
 
 # %%
 
-train_op, learning_rate, warmup_steps = create_optimizer([word_features], [word_features_grad])
+train_op, learning_rate_var, warmup_steps_var = create_optimizer([word_features], [word_features_grad])
 
 # %%
 
 init_op = tf.variables_initializer(tf.global_variables(), name='init')
+
+# %%
+
+new_learning_rate = tf.placeholder(shape=(), dtype=tf.float32, name='new_learning_rate')
+new_warmup_steps = tf.placeholder(shape=(), dtype=tf.int32, name='new_warmup_steps')
+
+set_learning_rate_op = tf.assign(learning_rate_var, new_learning_rate, name='set_learning_rate')
+set_warmup_steps_op = tf.assign(warmup_steps_var, new_warmup_steps, name='set_warmup_steps')
 
 # %%
 
@@ -179,6 +181,10 @@ is_training: {is_training.name}
 word_features: {word_features.name}
 word_features_grad: {word_features_grad.name}
 init_op: {init_op.name}
+new_learning_rate: {new_learning_rate.name}
+set_learning_rate_op: {set_learning_rate_op.name}
+new_warmup_steps: {new_warmup_steps.name}
+set_warmup_steps_op: {set_warmup_steps_op.name}
 train_op: {train_op.name}
 save_op: {saver.saver_def.save_tensor_name}
 restore_op: {saver.saver_def.restore_op_name}
