@@ -25,6 +25,46 @@
 
 using namespace std;
 
+// modified from GPUDeviceName in https://github.com/tensorflow/tensorflow/blob/master/tensorflow/c/c_api_test.cc
+vector<string> get_device_names(TF_Session* session) {
+  std::unique_ptr<TF_Status, decltype(&TF_DeleteStatus)> status(
+      TF_NewStatus(), TF_DeleteStatus);
+  TF_Status* s = status.get();
+  std::unique_ptr<TF_DeviceList, decltype(&TF_DeleteDeviceList)> list(
+      TF_SessionListDevices(session, s), TF_DeleteDeviceList);
+  TF_DeviceList* device_list = list.get();
+
+  vector<string> device_names;
+  const int num_devices = TF_DeviceListCount(device_list);
+  for (int i = 0; i < num_devices; ++i) {
+    const char* device_name = TF_DeviceListName(device_list, i, s);
+    const char* device_type = TF_DeviceListType(device_list, i, s);
+    device_names.push_back(string(device_name));
+  }
+  // No GPU device found.
+  return device_names;
+}
+
+vector<string> get_device_names() {
+  std::unique_ptr<TF_Status, decltype(&TF_DeleteStatus)> status(
+      TF_NewStatus(), TF_DeleteStatus);
+  TF_Status* s = status.get();
+  std::unique_ptr<TF_Graph, decltype(&TF_DeleteGraph)> graph(TF_NewGraph(),
+                                                             TF_DeleteGraph);
+
+  TF_SessionOptions* opts = TF_NewSessionOptions();
+  TF_Session* sess = TF_NewSession(graph.get(), opts, s);
+  TF_DeleteSessionOptions(opts);
+
+  vector<string> device_names = get_device_names(sess);
+  TF_DeleteSession(sess, s);
+  return device_names;
+}
+
 int main(int argc, char** argv) {
     cout << "Hello from TensorFlow C library version " << TF_Version() << endl;
+    cout << "available devices: " << endl;
+    for (auto &d : get_device_names()) {
+        cout << d << endl;
+    }
 }
