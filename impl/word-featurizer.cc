@@ -92,6 +92,8 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     // ------
     input_ids = get_operation(graph, "input_ids");
     word_end_mask = get_operation(graph, "word_end_mask");
+    is_training = get_operation(graph, "is_training");
+
     word_features = get_operation(graph, "word_features");
     word_features_grad = get_operation(graph, "word_features_grad");
 
@@ -104,10 +106,12 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
 
     feeds_all[0].oper = input_ids;
     feeds_all[1].oper = word_end_mask;
-    feeds_all[2].oper = word_features_grad;
+    feeds_all[2].oper = is_training;
+    feeds_all[3].oper = word_features_grad;
     fetches_all[0].oper = word_features;
     feeds_fw[0].oper = input_ids;
     feeds_fw[1].oper = word_end_mask;
+    feeds_fw[2].oper = is_training;
     fetches_fw[0].oper = word_features;
     feeds_bw[0].oper = word_features_grad;
 
@@ -184,6 +188,10 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
         assert (handle == nullptr);
     }
 
+    // Assume we need gradients if and only if we're training. The is_training
+    // flag toggles the use dropout within the tensorflow computation graph.
+    bool is_training = (features_grad_out != nullptr);
+
     const std::vector<int64_t> dims = {batch_size, num_subwords};
     std::size_t data_size = sizeof(int32_t);
     for (auto i : dims) {
@@ -198,9 +206,13 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
       dims.data(), static_cast<int>(dims.size()), data_size);
     assert (word_end_mask_tensor != nullptr);
     assert (TF_TensorData(word_end_mask_tensor) != nullptr);
+    TF_Tensor* is_training_tensor = TF_AllocateTensor(TF_BOOL, NULL, 0, sizeof(bool));
+    assert (is_training_tensor != nullptr);
+    assert (TF_TensorData(is_training_tensor) != nullptr);
 
     std::memcpy(TF_TensorData(input_ids_tensor), input_ids_data.data(), std::min(data_size, TF_TensorByteSize(input_ids_tensor)));
     std::memcpy(TF_TensorData(word_end_mask_tensor), word_end_mask_data.data(), std::min(data_size, TF_TensorByteSize(word_end_mask_tensor)));
+    *(static_cast<bool*>(TF_TensorData(is_training_tensor))) = is_training;
 
     TF_SessionPRunSetup(sess,
         feeds_all, num_feeds_all,
@@ -212,6 +224,7 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
 
     feed_values_fw[0] = input_ids_tensor;
     feed_values_fw[1] = word_end_mask_tensor;
+    feed_values_fw[2] = is_training_tensor;
     TF_Tensor* fetch_values_fw[1] = {nullptr};
     TF_SessionPRun(sess, handle,
       feeds_fw, feed_values_fw, num_feeds_fw,

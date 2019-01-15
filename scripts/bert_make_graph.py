@@ -24,6 +24,7 @@ config = bert.modeling.BertConfig.from_json_file(os.path.join(BERT_MODEL_DIR, "b
 
 input_ids = tf.placeholder(shape=(None, None), dtype=tf.int32, name='input_ids')
 word_end_mask = tf.placeholder(shape=(None, None), dtype=tf.int32, name='word_end_mask')
+is_training = tf.placeholder(shape=(), dtype=tf.bool, name='is_training')
 
 # %%
 
@@ -32,10 +33,25 @@ token_type_ids = tf.zeros_like(input_ids)
 
 # %%
 
-#XXX(nikita): have both a training mode and an eval mode
-model = bert.modeling.BertModel(config=config, is_training=False,
-    input_ids=input_ids, input_mask=input_mask, token_type_ids=token_type_ids)
+def dropout_only_if_training(input_tensor, dropout_prob):
+    """
+    A replacement for bert.modeling.dropout that uses is_training to determine
+    whether to perform dropout.
+    """
+    if dropout_prob is None or dropout_prob == 0.0:
+        return input_tensor
 
+    keep_prob = tf.cond(is_training, lambda: 1.0 - dropout_prob, lambda: 1.0)
+    output = tf.nn.dropout(input_tensor, keep_prob)
+    return output
+
+bert.modeling.dropout = dropout_only_if_training
+
+# %%
+
+model = bert.modeling.BertModel(config=config,
+    is_training=True, # We disable dropout ourselves, based on a placeholder
+    input_ids=input_ids, input_mask=input_mask, token_type_ids=token_type_ids)
 
 def get_word_features():
     subword_features = model.get_sequence_output()
@@ -159,6 +175,7 @@ Operation names:
 
 input_ids: {input_ids.name}
 word_end_mask: {word_end_mask.name}
+is_training: {is_training.name}
 word_features: {word_features.name}
 word_features_grad: {word_features_grad.name}
 init_op: {init_op.name}
