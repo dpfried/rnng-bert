@@ -345,7 +345,11 @@ unsigned WordFeaturizer::batch_inputs(const std::vector<std::vector<int32_t>> &b
     auto& this_wem = batch_word_end_mask_data[i];
     word_end_mask_data.insert(word_end_mask_data.end(), this_wem.begin(), this_wem.end());
     word_end_mask_data.resize(max_len * (i+1), 0);
-    max_words = std::max(max_words, std::accumulate(this_wem.begin(), this_wem.end(), 0));
+    int this_words = 0;
+    for (int w : this_wem) {
+        this_words += w;
+    }
+    max_words = std::max(max_words, this_words);
   }
   assert(max_words >= 0);
   return (unsigned) max_words;
