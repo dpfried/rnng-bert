@@ -71,9 +71,6 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
                  float learning_rate,
                  int warmup_steps
                 ) {
-    assert (learning_rate == 5e-4f); // TODO(nikita): add support for other values
-    assert (warmup_steps == 160); // TODO(nikita): add support for other values
-
     TF_Buffer* buffer = ReadBufferFromFile(graph_path);
     if (buffer == nullptr) {
       std::cerr << "WordFeaturizer: failed to read tensorflow graph from path: " << graph_path << std::endl;
@@ -94,6 +91,8 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     // ------
     input_ids = get_operation(graph, "input_ids");
     word_end_mask = get_operation(graph, "word_end_mask");
+    is_training = get_operation(graph, "is_training");
+
     word_features = get_operation(graph, "word_features");
     word_features_grad = get_operation(graph, "word_features_grad");
 
@@ -104,12 +103,19 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     save_op = get_operation(graph, "save/control_dependency");
     checkpoint_name  = {get_operation(graph, "save/Const"), 0};
 
+    new_learning_rate.oper = get_operation(graph, "new_learning_rate");
+    set_learning_rate_op = get_operation(graph, "set_learning_rate");
+    new_warmup_steps.oper = get_operation(graph, "new_warmup_steps");
+    set_warmup_steps_op = get_operation(graph, "set_warmup_steps");
+
     feeds_all[0].oper = input_ids;
     feeds_all[1].oper = word_end_mask;
-    feeds_all[2].oper = word_features_grad;
+    feeds_all[2].oper = is_training;
+    feeds_all[3].oper = word_features_grad;
     fetches_all[0].oper = word_features;
     feeds_fw[0].oper = input_ids;
     feeds_fw[1].oper = word_end_mask;
+    feeds_fw[2].oper = is_training;
     fetches_fw[0].oper = word_features;
     feeds_bw[0].oper = word_features_grad;
 
@@ -134,6 +140,39 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
 
     // ------
     load_checkpoint(init_checkpoint_path);
+
+    // ------
+    TF_Tensor* new_learning_rate_tensor = TF_AllocateTensor(TF_FLOAT, NULL, 0, sizeof(float));
+    assert (new_learning_rate_tensor != nullptr);
+    assert (TF_TensorData(new_learning_rate_tensor) != nullptr);
+    *(static_cast<float*>(TF_TensorData(new_learning_rate_tensor))) = learning_rate;
+    TF_SessionRun(sess,
+                nullptr, // Run options.
+                &new_learning_rate, &new_learning_rate_tensor, 1, // Input tensors, input tensor values, number of inputs.
+                nullptr, nullptr, 0, // Output tensors, output tensor values, number of outputs.
+                &set_learning_rate_op, 1, // Target operations, number of targets.
+                nullptr, // Run metadata.
+                status // Output status.
+                );
+    assert (TF_GetCode(status) == TF_OK);
+    TF_DeleteTensor(new_learning_rate_tensor);
+    std::cout << "WordFeaturizer: set learning rate to " << learning_rate << std::endl;
+
+    TF_Tensor* new_warmup_steps_tensor = TF_AllocateTensor(TF_INT32, NULL, 0, sizeof(int32_t));
+    assert (new_warmup_steps_tensor != nullptr);
+    assert (TF_TensorData(new_warmup_steps_tensor) != nullptr);
+    *(static_cast<float*>(TF_TensorData(new_warmup_steps_tensor))) = warmup_steps;
+    TF_SessionRun(sess,
+                nullptr, // Run options.
+                &new_warmup_steps, &new_warmup_steps_tensor, 1, // Input tensors, input tensor values, number of inputs.
+                nullptr, nullptr, 0, // Output tensors, output tensor values, number of outputs.
+                &set_warmup_steps_op, 1, // Target operations, number of targets.
+                nullptr, // Run metadata.
+                status // Output status.
+                );
+    assert (TF_GetCode(status) == TF_OK);
+    TF_DeleteTensor(new_warmup_steps_tensor);
+    std::cout << "WordFeaturizer: set warmup steps to " << warmup_steps << std::endl;
   }
 
 void WordFeaturizer::load_checkpoint(std::string checkpoint_path) {
@@ -186,6 +225,10 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
         assert (handle == nullptr);
     }
 
+    // Assume we need gradients if and only if we're training. The is_training
+    // flag toggles the use dropout within the tensorflow computation graph.
+    bool is_training = (features_grad_out != nullptr);
+
     const std::vector<int64_t> dims = {batch_size, num_subwords};
     std::size_t data_size = sizeof(int32_t);
     for (auto i : dims) {
@@ -200,9 +243,13 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
       dims.data(), static_cast<int>(dims.size()), data_size);
     assert (word_end_mask_tensor != nullptr);
     assert (TF_TensorData(word_end_mask_tensor) != nullptr);
+    TF_Tensor* is_training_tensor = TF_AllocateTensor(TF_BOOL, NULL, 0, sizeof(bool));
+    assert (is_training_tensor != nullptr);
+    assert (TF_TensorData(is_training_tensor) != nullptr);
 
     std::memcpy(TF_TensorData(input_ids_tensor), input_ids_data.data(), std::min(data_size, TF_TensorByteSize(input_ids_tensor)));
     std::memcpy(TF_TensorData(word_end_mask_tensor), word_end_mask_data.data(), std::min(data_size, TF_TensorByteSize(word_end_mask_tensor)));
+    *(static_cast<bool*>(TF_TensorData(is_training_tensor))) = is_training;
 
     TF_SessionPRunSetup(sess,
         feeds_all, num_feeds_all,
@@ -214,6 +261,7 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
 
     feed_values_fw[0] = input_ids_tensor;
     feed_values_fw[1] = word_end_mask_tensor;
+    feed_values_fw[2] = is_training_tensor;
     TF_Tensor* fetch_values_fw[1] = {nullptr};
     TF_SessionPRun(sess, handle,
       feeds_fw, feed_values_fw, num_feeds_fw,

@@ -11,24 +11,28 @@ private:
   TF_Graph* graph;
   TF_Status* status;
   TF_Session* sess;
-  TF_Operation *input_ids, *word_end_mask, *word_features, *word_features_grad;
+  TF_Operation *input_ids, *word_end_mask, *is_training;
+  TF_Operation *word_features, *word_features_grad;
   TF_Operation *init_op, *train_op, *save_op, *restore_op;
   TF_Output checkpoint_name;
+  TF_Output new_learning_rate = {nullptr, 0};
+  TF_Output new_warmup_steps = {nullptr, 0};
+  TF_Operation *set_learning_rate_op, *set_warmup_steps_op;
 
-  const int num_feeds_all = 3;
+  const int num_feeds_all = 4;
   const int num_fetches_all = 1;
-  const int num_feeds_fw = 2;
+  const int num_feeds_fw = 3;
   const int num_fetches_fw = 1;
   const int num_feeds_bw = 1;
 
-  TF_Output feeds_all[3] = {{nullptr, 0}, {nullptr, 0}, {nullptr, 0}};
+  TF_Output feeds_all[4] = {{nullptr, 0}, {nullptr, 0}, {nullptr, 0}, {nullptr, 0}};
   TF_Output fetches_all[1] = {{nullptr, 0}};
-  TF_Output feeds_fw[2] = {{nullptr, 0}, {nullptr, 0}};
+  TF_Output feeds_fw[3] = {{nullptr, 0}, {nullptr, 0}, {nullptr, 0}};
   TF_Output fetches_fw[1] = {{nullptr, 0}};
   TF_Output feeds_bw[1] = {{nullptr, 0}};
   const char* handle = nullptr;
 
-  TF_Tensor* feed_values_fw[2] = {nullptr, nullptr};
+  TF_Tensor* feed_values_fw[3] = {nullptr, nullptr, nullptr};
 
 public:
   WordFeaturizer(const char* graph_path,
