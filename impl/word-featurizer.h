@@ -44,8 +44,15 @@ public:
                     TF_Tensor** features_out, TF_Tensor** features_grad_out
                   );
   void run_bw(TF_Tensor* features_grad);
+  static unsigned batch_inputs(
+          const std::vector<std::vector<int32_t>>& batch_input_ids_data,
+          const std::vector<std::vector<int32_t>>& batch_word_end_mask_data,
+          std::vector<int32_t>& input_ids_data,
+          std::vector<int32_t>& word_end_mask_data
+  );
 private:
   void cleanup();
 };
+
 
 #endif

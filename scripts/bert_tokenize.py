@@ -1,11 +1,10 @@
-BERT_CODE_PATH = "~/dev/bert"
-BERT_MODEL_DIR = "uncased_L-12_H-768_A-12"
+import sys, os
+from bert_path import BERT_CODE_PATH, BERT_MODEL_DIR
 BERT_DO_LOWER_CASE = ("uncased" in BERT_MODEL_DIR)
 # bert version used: https://github.com/google-research/bert/tree/f39e881b169b9d53bea03d2d341b31707a6c052b
 # BERT_CODE_PATH should be the parent folder of the repo, so "import bert" works
 
-import sys, os
-sys.path.append(os.path.expanduser(BERT_CODE_PATH))
+sys.path.append(BERT_CODE_PATH)
 
 import bert
 import bert.tokenization
@@ -71,6 +70,7 @@ def tokenize(sentence):
 
 # %%
 
-input_ids, word_end_mask = tokenize(["This", "is", "a", "test", "."])
-print(input_ids.tolist())
-print(word_end_mask.tolist())
+if __name__ == "__main__":
+    input_ids, word_end_mask = tokenize(["This", "is", "a", "test", "antidisestablishmentarianism", "."])
+    print(input_ids.tolist())
+    print(word_end_mask.tolist())

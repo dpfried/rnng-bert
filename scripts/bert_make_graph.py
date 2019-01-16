@@ -1,6 +1,5 @@
 assert __name__ == "__main__", "This script is not designed to be imported"
-BERT_CODE_PATH = "~/dev/bert"
-BERT_MODEL_DIR = "uncased_L-12_H-768_A-12"
+from bert_path import BERT_CODE_PATH, BERT_MODEL_DIR
 BERT_OUTPUT_FILE = "bert_graph.pb"
 # bert version used: https://github.com/google-research/bert/tree/f39e881b169b9d53bea03d2d341b31707a6c052b
 # BERT_CODE_PATH should be the parent folder of the repo, so "import bert" works

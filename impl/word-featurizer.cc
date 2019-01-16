@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <iostream>
 #include <vector>
 #include <assert.h>
+#include <cstring>
 
 #include "word-featurizer.h"
 
@@ -267,3 +269,36 @@ void WordFeaturizer::cleanup() {
       }
     }
   }
+
+unsigned WordFeaturizer::batch_inputs(const std::vector<std::vector<int32_t>> &batch_input_ids_data,
+                                  const std::vector<std::vector<int32_t>> &batch_word_end_mask_data,
+                                  std::vector<int32_t> &input_ids_data,
+                                  std::vector<int32_t> &word_end_mask_data) {
+  unsigned n_inputs = batch_input_ids_data.size();
+  assert(batch_word_end_mask_data.size() == n_inputs);
+  assert(input_ids_data.empty());
+  assert(word_end_mask_data.empty());
+
+  unsigned long max_len = 0;
+  for (unsigned long i = 0; i < batch_input_ids_data.size(); i++) {
+    unsigned long l = batch_input_ids_data[i].size();
+    assert(l == batch_word_end_mask_data[i].size());
+    max_len = std::max(max_len, l);
+  }
+
+  int max_words = 0;
+
+  for (unsigned long i = 0; i < batch_input_ids_data.size(); i++) {
+    auto& this_iid = batch_input_ids_data[i];
+    input_ids_data.insert(input_ids_data.end(), this_iid.begin(), this_iid.end());
+    input_ids_data.resize(max_len * (i+1), 0);
+
+
+    auto& this_wem = batch_word_end_mask_data[i];
+    word_end_mask_data.insert(word_end_mask_data.end(), this_wem.begin(), this_wem.end());
+    word_end_mask_data.resize(max_len * (i+1), 0);
+    max_words = std::max(max_words, std::accumulate(this_wem.begin(), this_wem.end(), 0));
+  }
+  assert(max_words >= 0);
+  return (unsigned) max_words;
+}
