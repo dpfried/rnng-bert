@@ -227,7 +227,8 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
 
     // Assume we need gradients if and only if we're training. The is_training
     // flag toggles the use dropout within the tensorflow computation graph.
-    bool is_training = (features_grad_out != nullptr);
+    bool will_run_bw = (features_grad_out != nullptr);
+    bool is_training = will_run_bw;
 
     const std::vector<int64_t> dims = {batch_size, num_subwords};
     std::size_t data_size = sizeof(int32_t);
@@ -251,31 +252,46 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
     std::memcpy(TF_TensorData(word_end_mask_tensor), word_end_mask_data.data(), std::min(data_size, TF_TensorByteSize(word_end_mask_tensor)));
     *(static_cast<bool*>(TF_TensorData(is_training_tensor))) = is_training;
 
-    TF_SessionPRunSetup(sess,
-        feeds_all, num_feeds_all,
-        fetches_all, num_fetches_all,
-        &train_op, 1,
-        &handle,
-        status);
-    assert (TF_GetCode(status) == TF_OK);
-
     feed_values_fw[0] = input_ids_tensor;
     feed_values_fw[1] = word_end_mask_tensor;
     feed_values_fw[2] = is_training_tensor;
     TF_Tensor* fetch_values_fw[1] = {nullptr};
-    TF_SessionPRun(sess, handle,
-      feeds_fw, feed_values_fw, num_feeds_fw,
-      fetches_fw, fetch_values_fw, num_fetches_fw,
-      nullptr, 0,
-      status
-      );
+
+    if (will_run_bw) {
+      TF_SessionPRunSetup(sess,
+          feeds_all, num_feeds_all,
+          fetches_all, num_fetches_all,
+          &train_op, 1,
+          &handle,
+          status);
+      assert (TF_GetCode(status) == TF_OK);
+
+      TF_SessionPRun(sess, handle,
+        feeds_fw, feed_values_fw, num_feeds_fw,
+        fetches_fw, fetch_values_fw, num_fetches_fw,
+        nullptr, 0,
+        status
+        );
+    } else {
+      // Cancelling a partial run partway through does not deallocate memory set
+      // aside for the parts that have yet to run, so if we are not planning to
+      // do a backwards pass we don't want to set up a partial run.
+      TF_SessionRun(sess,
+                  nullptr, // Run options.
+                  feeds_fw, feed_values_fw, num_feeds_fw,
+                  fetches_fw, fetch_values_fw, num_fetches_fw, // Output tensors, output tensor values, number of outputs.
+                  nullptr, 0, // Target operations, number of targets.
+                  nullptr, // Run metadata.
+                  status // Output status.
+                  );
+    }
     assert (TF_GetCode(status) == TF_OK);
     assert (fetch_values_fw[0] != nullptr);
     assert (TF_TensorData(fetch_values_fw[0]) != nullptr);
 
     *features_out = fetch_values_fw[0];
 
-    if (features_grad_out == nullptr) {
+    if (!will_run_bw) {
       cleanup();
     } else {
       std::vector<int64_t> grad_accumulator_dims;
@@ -292,6 +308,7 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
   }
 
 void WordFeaturizer::run_bw(TF_Tensor* features_grad) {
+    assert (handle != nullptr);
     TF_Tensor* feed_values_bw[] = {features_grad};
     TF_SessionPRun(sess, handle,
       feeds_bw, feed_values_bw, num_feeds_bw,
