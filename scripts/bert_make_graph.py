@@ -89,6 +89,18 @@ saver.restore(sess, os.path.join(BERT_MODEL_DIR, "bert_model.ckpt"))
 
 # %%
 
+def conditional_print(do_print, tensor, message):
+    return tf.cond(do_print,
+        lambda: tf.Print(tensor, [tensor], message),
+        lambda: tensor
+        )
+
+def conditional_print_norm(do_print, tensor, message):
+    return tf.cond(do_print,
+        lambda: tf.Print(tensor, [tf.norm(tensor)], message),
+        lambda: tensor
+        )
+
 def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
     """Creates an optimizer training op."""
     global_step = tf.train.get_or_create_global_step()
@@ -138,13 +150,31 @@ def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
         epsilon=1e-6,
         exclude_from_weight_decay=["LayerNorm", "layer_norm", "bias"])
 
+    print_every = 12
+    do_print = (global_step < print_every) | tf.equal(
+        global_step % print_every, print_every - 1)
+
     tvars = tf.trainable_variables()
-    grad_ys = [tf.check_numerics(node, "Placeholder {}".format(node.name)) for node in grad_ys]
+
+    grad_ys = [
+        conditional_print_norm(
+            do_print,
+            tf.check_numerics(node, "check_numerics failed for placeholder {}".format(node.name.split(':')[0])),
+            "Norm for value passed to placeholder {}: ".format(node.name.split(':')[0]),
+            )
+        for node in grad_ys
+        ]
     # grads = tf.gradients(loss, tvars)
     grads = tf.gradients(ys=ys, xs=tvars, grad_ys=grad_ys)
 
     # This is how the model was pre-trained.
-    (grads, _) = tf.clip_by_global_norm(grads, clip_norm=1.0)
+    global_norm = tf.global_norm(grads)
+    global_norm = conditional_print(
+        do_print,
+        global_norm,
+        "Gradient norm for BERT parameters: "
+        )
+    (grads, _) = tf.clip_by_global_norm(grads, clip_norm=1.0, use_norm=global_norm)
 
     train_op = optimizer.apply_gradients(
       zip(grads, tvars), global_step=global_step)
