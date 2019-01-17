@@ -89,7 +89,7 @@ saver.restore(sess, os.path.join(BERT_MODEL_DIR, "bert_model.ckpt"))
 
 # %%
 
-def create_optimizer(ys, grad_ys, init_lr=5e-4, num_warmup_steps=160):
+def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
     """Creates an optimizer training op."""
     global_step = tf.train.get_or_create_global_step()
 
@@ -129,7 +129,10 @@ def create_optimizer(ys, grad_ys, init_lr=5e-4, num_warmup_steps=160):
     # loaded from init_checkpoint.)
     optimizer = bert.optimization.AdamWeightDecayOptimizer(
         learning_rate=learning_rate,
-        weight_decay_rate=0.01,
+        # weight_decay_rate=0.01,
+        # MODIFIED(nikita): the original weight decay value caused parameters to
+        # all decay to zero in our training setup.
+        weight_decay_rate=0.00,
         beta_1=0.9,
         beta_2=0.999,
         epsilon=1e-6,

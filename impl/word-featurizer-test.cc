@@ -10,7 +10,7 @@ int main() {
   WordFeaturizer f(
     "bert_graph.pb",
     "uncased_L-12_H-768_A-12/bert_model.ckpt",
-    5e-4f,
+    5e-5f,
     160
   );
   if (false) {
