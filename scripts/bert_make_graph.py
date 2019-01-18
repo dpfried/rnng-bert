@@ -58,6 +58,14 @@ def get_word_features():
         tf.reshape(subword_features, [-1, int(subword_features.shape[-1])]),
         tf.to_int32(tf.where(tf.reshape(word_end_mask, (-1,))))[:,0])
 
+    # XXX(nikita): this division by 4 should not be hard-coded, and it should
+    # be implemented in the c++ portion of the network (not here)
+    # The idea behind rescaling is that the code mixes BERT vectors and vectors
+    # that are output by an LSTM, which would be a magnitude mismatch without
+    # any rescaling.
+    print("RESCALING word features: dividing by 4")
+    word_features_packed = word_features_packed / 4.0
+
     # input_mask is over subwords, whereas valid_mask is over words
     sentence_lengths = tf.reduce_sum(word_end_mask, -1)
     valid_mask = (tf.range(tf.reduce_max(sentence_lengths))[None,:] < sentence_lengths[:, None])
