@@ -106,14 +106,14 @@ def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
     global_step = tf.train.get_or_create_global_step()
 
     with sess.graph.as_default() as g, g.name_scope(None):
-        learning_rate_var = learning_rate = tf.get_variable(
+        learning_rate_var = tf.get_variable(
             "learning_rate",
             shape=(),
             dtype=tf.float32,
             initializer=tf.constant_initializer(init_lr),
             trainable=False,
             collections=[tf.GraphKeys.GLOBAL_VARIABLES])
-        warmup_steps_var = warmup_steps_int = tf.get_variable(
+        warmup_steps_var = tf.get_variable(
             "warmup_steps",
             shape=(),
             dtype=tf.int32,
@@ -121,16 +121,18 @@ def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
             trainable=False,
             collections=[tf.GraphKeys.GLOBAL_VARIABLES])
 
+    learning_rate = learning_rate_var
+
     # Implements linear warmup. I.e., if global_step < num_warmup_steps, the
     # learning rate will be `global_step/num_warmup_steps * init_lr`.
     global_steps_int = tf.cast(global_step, tf.int32)
-    warmup_steps_int = tf.constant(num_warmup_steps, dtype=tf.int32)
+    warmup_steps_int = warmup_steps_var
 
     global_steps_float = tf.cast(global_steps_int, tf.float32)
     warmup_steps_float = tf.cast(warmup_steps_int, tf.float32)
 
     warmup_percent_done = global_steps_float / warmup_steps_float
-    warmup_learning_rate = init_lr * warmup_percent_done
+    warmup_learning_rate = learning_rate_var * warmup_percent_done
 
     is_warmup = tf.cast(global_steps_int < warmup_steps_int, tf.float32)
     learning_rate = (

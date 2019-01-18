@@ -161,7 +161,7 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     TF_Tensor* new_warmup_steps_tensor = TF_AllocateTensor(TF_INT32, NULL, 0, sizeof(int32_t));
     assert (new_warmup_steps_tensor != nullptr);
     assert (TF_TensorData(new_warmup_steps_tensor) != nullptr);
-    *(static_cast<float*>(TF_TensorData(new_warmup_steps_tensor))) = warmup_steps;
+    *(static_cast<int32_t*>(TF_TensorData(new_warmup_steps_tensor))) = warmup_steps;
     TF_SessionRun(sess,
                 nullptr, // Run options.
                 &new_warmup_steps, &new_warmup_steps_tensor, 1, // Input tensors, input tensor values, number of inputs.
