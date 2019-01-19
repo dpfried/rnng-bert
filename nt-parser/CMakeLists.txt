@@ -1,9 +1,25 @@
 PROJECT(cnn:nt-parser)
 CMAKE_MINIMUM_REQUIRED(VERSION 2.8)
 
-ADD_EXECUTABLE(nt-parser nt-parser.cc eval.cc oracle.cc pretrained.cc stack.h tree.h nt-parser.h streaming-statistics.h training-position.h utils.h)
-target_link_libraries(nt-parser cnn ${Boost_LIBRARIES} z)
+foreach(TARGET
+        nt-parser
+        nt-parser-gen
+        tensorflow-test
+        word-featurizer-test
+        )
 
-ADD_EXECUTABLE(nt-parser-gen nt-parser-gen.cc oracle.cc pretrained.cc stack.h tree.h)
-target_link_libraries(nt-parser-gen cnn ${Boost_LIBRARIES} z)
+    ADD_EXECUTABLE(${TARGET} ${TARGET}.cc eval.cc oracle.cc pretrained.cc stack.h tree.h nt-parser.h streaming-statistics.h training-position.h utils.h)
+    target_link_libraries(${TARGET} cnn ${Boost_LIBRARIES} z)
+
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(${TARGET} rt)
+    endif()
+
+    if (WITH_CUDA_BACKEND)
+        add_dependencies(${TARGET} cnncuda)
+        target_link_libraries(${TARGET} cnncuda)
+        CUDA_ADD_CUBLAS_TO_TARGET(${TARGET})
+    endif(WITH_CUDA_BACKEND)
+
+endforeach()
 

@@ -1,20 +1,33 @@
 project(cnn)
 cmake_minimum_required(VERSION 2.8 FATAL_ERROR)
 
+set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pg")
+# set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pg")
+# set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pg")
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -fno-finite-math-only -Wall -Wno-missing-braces -std=c++11 -g -DEIGEN_FAST_MATH")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -fno-omit-frame-pointer")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -funroll-loops -Ofast -march=native")
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/cnn)
+
 function(find_mkl)
   set(MKL_ARCH intel64)
   find_path(MKL_INCLUDE_DIR mkl.h
-            PATHS ${MKL_ROOT} ${MKL_ROOT}/include)
+          PATHS ${MKL_ROOT} ${MKL_ROOT}/include)
   find_library(MKL_CORE_LIB NAMES mkl_intel_lp64 mkl_intel_thread mkl_core
-               PATHS ${MKL_ROOT} ${MKL_ROOT}/lib/${MKL_ARCH}
-                     ${MKL_ROOT}/lib #OSX
-               DOC "MKL core library path")
+          PATHS ${MKL_ROOT} ${MKL_ROOT}/lib/${MKL_ARCH}
+          ${MKL_ROOT}/lib #OSX
+          DOC "MKL core library path")
 
   find_library(MKL_COMPILER_LIB NAMES iomp5 libiomp5md
-               PATHS ${MKL_ROOT} ${MKL_ROOT}/../compiler/lib/${MKL_ARCH}              #Windows
-                     ${MKL_ROOT}/../compilers_and_libraries/linux/lib/${MKL_ARCH}_lin #Linux
-                     ${MKL_ROOT}/../compilers_and_libraries/mac/lib                   #OSX
-               DOC "MKL compiler lib (for threaded MKL)")
+          PATHS ${MKL_ROOT} ${MKL_ROOT}/../compiler/lib/${MKL_ARCH}              #Windows
+          ${MKL_ROOT}/../compilers_and_libraries/linux/lib/${MKL_ARCH}_lin #Linux
+          ${MKL_ROOT}/../compilers_and_libraries/mac/lib                   #OSX
+          DOC "MKL compiler lib (for threaded MKL)")
 
   if(MKL_INCLUDE_DIR AND MKL_CORE_LIB AND MKL_COMPILER_LIB)
     get_filename_component(MKL_CORE_LIB_DIR ${MKL_CORE_LIB} DIRECTORY)
@@ -43,17 +56,17 @@ function(find_cudnn)
   if (DEFINED ENV{CUDNN_ROOT} AND NOT DEFINED CUDNN_ROOT)  # use env variable if not defined
     set(CUDNN_ROOT $ENV{CUDNN_ROOT})
   endif()
-#  set(CUDNN_ROOT /usr/local/cuda CACHE PATH "CUDNN root path")
+  #  set(CUDNN_ROOT /usr/local/cuda CACHE PATH "CUDNN root path")
   find_path(CUDNN_INCLUDE_DIRS cudnn.h
-    HINTS ${CUDNN_ROOT}
+          HINTS ${CUDNN_ROOT}
           ${CUDNN_ROOT}/include
-    DOC "CUDNN include path")
+          DOC "CUDNN include path")
   find_library(CUDNN_LIBRARIES NAMES libcudnn.so cudnn.lib
-    PATHS ${CUDNN_ROOT}
+          PATHS ${CUDNN_ROOT}
           ${CUDNN_ROOT}/lib
           ${CUDNN_ROOT}/lib64
           ${CUDNN_ROOT}/lib/x64
-    DOC "CUDNN library path")
+          DOC "CUDNN library path")
   if(CUDNN_INCLUDE_DIRS AND CUDNN_LIBRARIES)
     set(CUDNN_FOUND TRUE PARENT_SCOPE)
     message(STATUS "Found CUDNN (include: ${CUDNN_INCLUDE_DIRS}, library: ${CUDNN_LIBRARIES})")
@@ -63,26 +76,28 @@ function(find_cudnn)
   endif()
 endfunction()
 
-set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
-# set(CMAKE_CXX_FLAGS "-Wall -std=c++11 -O3 -g")
+function(find_tensorflow)
+  find_path(TENSORFLOW_INCLUDE_DIR c_api.h
+          PATHS ${TENSORFLOW_ROOT} ${TENSORFLOW_ROOT}/include ${TENSORFLOW_ROOT}/include/tensorflow/c)
+  find_library(TENSORFLOW_LIB NAMES libtensorflow
+          PATHS ${TENSORFLOW_ROOT} ${TENSORFLOW_ROOT}/lib
+          DOC "Tensorflow library path")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_FAST_MATH")
+  if(TENSORFLOW_INCLUDE_DIR)
+    set(LIBS ${LIBS} tensorflow PARENT_SCOPE)
+    include_directories(${TENSORFLOW_INCLUDE_DIR})
+    get_filename_component(TENSORFLOW_LIB_DIR ${TENSORFLOW_LIB} DIRECTORY)
+    link_directories(${TENSORFLOW_LIB_DIR})
+  else()
+    message(FATAL_ERROR "Failed to find Tensorflow in path: ${TENSORFLOW_ROOT} (Did you set TENSORFLOW_ROOT properly?)")
+  endif()
+endfunction()
+
 if (MKL OR MKL_ROOT)
   find_mkl()  # sets include/lib directories and sets ${LIBS} needed for linking
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_USE_MKL_ALL")
 endif()
 
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pg")
-# set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pg")
-# set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pg")
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -fno-finite-math-only -Wall -Wno-missing-braces -std=c++11 -g")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -fno-omit-frame-pointer")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -funroll-loops -Ofast -march=native")
-enable_testing()
-
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/cnn)
 if(BACKEND)
   message("-- BACKEND: ${BACKEND}")
 else()
@@ -106,7 +121,9 @@ if (WITH_CUDA_BACKEND)
   MESSAGE("CUDA_LIBRARIES: ${CUDA_LIBRARIES}")
   list(REMOVE_ITEM CUDA_LIBRARIES -lpthread)
   set(LIBS ${LIBS} ${CUDA_LIBRARIES})
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_USE_GPU -DHAVE_CUDA")
+  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DEIGEN_USE_GPU -DHAVE_CUDA")
+  # reserve GPU for tensorflow
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DHAVE_CUDA")
   find_cudnn()
   if(CUDNN_FOUND)
     include_directories(SYSTEM ${CUDNN_INCLUDE_DIRS})
@@ -136,10 +153,14 @@ include_directories(${EIGEN3_INCLUDE_DIR})
 FIND_PACKAGE(Threads REQUIRED)
 set(LIBS ${LIBS} ${CMAKE_THREAD_LIBS_INIT})
 
+# look for tensorflow
+find_tensorflow()
 
 #configure_file(${CMAKE_CURRENT_SOURCE_DIR}/config.h.cmake ${CMAKE_CURRENT_BINARY_DIR}/config.h)
 
 add_subdirectory(cnn/cnn)
 add_subdirectory(nt-parser)
 # add_subdirectory(cnn/examples)
+
+enable_testing()
 
