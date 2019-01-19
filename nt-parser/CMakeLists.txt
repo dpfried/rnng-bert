@@ -8,7 +8,7 @@ foreach(TARGET
         word-featurizer-test
         )
 
-    ADD_EXECUTABLE(${TARGET} ${TARGET}.cc eval.cc oracle.cc pretrained.cc stack.h tree.h nt-parser.h streaming-statistics.h training-position.h utils.h)
+    ADD_EXECUTABLE(${TARGET} ${TARGET}.cc eval.cc oracle.cc pretrained.cc stack.h tree.h nt-parser.h streaming-statistics.h training-position.h utils.h word-featurizer.h word-featurizer.cc)
     target_link_libraries(${TARGET} cnn ${Boost_LIBRARIES} z)
 
     if(UNIX AND NOT APPLE)
