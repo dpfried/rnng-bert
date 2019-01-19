@@ -11,6 +11,7 @@ DATA_URL="https://raw.githubusercontent.com/jhcross/span-parser/d6ca8e3f2a5b7eda
 SCRIPT_DIR="../../scripts"
 
 STRIP_TOP=${SCRIPT_DIR}/strip_top.py
+GET_DICTIONARY=${SCRIPT_DIR}/get_dictionary.py
 GET_ORACLE=${SCRIPT_DIR}/get_oracle.py
 GET_ORACLE_GEN=${SCRIPT_DIR}/get_oracle_gen.py
 
@@ -24,19 +25,23 @@ python ${STRIP_TOP} < $TEST > test.stripped
 
 mkdir top_down
 
+DICTIONARY="train.dictionary"
+
+python $GET_DICTIONARY train.stripped > $DICTIONARY
+
 # discriminative oracles
-python ${GET_ORACLE} train.stripped train.stripped > top_down/train.oracle
-python ${GET_ORACLE} train.stripped dev.stripped > top_down/dev.oracle
-python ${GET_ORACLE} train.stripped test.stripped > top_down/test.oracle
+python $GET_ORACLE $DICTIONARY train.stripped > top_down/train.oracle
+python $GET_ORACLE $DICTIONARY dev.stripped > top_down/dev.oracle
+python $GET_ORACLE $DICTIONARY test.stripped > top_down/test.oracle
 
 # generative oracles
-python ${GET_ORACLE_GEN} train.stripped train.stripped > top_down/train_gen.oracle
-python ${GET_ORACLE_GEN} train.stripped dev.stripped > top_down/dev_gen.oracle
-python ${GET_ORACLE_GEN} train.stripped test.stripped > top_down/test_gen.oracle
+python $GET_ORACLE_GEN $DICTIONARY train.stripped > top_down/train_gen.oracle
+python $GET_ORACLE_GEN $DICTIONARY dev.stripped > top_down/dev_gen.oracle
+python $GET_ORACLE_GEN $DICTIONARY test.stripped > top_down/test_gen.oracle
 
 mkdir in_order
 
 # discriminative oracles
-python ${GET_ORACLE} --in_order train.stripped train.stripped > in_order/train.oracle
-python ${GET_ORACLE} --in_order train.stripped dev.stripped > in_order/dev.oracle
-python ${GET_ORACLE} --in_order train.stripped test.stripped > in_order/test.oracle
+python $GET_ORACLE --in_order $DICTIONARY train.stripped > in_order/train.oracle
+python $GET_ORACLE --in_order $DICTIONARY dev.stripped > in_order/dev.oracle
+python $GET_ORACLE --in_order $DICTIONARY test.stripped > in_order/test.oracle
