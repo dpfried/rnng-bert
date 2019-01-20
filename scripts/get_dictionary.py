@@ -51,4 +51,4 @@ if __name__ == '__main__':
     input_file.close()
     #print 'number of words', len(words_list)
     for word in words_list:
-        print word
+        print(word)

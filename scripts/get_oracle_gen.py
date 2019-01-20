@@ -181,19 +181,19 @@ def main():
         if line.count('(') != line.count(')'):
             raise NotImplementedError('Unbalanced number of parenthesis in line ' + str(line_ctr))
         # first line: the bracketed tree itself itself
-        print '# ' + line.rstrip()
+        print('# ' + line.rstrip())
         tags, tokens, lowercase = get_tags_tokens_lowercase(line)
         assert len(tags) == len(tokens)
         assert len(tokens) == len(lowercase)
         #print ' '.join(tags)
-        print ' '.join(tokens)
+        print(' '.join(tokens))
         #print ' '.join(lowercase)
         unkified = unkify(tokens, words_list)
-        print ' '.join(unkified)
+        print(' '.join(unkified))
         output_actions = get_actions(line)
         for action in output_actions:
-            print action
-        print ''
+            print(action)
+        print('')
     dev_file.close()
 
 

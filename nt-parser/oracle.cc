@@ -100,6 +100,63 @@ void TopDownOracle::ReadMorphologyFeatures(const std::string& line, std::vector<
   assert(morphology_feats->size() > 0); // empty sentences not allowed
 }
 
+
+  void Oracle::ReadWordEndMask(const std::string& line, vector<unsigned>& lengths, vector<int32_t>& word_end_mask) {
+    unsigned current_length = 0;
+    unsigned cur = 0;
+    while(cur < line.size()) {
+      while(cur < line.size() && is_ws(line[cur])) { ++cur; }
+      unsigned start = cur;
+      while(cur < line.size() && is_not_ws(line[cur])) { ++cur; }
+      unsigned end = cur;
+      if (end > start) {
+        // TODO(dfried): double-check that this is cross-system compliant
+        int32_t mask = std::stoi(line.substr(start, end - start));
+        assert(mask == 0 || mask == 1);
+        word_end_mask.push_back((unsigned) mask);
+        current_length += 1;
+        if (mask == 1) {
+          lengths.push_back(current_length);
+          current_length = 0;
+        }
+      }
+    }
+    assert(current_length == 0);
+  }
+
+  void Oracle::ReadWordPieceIds(const std::string& line, const std::vector<unsigned>& lengths, std::vector<std::vector<int32_t>>& word_piece_ids, std::vector<int32_t>& word_piece_ids_flat) {
+    unsigned cur = 0;
+    unsigned current_word_index = 0;
+    unsigned current_word_pieces_read = 0;
+
+    while(cur < line.size()) {
+      while(cur < line.size() && is_ws(line[cur])) { ++cur; }
+      unsigned start = cur;
+      while(cur < line.size() && is_not_ws(line[cur])) { ++cur; }
+      unsigned end = cur;
+
+      if (end > start) {
+        assert(current_word_index < lengths.size());
+        if (current_word_pieces_read >= lengths[current_word_index]) {
+          current_word_index += 1;
+          current_word_pieces_read = 0;
+        }
+        if (current_word_pieces_read == 0) {
+          word_piece_ids.emplace_back();
+        }
+        // TODO(dfried): double-check that this is cross-system compliant
+        int32_t word_piece_id = std::stoi(line.substr(start, end - start));
+        word_piece_ids.back().push_back(word_piece_id);
+        word_piece_ids_flat.push_back(word_piece_id);
+        current_word_pieces_read++;
+      }
+    }
+    assert(lengths.size() == word_piece_ids.size());
+    for (unsigned i = 0; i < lengths.size(); i++) {
+      assert(word_piece_ids[i].size() == lengths[i]);
+    }
+  }
+
 void TopDownOracle::load_bdata(const string& file) {
    devdata=file;
 }
@@ -125,7 +182,9 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
     ++lc;
     //cerr << "line number = " << lc << endl;
     cur_acts.clear();
-    if (line.size() == 0 || line[0] == '#') continue;
+    // modification to deal with the sentence # 200 million ... in the PTB training set
+    // https://github.com/danifg/Dynamic-InOrderParser/blob/343f000cdb0d5f7fa09b77aa7e476487d1568ff6/impl/oracle.cc#L60
+    if (line.size() == 0 || (line[0] == '!' && line[3] == '(')) continue;
     sent_count++;
     if (sent_count % 1000 == 0) {
       cerr << "\rsent " << sent_count;
@@ -144,11 +203,7 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
       ReadSentenceView(line, d, &cur_sent.lc);
       getline(in, line);
       ReadSentenceView(line, d, &cur_sent.unk);
-      getline(in, line);
-      if (read_morphology_features) {
-        ReadMorphologyFeatures(line, &cur_sent.morphology_features);
-        assert(cur_sent.morphology_features.size() == cur_sent.raw.size());
-      }
+
     } else { // at test time, we ignore the raw strings and just use the "UNKified" versions
       ReadSentenceView(line, pd, &cur_sent.pos);
       getline(in, line);
@@ -158,14 +213,25 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
       getline(in, line);
       ReadSentenceView(line, d, &cur_sent.unk);
       cur_sent.raw = cur_sent.unk;
-      getline(in, line);
-      if (read_morphology_features) {
-        ReadMorphologyFeatures(line, &cur_sent.morphology_features);
-        assert(cur_sent.morphology_features.size() == cur_sent.raw.size());
-      }
     }
+    // read morph features?
+    getline(in, line);
+    if (read_morphology_features) {
+      ReadMorphologyFeatures(line, &cur_sent.morphology_features);
+      assert(cur_sent.morphology_features.size() == cur_sent.raw.size());
+    }
+
+    // read BERT word masks and ids
+    getline(in, line);
+    vector<unsigned> word_lengths_in_pieces;
+    ReadWordEndMask(line, word_lengths_in_pieces, cur_sent.word_end_mask);
+    getline(in, line);
+    ReadWordPieceIds(line, word_lengths_in_pieces, cur_sent.word_piece_ids, cur_sent.word_piece_ids_flat);
+    assert(cur_sent.word_end_mask.size() == cur_sent.word_piece_ids_flat.size());
+
     for (auto word : cur_sent.raw) raw_term_counts[word]++;
-    lc += 3;
+    // re: commit changing line below from 3->6, it should have been 4 previously (but it's ok b/c it's only used for error reporting)
+    lc += 6;
     if (!cur_sent.SizesMatch()) {
       cerr << "Mismatched lengths of input strings in oracle before line " << lc << endl;
       abort();

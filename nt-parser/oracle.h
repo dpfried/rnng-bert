@@ -14,10 +14,13 @@ namespace parser {
 // a sentence can be viewed in 4 different ways:
 //   raw tokens, UNKed, lowercased, and POS tags
 struct Sentence {
-  bool SizesMatch() const { return raw.size() == unk.size() && raw.size() == lc.size() && raw.size() == pos.size(); }
+  bool SizesMatch() const { return raw.size() == unk.size() && raw.size() == lc.size() && raw.size() == pos.size() && word_piece_ids.size() == raw.size() + 2;} // beginning and end
   size_t size() const { return raw.size(); }
   std::vector<int> raw, unk, lc, pos, non_unked_raw;
   std::vector<std::unordered_map<unsigned, unsigned>> morphology_features;
+  std::vector<std::vector<int32_t>> word_piece_ids;
+  std::vector<int32_t> word_piece_ids_flat;
+  std::vector<int32_t> word_end_mask;
 };
 
 // base class for transition based parse oracles
@@ -40,6 +43,8 @@ struct Oracle {
   std::vector<std::vector<int>> actions;
  protected:
   static void ReadSentenceView(const std::string& line, cnn::Dict* dict, std::vector<int>* sent);
+  static void ReadWordEndMask(const std::string& line, std::vector<unsigned>& lengths, std::vector<int32_t>& word_end_mask);
+  static void ReadWordPieceIds(const std::string& line, const std::vector<unsigned>& lengths, std::vector<std::vector<int32_t>>& word_piece_ids, std::vector<int32_t>& word_piece_ids_flat);
 };
 
 // oracle that predicts nonterminal symbols with a NT(X) action

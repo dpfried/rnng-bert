@@ -1,7 +1,9 @@
+from __future__ import print_function
 import sys
 import get_dictionary
 from get_dictionary import is_next_open_bracket, get_between_brackets
 import types
+import bert_tokenize
 
 # tokens is a list of tokens, so no need to split it again
 def unkify(tokens, words_dict, morph_aware=True):
@@ -195,31 +197,31 @@ def construct(actions, trees):
         act = actions[0]
         actions = actions[1:]
         if act[0] == 'N':
-                tree = [act]
-                actions, tree = construct(actions,tree)
-                trees.append(tree)
+            tree = [act]
+            actions, tree = construct(actions,tree)
+            trees.append(tree)
         elif act[0] == 'S':
-                trees.append(act)
+            trees.append(act)
         elif act[0] == 'R':
-                break;
+            break;
         else:
-                assert False
+            assert False
     return actions, trees
 
 def get_in_order_actions(trees, actions):
-    if type(trees[1]) == types.ListType:
+    if isinstance(trees[1], list):
         actions = get_in_order_actions(trees[1], actions)
     else:
         actions.append(trees[1])
 
-    assert type(trees[0]) == types.StringType
+    assert isinstance(trees[0], str)
     actions.append("NT"+trees[0][2:])
     
     for item in trees[2:]:
-        if type(item) == types.ListType:
-                actions = get_in_order_actions(item, actions)
+        if isinstance(item, list):
+            actions = get_in_order_actions(item, actions)
         else:
-                actions.append(item)
+            actions.append(item)
     actions.append("REDUCE")
     return actions      
 
@@ -256,17 +258,24 @@ def main():
         if line.count('(') != line.count(')'):
             raise NotImplementedError('Unbalanced number of parenthesis in line ' + str(line_ctr))
         # first line: the bracketed tree itself itself
-        print '# ' + line.rstrip()
+        print('!# ' + line.rstrip())
         tags, tokens, lowercase, morphfeats = get_tags_tokens_lowercase_morphfeats(line)
         assert len(tags) == len(tokens)
         assert len(tokens) == len(lowercase)
-        print ' '.join(tags)
-        print ' '.join(tokens)
-        print ' '.join(lowercase)
+        print(' '.join(tags))
+        print(' '.join(tokens))
+        print(' '.join(lowercase))
         unkified = unkify(tokens, words_list, not args.no_morph_aware_unking)
-        print ' '.join(unkified)
-        print ' '.join(morphfeats)
+        print(' '.join(unkified))
+        # print morph features, or an empty line
+        print(' '.join(morphfeats))
+
+        bert_input_ids, bert_word_end_mask = bert_tokenize.tokenize(tokens)
+        print(' '.join(map(str, bert_word_end_mask)))
+        print(' '.join(map(str, bert_input_ids)))
+
         output_actions, mon, mcn, mscn = get_actions(line)
+
         if mon > max_open_nts:
             max_open_nts = mon
             max_open_nts_ix = line_ctr
@@ -280,13 +289,13 @@ def main():
             _, trees = construct(output_actions, [])
             output_actions = get_in_order_actions(trees[0], [])
         for action in output_actions:
-            print action
+            print(action)
         if args.in_order:
-            print 'TERM'
-        print ''
-    print >> sys.stderr, "max open nts: %d, line %d" % (max_open_nts, max_open_nts_ix)
-    print >> sys.stderr, "max cons nts: %d, line %d" % (max_cons_nts, max_cons_nts_ix)
-    print >> sys.stderr, "max same cons nts: %d, line %d" % (max_same_cons_nts, max_same_cons_nts_ix)
+            print('TERM')
+        print('')
+    print("max open nts: %d, line %d" % (max_open_nts, max_open_nts_ix), file=sys.stderr)
+    print("max cons nts: %d, line %d" % (max_cons_nts, max_cons_nts_ix), file=sys.stderr)
+    print("max same cons nts: %d, line %d" % (max_same_cons_nts, max_same_cons_nts_ix), file=sys.stderr)
     dev_file.close()
 
 if __name__ == "__main__":
