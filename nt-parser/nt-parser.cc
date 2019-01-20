@@ -149,7 +149,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           // training
           ("train,t", "Should training be run?")
           ("dropout,D", po::value<float>(), "Dropout rate")
-          ("model_output_file", po::value<string>(), "Override auto-generate name to save model")
+          ("model_output_dir", po::value<string>(), "Override auto-generate name of prefix to save model")
           // ("set_iter", po::value<int>(),  "")
           ("save_frequency_minutes", po::value<int>()->default_value(30),  "save model roughly every this many minutes (if it hasn't been saved by a dev decode)")
           ("dev_check_frequency", po::value<int>()->default_value(9958),  "evaluate on the dev set every this many sentences (9958 = 4 times per epoch on English)")
@@ -1904,6 +1904,14 @@ void bert_fw(WordFeaturizer* word_featurizer,
   }
 }
 
+std::string dynet_param_path(std::string directory) {
+  return directory + "/dynet_model.bin";
+}
+
+std::string bert_param_path(std::string directory) {
+  return directory + "/bert_model.ckpt";
+}
+
 int main(int argc, char** argv) {
   unsigned random_seed = cnn::Initialize(argc, argv);
 
@@ -2002,9 +2010,17 @@ int main(int argc, char** argv) {
   }
 
   ostringstream os;
-  os << "ntparse"
+
+  if (boost::filesystem::exists("models")) {
+    cerr << "[WARNING: already exists]";
+  } else {
+    boost::filesystem::create_directory("models");
+  }
+  os << "models/ntparse"
      << (USE_POS ? "_pos" : "")
      << (USE_PRETRAINED ? "_pretrained" : "")
+     << (BERT ? "_bert" : "")
+     << (IN_ORDER ? "_inorder" : "")
      << '_' << LAYERS
      << '_' << INPUT_DIM
      << '_' << HIDDEN_DIM
@@ -2013,10 +2029,10 @@ int main(int argc, char** argv) {
      << (NO_STACK ? "_no-stack" : "")
      << (NO_ACTION_HISTORY ? "_no-action-history" : "")
      << "-seed" << random_seed
-     << "-pid" << getpid() << ".params";
+     << "-pid" << getpid();
 
-  const string fname = conf.count("model_output_file") > 0 ? conf["model_output_file"].as<string>() : os.str();
-  cerr << "PARAMETER FILE: " << fname << endl;
+  const string fname = conf.count("model_output_dir") > 0 ? conf["model_output_dir"].as<string>() : os.str();
+  cerr << "MODEL OUTPUT DIRECTORY: " << fname << endl;
   //bool softlinkCreated = false;
 
   bool discard_train_sents = (conf.count("train") == 0);
@@ -2713,14 +2729,21 @@ int main(int argc, char** argv) {
     auto save_model = [&](const string& base_filename, const string& save_type, const string& info, bool remove_old) {
         string prefix = base_filename + "_" + save_type;
         assert(prefix.find(' ') == std::string::npos);
-        std::vector<boost::filesystem::path> old_files = utils::glob_files(prefix + "_*.bin");
+        std::vector<boost::filesystem::path> old_files = utils::glob_files(prefix + "_*model");
 
-        string save_name = prefix;
-        if (info != "") save_name += "_" + info;
-        boost::filesystem::path file_path(save_name + ".bin");
-        cerr << "writing model " << save_name << ".bin" << "\t";
+        string save_dir = prefix;
+        if (info != "") save_dir += "_" + info;
+        save_dir += "_model";
+        boost::filesystem::path file_path(save_dir);
+        cerr << "writing model to directory " << save_dir  << "\t";
 
-        ofstream out(save_name + ".bin");
+        if (boost::filesystem::exists(save_dir)) {
+          cerr << "[WARNING: already exists]";
+        } else {
+          boost::filesystem::create_directory(save_dir);
+        }
+
+        ofstream out(dynet_param_path(save_dir));
         if (conf.count("text_format")) {
           boost::archive::text_oarchive oa(out);
           oa << model << *optimizer << training_position << streaming_f1;
@@ -2730,18 +2753,23 @@ int main(int argc, char** argv) {
           oa << model << *optimizer << training_position << streaming_f1;
           oa << termdict << adict << ntermdict << posdict;
         }
+
+        if (BERT) {
+          word_featurizer->save_checkpoint(bert_param_path(save_dir));
+        }
+
         cerr << "streaming f1 mean: " << streaming_f1.mean_value();
         cerr << " streaming f1 std mean: " << streaming_f1.total_standardized / streaming_f1.num_samples;
         cerr << endl;
 
         if (remove_old) {
           if (old_files.size() > 1)  {
-            cerr << "multiple old files exist; not removing: ";
+            cerr << "multiple old directories exist; not removing: ";
             for (auto path: old_files) cerr << path.filename().string() << " ";
           } else if (old_files.size() == 1) {
             if (!equivalent(file_path, old_files[0])) {
               cerr << "removing file " << old_files[0].string();
-              if (!boost::filesystem::remove(old_files[0])) {
+              if (!boost::filesystem::remove_all(old_files[0])) {
                 cerr << "unsuccessful";
               }
             } else {
@@ -3069,6 +3097,7 @@ int main(int argc, char** argv) {
       models.push_back(std::make_shared<Model>());
       parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), pretrained));
       string path(conf["model"].as<string>());
+      string dpp = dynet_param_path(path);
       cerr << "Loading single parser from " << path << "..." << endl;
       ifstream in(path);
       if (conf.count("text_format")) {
@@ -3079,10 +3108,12 @@ int main(int argc, char** argv) {
         ia >> *models.back();
       }
       abstract_parser = parsers.back().get();
+      if (BERT) {
+        bert_model_path = bert_param_path(path);
+      }
     }
 
     else {
-      // TODO(dfried): implement ensemble BERT decoding?
       assert(!BERT);
       map<string, EnsembledParser::CombineType> combine_types{
           {"sum", EnsembledParser::CombineType::sum},
