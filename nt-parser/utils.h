@@ -35,7 +35,7 @@ namespace utils {
       boost::filesystem::directory_iterator end_itr; // Default ctor yields past-the-end
       for (boost::filesystem::directory_iterator i(parent_dir); i != end_itr; ++i) {
           // Skip if not a file
-          if (!boost::filesystem::is_regular_file(i->status()) || !boost::filesystem::is_directory(i->status())) continue;
+          if (!boost::filesystem::is_regular_file(i->status()) && !boost::filesystem::is_directory(i->status())) continue;
 
           boost::smatch what;
 
