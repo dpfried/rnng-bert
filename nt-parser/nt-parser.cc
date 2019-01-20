@@ -104,21 +104,30 @@ vector<bool> singletons; // used during training
 void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   po::options_description opts("Configuration options");
   opts.add_options()
+          // run parameters
+          ("model,m", po::value<string>(), "Load saved model from this file")
+          ("text_format", "serialize models in text")
+
+          ("unnormalized", "do not locally normalize score distributions")
+
+          ("spmrl", "Use the SPMRL variant of EVALB")
+          ("inorder", "super experimental implementation of Liu and Zhang 2017, breaks many of the other flags")
+
+          // data
           ("training_data,T", po::value<string>(), "List of Transitions - Training corpus")
-          ("explicit_terminal_reduce,x", "[recommended] If set, the parser must explicitly process a REDUCE operation to complete a preterminal constituent")
           ("dev_data,d", po::value<string>(), "Development corpus")
           ("bracketing_dev_data,C", po::value<string>(), "Development bracketed corpus")
           ("gold_training_data", po::value<string>(), "List of Transitions - smaller corpus (e.g. wsj in a wsj+silver experiment)")
-          ("silver_blocks_per_gold", po::value<unsigned>()->default_value(10), "How many same-sized blocks of the silver data should be sampled and trained, between every train on the entire gold set?")
           ("test_data,p", po::value<string>(), "Test corpus")
-          ("dropout,D", po::value<float>(), "Dropout rate")
-          ("samples,s", po::value<unsigned>(), "Sample N trees for each test sentence instead of greedy max decoding")
-          ("output_beam_as_samples", "Print the items in the beam in the same format as samples")
-          ("samples_include_gold", "Also include the gold parse in the list of samples output")
-          ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
-          ("model,m", po::value<string>(), "Load saved model from this file")
+
+          ("explicit_terminal_reduce,x", "[recommended] If set, the parser must explicitly process a REDUCE operation to complete a preterminal constituent")
+          ("silver_blocks_per_gold", po::value<unsigned>()->default_value(10), "How many same-sized blocks of the silver data should be sampled and trained, between every train on the entire gold set?")
+
+          // model parameters
           ("use_pos_tags,P", "make POS tags visible to parser")
           ("use_morph_features", "make morphological features visible to parser")
+          ("words,w", po::value<string>(), "Pretrained word embeddings")
+
           ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
           ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
           ("pos_dim", po::value<unsigned>()->default_value(12), "POS dimension")
@@ -127,42 +136,59 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("hidden_dim", po::value<unsigned>()->default_value(64), "hidden dimension")
           ("pretrained_dim", po::value<unsigned>()->default_value(50), "pretrained input dimension")
           ("lstm_input_dim", po::value<unsigned>()->default_value(60), "LSTM input dimension")
-          ("train,t", "Should training be run?")
-          ("words,w", po::value<string>(), "Pretrained word embeddings")
-          ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
-          ("beam_size,b", po::value<unsigned>()->default_value(1), "beam size")
-          ("beam_within_word", "greedy decode within word")
-          ("beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
+
           ("no_stack,S", "Don't encode the stack")
           ("no_action_history", "Don't encode the action history")
-          ("text_format", "serialize models in text")
-          ("factored_ensemble_beam", "do beam search in each model in the ensemble separately, then take the union and rescore with the entire ensemble")
-          ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
-          ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
-          ("combine_type", po::value<string>(), "Decision-level combination type for ensemble (sum or product)")
-          ("block_count", po::value<unsigned>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
-          ("block_num", po::value<unsigned>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
+
+          // training
+          ("train,t", "Should training be run?")
+          ("dropout,D", po::value<float>(), "Dropout rate")
+          ("model_output_file", po::value<string>(), "Override auto-generate name to save model")
+          // ("set_iter", po::value<int>(),  "")
+          ("save_frequency_minutes", po::value<unsigned>()->default_value(30),  "save model roughly every this many minutes (if it hasn't been saved by a dev decode)")
+          ("dev_check_frequency", po::value<unsigned>()->default_value(9958),  "evaluate on the dev set every this many sentences (9958 = 4 times per epoch on English)")
+
+          ("optimizer", po::value<string>()->default_value("sgd"), "sgd | adam")
+          ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
+          ("batch_size", po::value<unsigned>()->default_value(1),  "number of training examples to use to compute each gradient update")
+
           ("min_risk_training", "min risk training (default F1)")
-          ("min_risk_method", po::value<string>()->default_value("reinforce"), "reinforce, beam, or beam_unnormalized")
+          ("min_risk_method", po::value<string>()->default_value("reinforce"), "reinforce | beam | beam_unnormalized")
           ("min_risk_include_gold", "use the true parse in the gradient updates")
           ("min_risk_candidates", po::value<unsigned>()->default_value(10), "min risk number of candidates")
+
           ("label_smoothing_epsilon", po::value<float>()->default_value(0.0f), "use epsilon interpolation with the uniform distribution in label smoothing")
-          ("model_output_file", po::value<string>())
-          ("optimizer", po::value<string>()->default_value("sgd"))
+
           ("max_margin_training", "")
           ("softmax_margin_training", "")
+
           ("dynamic_exploration_include_gold", "use the true parse in the gradient updates")
           ("dynamic_exploration_candidates", po::value<unsigned>()->default_value(1))
           ("dynamic_exploration", po::value<string>(), "if passed, should be greedy | sample")
           ("dynamic_exploration_probability", po::value<float>()->default_value(1.0), "with this probability, use the model probabilities to explore (with method given by --dynamic_exploration)")
-          ("unnormalized", "do not locally normalize score distributions")
-          ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
-          ("batch_size", po::value<unsigned>()->default_value(1),  "number of training examples to use to compute each gradient update")
+
           ("compute_distribution_stats", "compute entropy and gold probabilities for action distributions")
-          ("set_iter", po::value<int>(),  "")
-          ("save_frequency_minutes", po::value<unsigned>()->default_value(30),  "save model roughly every this many minutes (if it hasn't been saved by a dev decode)")
-          ("spmrl", "Use the SPMRL variant of EVALB")
-          ("inorder", "super experimental implementation of Liu and Zhang 2017, breaks many of the other flags")
+
+          // inference
+          ("samples,s", po::value<unsigned>(), "Sample N trees for each test sentence instead of greedy max decoding")
+          ("output_beam_as_samples", "Print the items in the beam in the same format as samples")
+          ("samples_include_gold", "Also include the gold parse in the list of samples output")
+          ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
+          ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
+          ("beam_size,b", po::value<unsigned>()->default_value(1), "beam size")
+          ("beam_within_word", "greedy decode within word")
+          ("beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
+          ("factored_ensemble_beam", "do beam search in each model in the ensemble separately, then take the union and rescore with the entire ensemble")
+
+          ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
+
+          ("block_count", po::value<unsigned>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
+          ("block_num", po::value<unsigned>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
+
+          // ensemble inference
+          ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
+          ("combine_type", po::value<string>(), "Decision-level combination type for ensemble (sum or product)")
+
         ("help,h", "Help");
   po::options_description dcmdline_options;
   dcmdline_options.add(opts);
@@ -1809,6 +1835,7 @@ vector<string> linearize_tree(const Tree& tree, const parser::Sentence& sentence
 }
 
 void check_spmrl(const string& path, bool is_spmrl) {
+    // TODO: allow other languages
   assert(is_spmrl == boost::starts_with(path, "french_"));
 }
 
@@ -2195,6 +2222,9 @@ int main(int argc, char** argv) {
 
     unsigned batch_size = conf["batch_size"].as<unsigned>();
 
+    unsigned dev_check_frequency = conf["dev_check_frequency"].as<unsigned>();
+
+
     if (conf.count("model")) {
       //cerr << "before load model" << endl;
       ifstream in(conf["model"].as<string>().c_str());
@@ -2259,6 +2289,7 @@ int main(int argc, char** argv) {
 
     //assert(!conf.count("set_iter"));
 
+    /*
     if (conf.count("set_iter")) {
       assert(!has_gold_training_data);
       // todo: if support this for backward compat, also set the epoch and sentence
@@ -2277,6 +2308,7 @@ int main(int argc, char** argv) {
       cerr << " dev f1: " << training_position.best_dev_f1;
       cerr << " dev err: " << training_position.best_dev_error;
     }
+     */
 
     unsigned save_frequency_minutes = conf["save_frequency_minutes"].as<unsigned>();
 
@@ -2591,6 +2623,7 @@ int main(int argc, char** argv) {
           {
             ComputationGraph hg;
             vector<Expression> batch_losses;
+            // TODO(dfried): this will use a small batch at the end of every epoch if training data isn't evenly divisible by batch size
             for (unsigned batch_sent = 0; batch_sent < batch_size && index_iter != indices_end; batch_sent++) {
               auto &sentence = corpus.sents[*index_iter];
               const vector<int> &actions = corpus.actions[*index_iter];
@@ -2612,12 +2645,12 @@ int main(int argc, char** argv) {
               sents_since_last_status++;
             }
 
-            assert(batch_losses.size() == 1);
-            Expression batch_loss = batch_losses.back();
+            Expression batch_loss = average(batch_losses);
             double batch_loss_v = as_scalar(batch_loss.value());
             //cerr << "batch loss: " << batch_loss_v << endl;
             hg.backward();
             optimizer->update(1.0);
+            training_position.batches++;
           }
 
           if (sents_since_last_status >= status_every_i_iterations) {
@@ -2625,7 +2658,7 @@ int main(int argc, char** argv) {
             optimizer->status();
             auto time_now = chrono::system_clock::now();
             auto dur = chrono::duration_cast<chrono::milliseconds>(time_now - time_start);
-            cerr << "update #" << training_position.iter << " (epoch " << (static_cast<double>(training_position.tot_seen) / epoch_size) << ")";
+            cerr << "status #" << training_position.iter << " batch #" << training_position.batches <<   " (epoch " << (static_cast<double>(training_position.tot_seen) / epoch_size) << ")";
             /*" |time=" << put_time(localtime(&time_now), "%c %Z") << ")\tllh: "<< */
             /*
           if (max_margin_training) {
@@ -2655,7 +2688,9 @@ int main(int argc, char** argv) {
             //tot_gold_score = tot_lad_score = 0.0;
             //violations = 0;
 
-            if (training_position.iter % 25 == 0) { // report on dev set
+            int tot_seen_last_status = training_position.tot_seen_last_status;
+            training_position.tot_seen_last_status = training_position.tot_seen;
+            if ((training_position.tot_seen / dev_check_frequency) > (tot_seen_last_status / dev_check_frequency)) { // report on dev set
               auto t_start = chrono::high_resolution_clock::now();
               StreamingStatistics* streaming_entropy = nullptr;
               StreamingStatistics* streaming_gold_prob = nullptr;
@@ -2686,10 +2721,12 @@ int main(int argc, char** argv) {
               }
               string model_tag = "it-" + to_string(training_position.iter) + "-f1-" + utils::to_string_precision(dev_decode_stats.metrics.f1, 2);
               unsigned minutes_since_save = chrono::duration_cast<chrono::minutes>(chrono::system_clock::now() - last_save_time).count();
+              bool print_next = false;
               if (minutes_since_save >= save_frequency_minutes){
                   cerr << "  " << minutes_since_save << " minutes since save... ";
                 save_model(fname, "periodic", model_tag , true);
                 last_save_time = chrono::system_clock::now();
+                print_next = true;
               }
               if (dev_decode_stats.metrics.f1 > training_position.best_dev_f1) {
                 training_position.best_dev_error = dev_decode_stats.err;
@@ -2697,15 +2734,19 @@ int main(int argc, char** argv) {
                 cerr << "  new best... ";
                 save_model(fname, "best-epoch-" + to_string(training_position.epoch), model_tag, true);
                 last_save_time = chrono::system_clock::now();
+                print_next = true;
+              }
+              if (print_next) {
+                auto next_sent = (index_iter == indices_end) ? indices_begin : index_iter;
                 if (index_iter != indices_end) {
                   cerr << "next sentence: (" << training_position.sentence << ") ";
-                  for (auto &word_id: corpus.sents[*index_iter].raw) {
+                  for (auto &word_id: corpus.sents[*next_sent].raw) {
                     cerr << termdict.Convert(word_id) << " ";
                   }
-                  cerr << endl;
                 } else {
-                  cerr << "end of block" << endl;
+                  cerr << "end of block";
                 }
+                cerr << endl;
               }
             }
             time_start = chrono::system_clock::now();
@@ -2725,7 +2766,7 @@ int main(int argc, char** argv) {
       parser::TopDownOracle* main_corpus = &corpus;
       vector<unsigned> main_indices(main_corpus->size());
       std::iota(main_indices.begin(), main_indices.end(), 0);
-      std::random_shuffle(main_indices.begin(), main_indices.end());
+      std::shuffle(main_indices.begin(), main_indices.end());
       training_position.epoch++;
       shuffle_count++;
     }
@@ -2762,7 +2803,7 @@ int main(int argc, char** argv) {
         main_corpus = &gold_corpus;
         vector<unsigned> silver_indices(corpus.size());
         std::iota(silver_indices.begin(), silver_indices.end(), 0);
-        std::random_shuffle(silver_indices.begin(), silver_indices.end());
+        std::shuffle(silver_indices.begin(), silver_indices.end());
         unsigned offset = std::min(corpus.size(), gold_corpus.size() * SILVER_BLOCKS_PER_GOLD);
         train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, offset + gold_corpus.size(), start_sentence);
         sentence_count += offset;
@@ -2771,7 +2812,7 @@ int main(int argc, char** argv) {
 
       vector<unsigned> main_indices(main_corpus->size());
       std::iota(main_indices.begin(), main_indices.end(), 0);
-      std::random_shuffle(main_indices.begin(), main_indices.end());
+      std::shuffle(main_indices.begin(), main_indices.end());
       sentence_count += main_indices.size();
       train_block(*main_corpus, main_indices.begin(), main_indices.end(), sentence_count, start_sentence);
       optimizer->update_epoch();
