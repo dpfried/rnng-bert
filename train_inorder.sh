@@ -1,9 +1,12 @@
 #!/bin/bash
 dynet_seed=1
 
+batch_size=16
+bert_lr="2e-5"
+
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
-    --cnn-mem 1500,1500,500 \
+    --cnn-mem 3000,3000,500 \
     -T corpora/english/in_order/train.oracle \
     -d corpora/english/in_order/dev.oracle \
     -C corpora/english/dev.stripped \
@@ -15,5 +18,5 @@ build/nt-parser/nt-parser \
     --lstm_input_dim 128 \
     --hidden_dim 128 \
     -D 0.2 \
-    --batch_size 8 \
+    --batch_size $batch_size \
     $@
