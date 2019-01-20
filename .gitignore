@@ -30,12 +30,22 @@
 # python compiled
 *.pyc
 
+# C++ compiled
 build/
+cmake-build-debug/
+cmake-build-release/
 
-expts/
+# IDE
+.idea/
 
 # from runs
 *.params
 evalbout.txt
 evaluable.txt
 latest_model
+expts/
+models/
+
+# BERT
+bert_graph.pb
+uncased_L-12_H-768_A-12

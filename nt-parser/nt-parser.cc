@@ -94,7 +94,7 @@ bool UNNORMALIZED = false;
 bool IN_ORDER = false;
 
 bool BERT = false;
-float BERT_LR = 5e-5;
+float BERT_LR = 5e-5f;
 int BERT_WARMUP_STEPS = 160;
 
 using namespace cnn::expr;
@@ -110,7 +110,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   po::options_description opts("Configuration options");
   opts.add_options()
           // run parameters
-          ("model,m", po::value<string>(), "Load saved model from this file")
+          ("model_dir,m", po::value<string>(), "Load saved model from this directory")
           ("text_format", "serialize models in text")
 
           ("unnormalized", "do not locally normalize score distributions")
@@ -1969,8 +1969,8 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  if (conf.count("model") && conf.count("models")) {
-    cerr << "Cannot specify --model and --models." << endl;
+  if (conf.count("model_dir") && conf.count("models")) {
+    cerr << "Cannot specify --model_dir and --models." << endl;
     return 1;
   }
 
@@ -2011,11 +2011,10 @@ int main(int argc, char** argv) {
 
   ostringstream os;
 
-  if (boost::filesystem::exists("models")) {
-    cerr << "[WARNING: already exists]";
-  } else {
+  if (!boost::filesystem::exists("models")) {
     boost::filesystem::create_directory("models");
   }
+
   os << "models/ntparse"
      << (USE_POS ? "_pos" : "")
      << (USE_PRETRAINED ? "_pretrained" : "")
@@ -2375,9 +2374,10 @@ int main(int argc, char** argv) {
     string bert_model_path = "uncased_L-12_H-768_A-12/bert_model.ckpt";
 
 
-    if (conf.count("model")) {
+    if (conf.count("model_dir")) {
+      string model_dir = conf["model_dir"].as<string>();
       //cerr << "before load model" << endl;
-      ifstream in(conf["model"].as<string>().c_str());
+      ifstream in(dynet_param_path(model_dir).c_str());
       if (conf.count("text_format")) {
         boost::archive::text_iarchive ia(in);
         ia >> model >> *optimizer >> training_position >> streaming_f1;
@@ -2391,7 +2391,8 @@ int main(int argc, char** argv) {
       cerr << " streaming f1 std mean: " << streaming_f1.total_standardized / streaming_f1.num_samples;
       cerr << endl;
       cerr << "after load model" << endl;
-      // TODO(dfried): load BERT into bert_model_path;
+      // TODO(dfried): does BERT save its optimizer state?
+      bert_model_path = bert_param_path(model_dir);
     } else {
       cerr << "using " << optimizer_name << " for training" << endl;
     }
@@ -3090,16 +3091,14 @@ int main(int argc, char** argv) {
 
     WordFeaturizer* word_featurizer;
 
-    // TODO(dfried) implement!
     string bert_model_path;
 
-    if (conf.count("model")) {
+    if (conf.count("model_dir")) {
+      string model_dir = conf["model_dir"].as<string>();
       models.push_back(std::make_shared<Model>());
       parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), pretrained));
-      string path(conf["model"].as<string>());
-      string dpp = dynet_param_path(path);
-      cerr << "Loading single parser from " << path << "..." << endl;
-      ifstream in(path);
+      cerr << "Loading single parser from " << model_dir << "..." << endl;
+      ifstream in(dynet_param_path(model_dir));
       if (conf.count("text_format")) {
         boost::archive::text_iarchive ia(in);
         ia >> *models.back();
@@ -3109,7 +3108,7 @@ int main(int argc, char** argv) {
       }
       abstract_parser = parsers.back().get();
       if (BERT) {
-        bert_model_path = bert_param_path(path);
+        bert_model_path = bert_param_path(model_dir);
       }
     }
 
