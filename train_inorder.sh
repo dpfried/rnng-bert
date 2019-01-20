@@ -1,6 +1,5 @@
 #!/bin/bash
-dynet_seed=$1
-shift
+dynet_seed=1
 
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
@@ -16,4 +15,5 @@ build/nt-parser/nt-parser \
     --lstm_input_dim 128 \
     --hidden_dim 128 \
     -D 0.2 \
+    --batch_size 8 \
     $@
