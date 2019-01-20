@@ -12,6 +12,7 @@ namespace cnn {
 class Model;
 
 BOOST_STRONG_TYPEDEF(int, RNNPointer)
+const static RNNPointer NULL_RNN_POINTER(0);
 inline void swap(RNNPointer& i1, RNNPointer& i2) {
   RNNPointer t = i1; i1 = i2; i2 = t;
 }

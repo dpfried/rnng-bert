@@ -335,11 +335,11 @@ void WordFeaturizer::cleanup() {
     }
   }
 
-unsigned WordFeaturizer::batch_inputs(const std::vector<std::vector<int32_t>> &batch_input_ids_data,
+int WordFeaturizer::batch_inputs(const std::vector<std::vector<int32_t>> &batch_input_ids_data,
                                   const std::vector<std::vector<int32_t>> &batch_word_end_mask_data,
                                   std::vector<int32_t> &input_ids_data,
                                   std::vector<int32_t> &word_end_mask_data) {
-  unsigned n_inputs = batch_input_ids_data.size();
+  int n_inputs = batch_input_ids_data.size();
   assert(batch_word_end_mask_data.size() == n_inputs);
   assert(input_ids_data.empty());
   assert(word_end_mask_data.empty());
@@ -368,6 +368,5 @@ unsigned WordFeaturizer::batch_inputs(const std::vector<std::vector<int32_t>> &b
     }
     max_words = std::max(max_words, this_words);
   }
-  assert(max_words >= 0);
-  return (unsigned) max_words;
+  return max_words;
 }

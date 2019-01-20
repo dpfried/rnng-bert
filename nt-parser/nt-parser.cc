@@ -42,6 +42,7 @@
 #include "nt-parser/training-position.h"
 #include "nt-parser/streaming-statistics.h"
 #include "nt-parser/utils.h"
+#include "nt-parser/word-featurizer.h"
 
 // dictionaries
 cnn::Dict termdict, ntermdict, adict, posdict, non_unked_termdict;
@@ -54,7 +55,6 @@ const unsigned START_OF_SENTENCE_ACTION = std::numeric_limits<unsigned>::max();
 const string UNK = "UNK";
 
 volatile bool requested_stop = false;
-unsigned IMPLICIT_REDUCE_AFTER_SHIFT = 0;
 unsigned LAYERS = 2;
 unsigned INPUT_DIM = 40;
 unsigned HIDDEN_DIM = 60;
@@ -63,6 +63,7 @@ unsigned PRETRAINED_DIM = 50;
 unsigned LSTM_INPUT_DIM = 60;
 unsigned POS_DIM = 10;
 unsigned MORPH_DIM = 10;
+unsigned BERT_DIM = 768;
 
 unsigned MAX_CONS_NT = 8;
 
@@ -72,7 +73,7 @@ unsigned TERM_ACTION = UINT_MAX; // only used for in-order
 
 float ALPHA = 1.f;
 float DYNAMIC_EXPLORATION_PROBABILITY = 1.f;
-unsigned N_SAMPLES = 0;
+int N_SAMPLES = 0;
 unsigned ACTION_SIZE = 0;
 unsigned VOCAB_SIZE = 0;
 unsigned NT_SIZE = 0;
@@ -91,6 +92,10 @@ unsigned SILVER_BLOCKS_PER_GOLD = 10;
 bool UNNORMALIZED = false;
 
 bool IN_ORDER = false;
+
+bool BERT = false;
+float BERT_LR = 5e-5;
+int BERT_WARMUP_STEPS = 160;
 
 using namespace cnn::expr;
 using namespace cnn;
@@ -120,13 +125,14 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("gold_training_data", po::value<string>(), "List of Transitions - smaller corpus (e.g. wsj in a wsj+silver experiment)")
           ("test_data,p", po::value<string>(), "Test corpus")
 
-          ("explicit_terminal_reduce,x", "[recommended] If set, the parser must explicitly process a REDUCE operation to complete a preterminal constituent")
-          ("silver_blocks_per_gold", po::value<unsigned>()->default_value(10), "How many same-sized blocks of the silver data should be sampled and trained, between every train on the entire gold set?")
+          ("silver_blocks_per_gold", po::value<int>()->default_value(10), "How many same-sized blocks of the silver data should be sampled and trained, between every train on the entire gold set?")
 
           // model parameters
           ("use_pos_tags,P", "make POS tags visible to parser")
           ("use_morph_features", "make morphological features visible to parser")
           ("words,w", po::value<string>(), "Pretrained word embeddings")
+
+          ("bert", "use BERT to represent inputs")
 
           ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
           ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
@@ -145,17 +151,20 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("dropout,D", po::value<float>(), "Dropout rate")
           ("model_output_file", po::value<string>(), "Override auto-generate name to save model")
           // ("set_iter", po::value<int>(),  "")
-          ("save_frequency_minutes", po::value<unsigned>()->default_value(30),  "save model roughly every this many minutes (if it hasn't been saved by a dev decode)")
-          ("dev_check_frequency", po::value<unsigned>()->default_value(9958),  "evaluate on the dev set every this many sentences (9958 = 4 times per epoch on English)")
+          ("save_frequency_minutes", po::value<int>()->default_value(30),  "save model roughly every this many minutes (if it hasn't been saved by a dev decode)")
+          ("dev_check_frequency", po::value<int>()->default_value(9958),  "evaluate on the dev set every this many sentences (9958 = 4 times per epoch on English)")
 
           ("optimizer", po::value<string>()->default_value("sgd"), "sgd | adam")
           ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
-          ("batch_size", po::value<unsigned>()->default_value(1),  "number of training examples to use to compute each gradient update")
+          ("batch_size", po::value<int>()->default_value(1),  "number of training examples to use to compute each gradient update")
+
+          ("bert_lr", po::value<float>()->default_value(BERT_LR), "BERT learning rate (after warmup)")
+          ("bert_warmup_steps", po::value<int>()->default_value(BERT_WARMUP_STEPS), "number of steps in BERT warmup period")
 
           ("min_risk_training", "min risk training (default F1)")
           ("min_risk_method", po::value<string>()->default_value("reinforce"), "reinforce | beam | beam_unnormalized")
           ("min_risk_include_gold", "use the true parse in the gradient updates")
-          ("min_risk_candidates", po::value<unsigned>()->default_value(10), "min risk number of candidates")
+          ("min_risk_candidates", po::value<int>()->default_value(10), "min risk number of candidates")
 
           ("label_smoothing_epsilon", po::value<float>()->default_value(0.0f), "use epsilon interpolation with the uniform distribution in label smoothing")
 
@@ -163,27 +172,27 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("softmax_margin_training", "")
 
           ("dynamic_exploration_include_gold", "use the true parse in the gradient updates")
-          ("dynamic_exploration_candidates", po::value<unsigned>()->default_value(1))
+          ("dynamic_exploration_candidates", po::value<int>()->default_value(1))
           ("dynamic_exploration", po::value<string>(), "if passed, should be greedy | sample")
           ("dynamic_exploration_probability", po::value<float>()->default_value(1.0), "with this probability, use the model probabilities to explore (with method given by --dynamic_exploration)")
 
           ("compute_distribution_stats", "compute entropy and gold probabilities for action distributions")
 
           // inference
-          ("samples,s", po::value<unsigned>(), "Sample N trees for each test sentence instead of greedy max decoding")
+          ("samples,s", po::value<int>(), "Sample N trees for each test sentence instead of greedy max decoding")
           ("output_beam_as_samples", "Print the items in the beam in the same format as samples")
           ("samples_include_gold", "Also include the gold parse in the list of samples output")
           ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
           ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
-          ("beam_size,b", po::value<unsigned>()->default_value(1), "beam size")
+          ("beam_size,b", po::value<int>()->default_value(1), "beam size")
           ("beam_within_word", "greedy decode within word")
           ("beam_filter_at_word_size", po::value<int>()->default_value(-1), "when using beam_within_word, filter word completions to this size (defaults to decode_beam_size if < 0)")
           ("factored_ensemble_beam", "do beam search in each model in the ensemble separately, then take the union and rescore with the entire ensemble")
 
           ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
 
-          ("block_count", po::value<unsigned>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
-          ("block_num", po::value<unsigned>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
+          ("block_count", po::value<int>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
+          ("block_num", po::value<int>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
 
           // ensemble inference
           ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
@@ -269,15 +278,9 @@ static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsig
       return false;
     }
 
-    if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-      // if a SHIFT has an implicit REDUCE, then only shift after an NT:
-      if (is_shift && prev_a != 'N') return true;
-    }
-
     // be careful with top-level parens- you can only close them if you
     // have fully processed the buffer
     if (nopen_parens == 1 && bsize > 1) {
-      if (IMPLICIT_REDUCE_AFTER_SHIFT && is_shift) return true;
       if (is_reduce) return true;
     }
 
@@ -310,17 +313,13 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
       if (adict.Convert(a)[0] == 'N') {
         out_stream << " (" << ntermdict.Convert(action2NTindex.find(a)->second);
       } else if (adict.Convert(a)[0] == 'S') {
-        if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-          out_stream << termdict.Convert(sentence.raw[ti++]) << ")";
-        } else {
-          if (ptb_output_format) {
-            string preterminal = posdict.Convert(sentence.pos[ti]);
-            out_stream << " (" << preterminal << ' ' << non_unked_termdict.Convert(sentence.non_unked_raw[ti])
-                       << ")";
-            ti++;
-          } else { // use this branch to surpress preterminals
-            out_stream << ' ' << termdict.Convert(sentence.raw[ti++]);
-          }
+        if (ptb_output_format) {
+          string preterminal = posdict.Convert(sentence.pos[ti]);
+          out_stream << " (" << preterminal << ' ' << non_unked_termdict.Convert(sentence.non_unked_raw[ti])
+                     << ")";
+          ti++;
+        } else { // use this branch to surpress preterminals
+          out_stream << ' ' << termdict.Convert(sentence.raw[ti++]);
         }
       } else out_stream << ')';
     }
@@ -346,11 +345,19 @@ Expression logsumexp_stable(const vector<Expression>& all_log_probs) {
 }
 
 struct AbstractParser {
-  virtual std::shared_ptr<AbstractParserState> new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) = 0;
+  virtual std::shared_ptr<AbstractParserState> new_sentence(
+          ComputationGraph* hg,
+          const parser::Sentence& sent,
+          const vector<shared_ptr<Parameters>>& bert_embeddings,
+          bool is_evaluation,
+          bool build_training_graph,
+          bool apply_dropout
+  ) = 0;
 
   pair<vector<unsigned>, Expression> abstract_log_prob_parser(
       ComputationGraph* hg,
       const parser::Sentence& sent,
+      const vector<shared_ptr<Parameters>>& bert_embeddings,
       const vector<int>& correct_actions,
       double *right,
       bool is_evaluation,
@@ -376,7 +383,7 @@ struct AbstractParser {
       assert(build_training_graph);
     }
 
-    std::shared_ptr<AbstractParserState> state = new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
+    std::shared_ptr<AbstractParserState> state = new_sentence(hg, sent, bert_embeddings, is_evaluation, build_training_graph, apply_dropout);
 
     unsigned action_count = 0;  // incremented at each prediction
 
@@ -453,7 +460,7 @@ struct AbstractParser {
         model_action = valid_actions[w];
       } else { // max
         double best_score = adist[valid_actions[0]];
-        for (unsigned i = 1; i < valid_actions.size(); ++i) {
+        for (int i = 1; i < valid_actions.size(); ++i) {
           if (adist[valid_actions[i]] > best_score) {
             best_score = adist[valid_actions[i]];
             model_action = valid_actions[i];
@@ -520,7 +527,8 @@ struct AbstractParser {
   virtual vector<pair<vector<unsigned>, Expression>> abstract_log_prob_parser_beam(
       ComputationGraph* hg,
       const parser::Sentence& sent,
-      unsigned beam_size,
+      const vector<shared_ptr<Parameters>>& bert_embeddings,
+      int beam_size,
       bool is_evaluation = true
   ) {
     //ComputationGraph hg;
@@ -535,7 +543,7 @@ struct AbstractParser {
     bool build_training_graph = !is_evaluation;
     bool apply_dropout = (DROPOUT && !is_evaluation);
 
-    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
+    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, bert_embeddings, is_evaluation, build_training_graph, apply_dropout);
 
     vector<Expression> log_probs;
     vector<unsigned> results;
@@ -545,7 +553,7 @@ struct AbstractParser {
 
     beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, input(*hg, 0.0))));
 
-    unsigned action_count = 0;
+    int action_count = 0;
     while (completed.size() < beam_size && !beam.empty()) {
       action_count += 1;
       // old beam item, action to be applied, resulting total score
@@ -569,7 +577,7 @@ struct AbstractParser {
         }
       }
 
-      unsigned num_pruned_successors = std::min(beam_size, static_cast<unsigned>(successors.size()));
+      int num_pruned_successors = std::min(beam_size, static_cast<int>(successors.size()));
       partial_sort(successors.begin(),
                    successors.begin() + num_pruned_successors,
                    successors.end(),
@@ -622,7 +630,8 @@ struct AbstractParser {
   virtual vector<pair<vector<unsigned>, Expression>> abstract_log_prob_parser_beam_within_word(
           ComputationGraph* hg,
           const parser::Sentence& sent,
-          unsigned beam_size,
+          const vector<shared_ptr<Parameters>>& bert_embeddings,
+          int beam_size,
           int beam_filter_at_word_size,
           bool is_evaluation = true
   ) {
@@ -641,7 +650,7 @@ struct AbstractParser {
     bool build_training_graph = !is_evaluation;
     bool apply_dropout = (DROPOUT && !is_evaluation);
 
-    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout);
+    std::shared_ptr<AbstractParserState> initial_state = new_sentence(hg, sent, bert_embeddings, is_evaluation, build_training_graph, apply_dropout);
 
     vector<unsigned> results;
 
@@ -650,7 +659,7 @@ struct AbstractParser {
 
     beam.push_back(Stack<BeamItem>(BeamItem(initial_state, START_OF_SENTENCE_ACTION, input(*hg, 0.0))));
 
-    for (unsigned current_termc = 0; current_termc < sent.size(); current_termc++) {
+    for (int current_termc = 0; current_termc < sent.size(); current_termc++) {
       completed.clear();
       while (completed.size() < beam_size && !beam.empty()) {
         // old beam item, action to be applied, resulting total score
@@ -674,7 +683,7 @@ struct AbstractParser {
           }
         }
 
-        unsigned num_pruned_successors = std::min(beam_size, static_cast<unsigned>(successors.size()));
+        int num_pruned_successors = std::min(beam_size, static_cast<int>(successors.size()));
         partial_sort(successors.begin(),
                      successors.begin() + num_pruned_successors,
                      successors.end(),
@@ -709,8 +718,8 @@ struct AbstractParser {
 
       beam.clear();
       // keep around a larger completion list if we're at the end of the sentence
-      unsigned num_pruned_completion = std::min(current_termc < sent.size() - 1 ? beam_filter_at_word_size : beam_size, static_cast<unsigned>(completed.size()));
-      std::copy(completed.begin(), completed.begin() + std::min(num_pruned_completion, (unsigned) completed.size()), std::back_inserter(beam));
+      int num_pruned_completion = std::min(current_termc < sent.size() - 1 ? beam_filter_at_word_size : beam_size, static_cast<int>(completed.size()));
+      std::copy(completed.begin(), completed.begin() + std::min(num_pruned_completion, static_cast<int>(completed.size())), std::back_inserter(beam));
     }
 
     vector<pair<vector<unsigned>, Expression>> completed_actions_and_nlp;
@@ -736,7 +745,7 @@ struct AbstractParser {
 
 std::shared_ptr<SymbolicParserState> initialize_symbolic_parser_state(const parser::Sentence& sent) {
   vector<int> bufferi(sent.size() + 1);  // position of the words in the sentence
-  for (unsigned i = 0; i < sent.size(); ++i) {
+  for (int i = 0; i < sent.size(); ++i) {
     bufferi[sent.size() - i] = i;
   }
   bufferi[0] = -999;
@@ -794,8 +803,6 @@ struct ParserBuilder : public AbstractParser {
   LookupParameters* p_a; // input action embeddings
   LookupParameters* p_pos; // pos embeddings (optional)
   Parameters* p_p2w;  // pos2word mapping (optional)
-  Parameters* p_ptbias; // preterminal bias (used with IMPLICIT_REDUCE_AFTER_SHIFT)
-  Parameters* p_ptW;    // preterminal W (used with IMPLICIT_REDUCE_AFTER_SHIFT)
   Parameters* p_pbias; // parser state bias
   Parameters* p_A; // action lstm to parser state
   Parameters* p_B; // buffer lstm to parser state
@@ -810,6 +817,7 @@ struct ParserBuilder : public AbstractParser {
   Parameters* p_buffer_guard;  // end of buffer
   Parameters* p_stack_guard;  // end of stack
   Parameters* p_cW;
+  Parameters* p_bert_stack_bias;
 
   std::unordered_map<std::string, LookupParameters*> p_morph_embeddings;
   std::unordered_map<std::string, Parameters*> p_morph_W;
@@ -819,86 +827,94 @@ struct ParserBuilder : public AbstractParser {
       action_lstm(LAYERS, ACTION_DIM, HIDDEN_DIM, model),
       const_lstm_fwd(LAYERS, LSTM_INPUT_DIM, LSTM_INPUT_DIM, model), // used to compose children of a node into a representation of the node
       const_lstm_rev(LAYERS, LSTM_INPUT_DIM, LSTM_INPUT_DIM, model), // used to compose children of a node into a representation of the node
-      p_w(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})), // word embeddings
-      p_t(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})), // pretrained word embeddings (not updated)
       p_nt(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})), // nonterminal embeddings
       p_ntup(model->add_lookup_parameters(NT_SIZE, {LSTM_INPUT_DIM})), // nonterminal embeddings when used in a composed representation
       p_a(model->add_lookup_parameters(ACTION_SIZE, {ACTION_DIM})),
       p_pbias(model->add_parameters({HIDDEN_DIM}, "pbias")),
       p_A(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM}, "A")),
-      p_B(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM}, "B")),
+      p_B(model->add_parameters({HIDDEN_DIM, BERT ? BERT_DIM : HIDDEN_DIM}, "B")),
       p_S(model->add_parameters({HIDDEN_DIM, HIDDEN_DIM}, "S")),
-      p_w2l(model->add_parameters({LSTM_INPUT_DIM, INPUT_DIM}, "w2l")),
-      p_ib(model->add_parameters({LSTM_INPUT_DIM}, "ib")),
       p_cbias(model->add_parameters({LSTM_INPUT_DIM}, "cbias")),
       p_p2a(model->add_parameters({ACTION_SIZE, HIDDEN_DIM}, "p2a")),
       p_action_start(model->add_parameters({ACTION_DIM}, "action_start")),
       p_abias(model->add_parameters({ACTION_SIZE}, "abias")),
 
-      p_buffer_guard(model->add_parameters({LSTM_INPUT_DIM}, "buffer_guard")),
       p_stack_guard(model->add_parameters({LSTM_INPUT_DIM}, "stack_guard")),
 
       p_cW(model->add_parameters({LSTM_INPUT_DIM, LSTM_INPUT_DIM * 2}, "cW")) {
 
-    if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-      p_ptbias = model->add_parameters({LSTM_INPUT_DIM}, "ptbias"); // preterminal bias (used with IMPLICIT_REDUCE_AFTER_SHIFT)
-      p_ptW = model->add_parameters({LSTM_INPUT_DIM, 2*LSTM_INPUT_DIM}, "ptW");    // preterminal W (used with IMPLICIT_REDUCE_AFTER_SHIFT)
-    }
-
-
-    if (USE_POS) {
-      p_pos = model->add_lookup_parameters(POS_SIZE, {POS_DIM});
-      p_p2w = model->add_parameters({LSTM_INPUT_DIM, POS_DIM}, "p2w");
-    }
-    buffer_lstm = new LSTMBuilder(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model);
-    if (pretrained.size() > 0) {
-      p_t = model->add_lookup_parameters(VOCAB_SIZE, {PRETRAINED_DIM});
-      for (auto it : pretrained)
-        p_t->Initialize(it.first, it.second);
-      p_t2l = model->add_parameters({LSTM_INPUT_DIM, PRETRAINED_DIM}, "t2l");
-    } else {
+    if (BERT) {
+      p_bert_stack_bias = model->add_parameters({HIDDEN_DIM});
       p_t = nullptr;
       p_t2l = nullptr;
-    }
-    if (USE_MORPH_FEATURES) {
-      for (unsigned i = 0; i < morphology_classes.size(); i++) {
-        const string& _class = morphology_classes.Convert(i);
-        auto& morph_dict = morphology_dicts[_class];
-        p_morph_embeddings[_class] = model->add_lookup_parameters(morph_dict.size() + 1, {MORPH_DIM}); // + 1 for none
-        p_morph_W[_class] = model->add_parameters({LSTM_INPUT_DIM, MORPH_DIM}, "morph_" + _class);
+    } else {
+      p_w = model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM}); // word embeddings
+      p_w2l = model->add_parameters({LSTM_INPUT_DIM, INPUT_DIM}, "w2l");
+      p_ib = model->add_parameters({LSTM_INPUT_DIM}, "ib");
+      p_t = model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM}); // pretrained word embeddings (not updated)
+      if (USE_POS) {
+        p_pos = model->add_lookup_parameters(POS_SIZE, {POS_DIM});
+        p_p2w = model->add_parameters({LSTM_INPUT_DIM, POS_DIM}, "p2w");
+      }
+      buffer_lstm = new LSTMBuilder(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model);
+      p_buffer_guard = model->add_parameters({LSTM_INPUT_DIM}, "buffer_guard");
+      if (pretrained.size() > 0) {
+        p_t = model->add_lookup_parameters(VOCAB_SIZE, {PRETRAINED_DIM});
+        for (auto it : pretrained)
+          p_t->Initialize(it.first, it.second);
+        p_t2l = model->add_parameters({LSTM_INPUT_DIM, PRETRAINED_DIM}, "t2l");
+      } else {
+        p_t = nullptr;
+        p_t2l = nullptr;
+      }
+      if (USE_MORPH_FEATURES) {
+        for (int i = 0; i < morphology_classes.size(); i++) {
+          const string& _class = morphology_classes.Convert(i);
+          auto& morph_dict = morphology_dicts[_class];
+          p_morph_embeddings[_class] = model->add_lookup_parameters(morph_dict.size() + 1, {MORPH_DIM}); // + 1 for none
+          p_morph_W[_class] = model->add_parameters({LSTM_INPUT_DIM, MORPH_DIM}, "morph_" + _class);
+        }
       }
     }
+
   }
 
   // instance variables for each sentence
   ComputationGraph* hg;
   bool apply_dropout;
-  Expression pbias, S, B, A, ptbias, ptW, p2w, ib, cbias, w2l, t2l, p2a, abias, action_start, cW;
+  Expression pbias, S, B, A, ptbias, ptW, p2w, ib, cbias, w2l, t2l, p2a, abias, action_start, cW, bert_stack_bias;
   unordered_map<string, Expression> morph_W;
 
-  std::shared_ptr<AbstractParserState> new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) override {
+  std::shared_ptr<AbstractParserState> new_sentence(
+          ComputationGraph* hg,
+          const parser::Sentence& sent,
+          const vector<shared_ptr<Parameters>>& bert_embeddings,
+          bool is_evaluation,
+          bool build_training_graph,
+          bool apply_dropout
+  ) override {
     this->hg = hg;
     this->apply_dropout = apply_dropout;
 
     if (!NO_STACK) stack_lstm.new_graph(*hg);
-    buffer_lstm->new_graph(*hg);
+    if (!BERT) buffer_lstm->new_graph(*hg);
     if (!NO_ACTION_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
 
     if (!NO_STACK) stack_lstm.start_new_sequence();
-    buffer_lstm->start_new_sequence();
+    if (!BERT) buffer_lstm->start_new_sequence();
     if (!NO_ACTION_HISTORY) action_lstm.start_new_sequence();
 
     if (apply_dropout) {
       if (!NO_STACK) stack_lstm.set_dropout(DROPOUT);
-      buffer_lstm->set_dropout(DROPOUT);
+      if (!BERT) buffer_lstm->set_dropout(DROPOUT);
       if (!NO_ACTION_HISTORY) action_lstm.set_dropout(DROPOUT);
       const_lstm_fwd.set_dropout(DROPOUT);
       const_lstm_rev.set_dropout(DROPOUT);
     } else {
       if (!NO_STACK) stack_lstm.disable_dropout();
-      buffer_lstm->disable_dropout();
+      if (!BERT) buffer_lstm->disable_dropout();
       if (!NO_ACTION_HISTORY) action_lstm.disable_dropout();
       const_lstm_fwd.disable_dropout();
       const_lstm_rev.disable_dropout();
@@ -909,21 +925,15 @@ struct ParserBuilder : public AbstractParser {
     S = parameter(*hg, p_S);
     B = parameter(*hg, p_B);
     A = parameter(*hg, p_A);
-    if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-      ptbias = parameter(*hg, p_ptbias);
-      ptW = parameter(*hg, p_ptW);
-    }
-    if (USE_POS) p2w = parameter(*hg, p_p2w);
 
-    ib = parameter(*hg, p_ib);
     cbias = parameter(*hg, p_cbias);
-    w2l = parameter(*hg, p_w2l);
     if (p_t2l)
       t2l = parameter(*hg, p_t2l);
     p2a = parameter(*hg, p_p2a);
     abias = parameter(*hg, p_abias);
     action_start = parameter(*hg, p_action_start);
     cW = parameter(*hg, p_cW);
+    if (BERT) bert_stack_bias = parameter(*hg, p_bert_stack_bias);
     for (auto& pair: p_morph_W) {
       morph_W[pair.first] = parameter(*hg, pair.second);
     }
@@ -934,44 +944,58 @@ struct ParserBuilder : public AbstractParser {
     // precompute buffer representation from left to right
 
     // in the discriminative model, here we set up the buffer contents
-    for (unsigned i = 0; i < sent.size(); ++i) {
-      int wordid = sent.raw[i]; // this will be equal to unk at dev/test
-      if (build_training_graph && !is_evaluation && singletons.size() > wordid && singletons[wordid] && rand01() > 0.5)
-        wordid = sent.unk[i];
-      Expression w = lookup(*hg, p_w, wordid);
-      vector<Expression> args = {ib, w2l, w}; // learn embeddings
-      if (p_t && pretrained.count(sent.lc[i])) {  // include fixed pretrained vectors?
-        Expression t = const_lookup(*hg, p_t, sent.lc[i]);
-        args.push_back(t2l);
-        args.push_back(t);
+    if (BERT) {
+      assert(bert_embeddings.size() == sent.size() + 1); // should also contain the SEP embedding at the end
+      for (int i = 0; i < bert_embeddings.size(); ++i) {
+        buffer[bert_embeddings.size() - 1 - i] = parameter(*hg, bert_embeddings[i].get());
       }
-      if (USE_POS) {
-        args.push_back(p2w);
-        args.push_back(lookup(*hg, p_pos, sent.pos[i]));
-      }
-      if (USE_MORPH_FEATURES) {
-        auto feat_mapping = sent.morphology_features[i];
-        for (unsigned idx = 0; idx < morphology_classes.size(); idx++) {
-          const string& class_ = morphology_classes.Convert(idx);
-          auto& morph_dict = morphology_dicts[class_];
-          const auto& morph_singletons = morphology_singletons[class_];
-          unsigned feature_idx = feat_mapping.count(idx) ? feat_mapping[idx] : morph_dict.size();
-          if (build_training_graph && !is_evaluation && morph_singletons.size() > feature_idx && morph_singletons[feature_idx] && rand01() > 0.5) {
-            int unk_index = morph_dict.Convert(UNK);
-            assert(unk_index >= 0);
-            feature_idx = (unsigned) unk_index;
-          }
-          args.push_back(morph_W[class_]);
-          args.push_back(lookup(*hg, p_morph_embeddings[class_], feature_idx));
+    } else {
+      w2l = parameter(*hg, p_w2l);
+      if (USE_POS) p2w = parameter(*hg, p_p2w);
+      ib = parameter(*hg, p_ib);
+
+      for (int i = 0; i < sent.size(); ++i) {
+        int wordid = sent.raw[i]; // this will be equal to unk at dev/test
+        if (build_training_graph && !is_evaluation && singletons.size() > wordid && singletons[wordid] &&
+            rand01() > 0.5)
+          wordid = sent.unk[i];
+        Expression w = lookup(*hg, p_w, wordid);
+        vector<Expression> args = {ib, w2l, w}; // learn embeddings
+        if (p_t && pretrained.count(sent.lc[i])) {  // include fixed pretrained vectors?
+          Expression t = const_lookup(*hg, p_t, sent.lc[i]);
+          args.push_back(t2l);
+          args.push_back(t);
         }
+        if (USE_POS) {
+          args.push_back(p2w);
+          args.push_back(lookup(*hg, p_pos, sent.pos[i]));
+        }
+        if (USE_MORPH_FEATURES) {
+          auto feat_mapping = sent.morphology_features[i];
+          for (int idx = 0; idx < morphology_classes.size(); idx++) {
+            const string &class_ = morphology_classes.Convert(idx);
+            auto &morph_dict = morphology_dicts[class_];
+            const auto &morph_singletons = morphology_singletons[class_];
+            unsigned feature_idx = feat_mapping.count(idx) ? feat_mapping[idx] : morph_dict.size();
+            if (build_training_graph && !is_evaluation && morph_singletons.size() > feature_idx &&
+                morph_singletons[feature_idx] && rand01() > 0.5) {
+              int unk_index = morph_dict.Convert(UNK);
+              assert(unk_index >= 0);
+              feature_idx = (unsigned) unk_index;
+            }
+            args.push_back(morph_W[class_]);
+            args.push_back(lookup(*hg, p_morph_embeddings[class_], feature_idx));
+          }
+        }
+        buffer[sent.size() - i] = rectify(affine_transform(args));
       }
-      buffer[sent.size() - i] = rectify(affine_transform(args));
+      // dummy symbol to represent the empty buffer
+      buffer[0] = parameter(*hg, p_buffer_guard);
+
+      for (auto& b : buffer)
+        buffer_lstm->add_input(b);
     }
 
-    // dummy symbol to represent the empty buffer
-    buffer[0] = parameter(*hg, p_buffer_guard);
-    for (auto& b : buffer)
-      buffer_lstm->add_input(b);
 
     vector<Expression> stack;  // variables representing subtree embeddings
     stack.push_back(parameter(*hg, p_stack_guard));
@@ -987,7 +1011,7 @@ struct ParserBuilder : public AbstractParser {
         std::make_shared<ParserState>(
             this,
             action_lstm.state(),
-            buffer_lstm->state(),
+            (BERT ? cnn::NULL_RNN_POINTER : buffer_lstm->state()),
             stack_lstm.state(),
             Stack<Expression>(buffer),
             Stack<Expression>(stack),
@@ -1011,22 +1035,30 @@ struct EnsembledParser : public AbstractParser {
     assert(!parsers.empty());
   }
 
-  std::shared_ptr<AbstractParserState> new_sentence(ComputationGraph* hg, const parser::Sentence& sent, bool is_evaluation, bool build_training_graph, bool apply_dropout) override {
+  std::shared_ptr<AbstractParserState> new_sentence(
+          ComputationGraph* hg,
+          const parser::Sentence& sent,
+          const vector<shared_ptr<Parameters>>& bert_embeddings,
+          bool is_evaluation,
+          bool build_training_graph,
+          bool apply_dropout
+  ) override {
     vector<std::shared_ptr<AbstractParserState>> states;
     for (const std::shared_ptr<ParserBuilder>& parser : parsers)
-      states.push_back(parser->new_sentence(hg, sent, is_evaluation, build_training_graph, apply_dropout));
+      states.push_back(parser->new_sentence(hg, sent, bert_embeddings, is_evaluation, build_training_graph, apply_dropout));
     return std::static_pointer_cast<AbstractParserState>(std::make_shared<EnsembledParserState>(this, states));
   }
 
   vector<pair<vector<unsigned>, Expression>> abstract_log_prob_parser_beam(
           ComputationGraph* hg,
           const parser::Sentence& sent,
-          unsigned beam_size
+          const vector<shared_ptr<Parameters>>& bert_embeddings,
+          int beam_size
   ) {
     if (factored_beam) {
       set<vector<unsigned>> all_candidates;
       for (const std::shared_ptr<ParserBuilder>& parser : parsers) {
-        auto this_beam = parser->abstract_log_prob_parser_beam(hg, sent, beam_size);
+        auto this_beam = parser->abstract_log_prob_parser_beam(hg, sent, bert_embeddings, beam_size);
         for (auto results : this_beam) {
           all_candidates.insert(results.first);
         }
@@ -1036,7 +1068,7 @@ struct EnsembledParser : public AbstractParser {
         ComputationGraph hg;
         double right;
         auto candidate_and_ensemble_nlp = abstract_log_prob_parser(
-                &hg, sent, vector<int>(candidate.begin(), candidate.end()), &right, true, false
+                &hg, sent, bert_embeddings, vector<int>(candidate.begin(), candidate.end()), &right, true, false
         );
         candidates_and_nlps.push_back(candidate_and_ensemble_nlp);
       }
@@ -1048,7 +1080,7 @@ struct EnsembledParser : public AbstractParser {
       return candidates_and_nlps;
 
     } else {
-      return AbstractParser::abstract_log_prob_parser_beam(hg, sent, beam_size);
+      return AbstractParser::abstract_log_prob_parser_beam(hg, sent, bert_embeddings, beam_size);
     }
   }
 };
@@ -1156,22 +1188,10 @@ struct SymbolicParserState: public AbstractParserState {
 
     if (ac =='S' && ac2=='H') {  // SHIFT
       assert(bufferi.size() > 1); // dummy symbol means > 1 (not >= 1)
-      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-        assert(false); // for purposes of word-level beam debugging
-        --new_nopen_parens;
-        assert(is_open_paren.back() >= 0);
-
-        new_stacki = new_stacki.pop_back();
-        new_bufferi = new_bufferi.pop_back();
-        new_is_open_paren = new_is_open_paren.pop_back();
-        new_stacki = new_stacki.push_back(999);
-        new_is_open_paren = new_is_open_paren.push_back(-1);
-      } else {
-        new_stacki = new_stacki.push_back(bufferi.back());
-        new_bufferi = new_bufferi.pop_back();
-        new_is_open_paren = new_is_open_paren.push_back(-1);
-        was_word_completed = (new_bufferi.size() > 1);
-      }
+      new_stacki = new_stacki.push_back(bufferi.back());
+      new_bufferi = new_bufferi.pop_back();
+      new_is_open_paren = new_is_open_paren.push_back(-1);
+      was_word_completed = (new_bufferi.size() > 1);
       if (IN_ORDER) {
         new_unary = 0;
       }
@@ -1364,11 +1384,17 @@ struct ParserState : public AbstractParserState {
   std::pair<Expression, Expression> get_action_log_probs(const vector<unsigned>& valid_actions, vector<float>* augmentation) const override {
     Expression stack_summary = NO_STACK ? Expression() : parser->stack_lstm.get_h(stack_state).back();
     Expression action_summary = NO_ACTION_HISTORY ? Expression() : parser->action_lstm.get_h(action_state).back();
-    Expression buffer_summary = parser->buffer_lstm->get_h(buffer_state).back();
+    Expression buffer_summary = BERT ? buffer.back() : parser->buffer_lstm->get_h(buffer_state).back();
+
+    assert (symbolic_parser_state->bufferi.size() == buffer.size());
+
     if (parser->apply_dropout) { // TODO: don't the outputs of the LSTMs already have dropout applied?
       if (!NO_STACK) stack_summary = dropout(stack_summary, DROPOUT);
       if (!NO_ACTION_HISTORY) action_summary = dropout(action_summary, DROPOUT);
-      buffer_summary = dropout(buffer_summary, DROPOUT);
+      if (!BERT) {
+        // TODO(dfried): consider applying dropout here as well
+        buffer_summary = dropout(buffer_summary, DROPOUT);
+      }
     }
 
     vector<Expression> elements{parser->pbias};
@@ -1425,35 +1451,19 @@ struct ParserState : public AbstractParserState {
 
     if (ac =='S' && ac2=='H') {  // SHIFT
       assert(buffer.size() > 1); // dummy symbol means > 1 (not >= 1)
-      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-          assert(false); // for purposes of word-level beam debugging
-        Expression nonterminal = lookup(*parser->hg, parser->p_ntup, is_open_paren.back());
-        Expression terminal = buffer.back();
-        Expression c = concatenate({nonterminal, terminal});
-        Expression pt = rectify(affine_transform({parser->ptbias, parser->ptW, c}));
-        new_stack = new_stack.pop_back();
-        if (!NO_STACK) new_stack_state = parser->stack_lstm.head_of(stack_state);
-        new_buffer = new_buffer.pop_back();
-        new_buffer_state = parser->buffer_lstm->head_of(buffer_state);
-        new_is_open_paren = new_is_open_paren.pop_back();
-        if (!NO_STACK) {
-          parser->stack_lstm.add_input(new_stack_state, pt);
-          new_stack_state = parser->stack_lstm.state();
-        }
-        new_stack = new_stack.push_back(pt);
-        new_is_open_paren = new_is_open_paren.push_back(-1);
+      if (BERT) {
+        new_stack = new_stack.push_back(affine_transform({parser->bert_stack_bias, parser->B, buffer.back()}));
       } else {
         new_stack = new_stack.push_back(buffer.back());
-        if (!NO_STACK) {
-          parser->stack_lstm.add_input(stack_state, buffer.back());
-          new_stack_state = parser->stack_lstm.state();
-        }
-        new_buffer = new_buffer.pop_back();
         new_buffer_state = parser->buffer_lstm->head_of(buffer_state);
-        new_is_open_paren = new_is_open_paren.push_back(-1);
       }
+      if (!NO_STACK) {
+        parser->stack_lstm.add_input(stack_state, new_stack.back());
+        new_stack_state = parser->stack_lstm.state();
+      }
+      new_buffer = new_buffer.pop_back();
+      new_is_open_paren = new_is_open_paren.push_back(-1);
     }
-
     else if (ac == 'N') { // NT
       if (IN_ORDER) {
         assert(stack.size() > 1);
@@ -1760,9 +1770,6 @@ vector<string> string_representation(const vector<int>& actions, const parser::S
     }
     else if (adict.Convert(a)[0] == 'S') {
       string_rep.push_back(posdict.Convert(sentence.pos[ti++]));
-      if (IMPLICIT_REDUCE_AFTER_SHIFT) {
-        string_rep.push_back(")");
-      }
     } else if (adict.Convert(a)[0] == 'T') {
       assert(IN_ORDER);
       // todo: check that we're at the end
@@ -1839,17 +1846,76 @@ void check_spmrl(const string& path, bool is_spmrl) {
   assert(is_spmrl == boost::starts_with(path, "french_"));
 }
 
+void bert_fw(WordFeaturizer* word_featurizer,
+             const vector<parser::Sentence>& batch_sentences,
+             vector<vector<shared_ptr<Parameters>>>& batch_bert_embeddings,
+             TF_Tensor** feats_tensor,
+             TF_Tensor** grads_tensor) {
+  int batch_size = batch_sentences.size();
+  vector<vector<int32_t>> batch_input_ids;
+  vector<vector<int32_t>> batch_word_end_mask;
+  for (auto &sent : batch_sentences) {
+    batch_input_ids.emplace_back(sent.word_piece_ids_flat);
+    batch_word_end_mask.emplace_back(sent.word_end_mask);
+  }
+  assert(batch_input_ids.size() == batch_size);
+  assert(batch_bert_embeddings.empty());
+
+  vector<int32_t> flat_input_ids;
+  vector<int32_t> flat_word_end_mask;
+  const int num_words = word_featurizer->batch_inputs(batch_input_ids, batch_word_end_mask, flat_input_ids, flat_word_end_mask);
+  const int num_subwords = flat_input_ids.size() / batch_size;
+  //std::cout << "running BERT fw on batch of size " << batch_size << " num_words=" << num_words << std::endl;
+
+  const std::vector<int64_t> dims = {batch_size, num_words, BERT_DIM};
+  std::size_t data_size = sizeof(float_t);
+  for (auto i : dims) {
+    data_size *= i;
+  }
+  word_featurizer->run_fw(batch_size, num_subwords, flat_input_ids, flat_word_end_mask, feats_tensor, grads_tensor);
+
+  assert(TF_Dim(*feats_tensor, 0) == batch_size);
+  assert(TF_Dim(*feats_tensor, 1) == num_words);
+  assert(TF_Dim(*feats_tensor, 2) == BERT_DIM);
+  assert(TF_TensorType(*feats_tensor) == TF_FLOAT);
+
+  Dim bert_dim{BERT_DIM};
+
+  float* feat_arr = static_cast<float*>(TF_TensorData(*feats_tensor));
+  float* grads_arr = nullptr;
+  if (grads_tensor) {
+    assert(TF_Dim(*grads_tensor, 0) == batch_size);
+    assert(TF_Dim(*grads_tensor, 1) == num_words);
+    assert(TF_Dim(*grads_tensor, 2) == BERT_DIM);
+    assert(TF_TensorType(*grads_tensor) == TF_FLOAT);
+    grads_arr = static_cast<float*>(TF_TensorData(*grads_tensor));
+  }
+
+  batch_bert_embeddings.resize(batch_size);
+  for (int instance_within_batch = 0; instance_within_batch < batch_size; instance_within_batch++) {
+    auto& bert_embeddings = batch_bert_embeddings[instance_within_batch];
+    for (int word_index = 1; word_index < batch_sentences[instance_within_batch].word_piece_ids.size(); word_index++) {
+      int64_t feat_index = instance_within_batch * num_words * BERT_DIM + word_index * BERT_DIM;
+      assert(feat_index >= 0);
+      float *grads_location = grads_tensor ? &(grads_arr[feat_index]) : nullptr;
+      shared_ptr<Parameters> params = make_shared<Parameters>(bert_dim, &(feat_arr[feat_index]), grads_location);
+      bert_embeddings.push_back(params);
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   unsigned random_seed = cnn::Initialize(argc, argv);
 
+  auto random_engine = std::default_random_engine(random_seed);
+
   cerr << "COMMAND LINE:";
-  for (unsigned i = 0; i < static_cast<unsigned>(argc); ++i) cerr << ' ' << argv[i];
+  for (int i = 0; i < static_cast<int>(argc); ++i) cerr << ' ' << argv[i];
   cerr << endl;
-  unsigned status_every_i_iterations = 100;
+  int status_every_i_iterations = 100;
 
   po::variables_map conf;
   InitCommandLine(argc, argv, &conf);
-  IMPLICIT_REDUCE_AFTER_SHIFT = conf.count("explicit_terminal_reduce") == 0;
   USE_POS = conf.count("use_pos_tags");
   USE_MORPH_FEATURES = conf.count("use_morph_features");
   if (conf.count("dropout"))
@@ -1868,17 +1934,17 @@ int main(int argc, char** argv) {
 
   MAX_CONS_NT = conf["max_cons_nt"].as<unsigned>();
 
-  SILVER_BLOCKS_PER_GOLD = conf["silver_blocks_per_gold"].as<unsigned>();
+  SILVER_BLOCKS_PER_GOLD = conf["silver_blocks_per_gold"].as<int>();
 
   UNNORMALIZED = conf.count("unnormalized");
 
   IN_ORDER = conf.count("inorder");
+
+  BERT = conf.count("bert");
+  BERT_LR = conf["bert_lr"].as<float>();
+  BERT_WARMUP_STEPS = conf["bert_warmup_steps"].as<int>();
+
   bool spmrl = conf.count("spmrl");
-
-  if (IN_ORDER) {
-    assert(!IMPLICIT_REDUCE_AFTER_SHIFT);
-  }
-
 
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
@@ -1905,7 +1971,7 @@ int main(int argc, char** argv) {
     if (ALPHA <= 0.f) { cerr << "--alpha must be between 0 and +infty\n"; abort(); }
   }
   if (conf.count("samples")) {
-    N_SAMPLES = conf["samples"].as<unsigned>();
+    N_SAMPLES = conf["samples"].as<int>();
     //if (N_SAMPLES == 0) { cerr << "Please specify N>0 samples\n"; abort(); }
   }
 
@@ -1928,7 +1994,7 @@ int main(int argc, char** argv) {
     exploration_type = exploration_types.at(exp_type);
   }
 
-  const unsigned exploration_candidates = conf["dynamic_exploration_candidates"].as<unsigned>();
+  const int exploration_candidates = conf["dynamic_exploration_candidates"].as<int>();
   assert(exploration_candidates > 0);
   const bool exploration_include_gold = conf.count("dynamic_exploration_include_gold") > 0;
   if (exploration_include_gold) {
@@ -1939,7 +2005,6 @@ int main(int argc, char** argv) {
   os << "ntparse"
      << (USE_POS ? "_pos" : "")
      << (USE_PRETRAINED ? "_pretrained" : "")
-     << '_' << IMPLICIT_REDUCE_AFTER_SHIFT
      << '_' << LAYERS
      << '_' << INPUT_DIM
      << '_' << HIDDEN_DIM
@@ -2027,7 +2092,7 @@ int main(int argc, char** argv) {
 
   non_unked_termdict.Freeze();
 
-  for (unsigned i = 0; i < adict.size(); ++i) {
+  for (int i = 0; i < adict.size(); ++i) {
     const string& a = adict.Convert(i);
     if (a[0] != 'N') continue;
     size_t start = a.find('(') + 1;
@@ -2042,7 +2107,7 @@ int main(int argc, char** argv) {
   VOCAB_SIZE = termdict.size();
   ACTION_SIZE = adict.size();
   possible_actions.resize(adict.size());
-  for (unsigned i = 0; i < adict.size(); ++i)
+  for (int i = 0; i < adict.size(); ++i)
     possible_actions[i] = i;
 
   bool factored_ensemble_beam = conf.count("factored_ensemble_beam") > 0;
@@ -2052,38 +2117,81 @@ int main(int argc, char** argv) {
   bool output_beam_as_samples = conf.count("output_beam_as_samples") > 0;
   bool output_candidate_trees = output_beam_as_samples || conf.count("samples_include_gold") || sample;
 
-  unsigned beam_size = conf["beam_size"].as<unsigned>();
-  unsigned test_size = test_corpus.size();
+  int beam_size = conf["beam_size"].as<int>();
+  int test_size = test_corpus.size();
 
-  unsigned start_index = 0;
-  unsigned stop_index = test_corpus.size();
-  unsigned block_count = conf["block_count"].as<unsigned>();
-  unsigned block_num = conf["block_num"].as<unsigned>();
 
-  auto decode = [&](AbstractParser& parser, const parser::Sentence& sentence, StreamingStatistics* streaming_entropy = nullptr) {
+  // used for training and decoding
+  int batch_size = conf["batch_size"].as<int>();
+
+  int start_index = 0;
+  int stop_index = test_corpus.size();
+  int block_count = conf["block_count"].as<int>();
+  int block_num = conf["block_num"].as<int>();
+
+  auto decode = [&](
+          AbstractParser& parser,
+          const parser::Sentence& sentence,
+          const vector<shared_ptr<Parameters>>& bert_embeddings,
+          StreamingStatistics* streaming_entropy = nullptr
+  ) {
       double right = 0;
       // get parse and negative log probability
       ComputationGraph hg;
       if (beam_size > 1 || conf.count("beam_within_word")) {
         vector<pair<vector<unsigned>, Expression>> beam_results;
         if (conf.count("beam_within_word")) {
-          beam_results = parser.abstract_log_prob_parser_beam_within_word(&hg, sentence,
-                                                                          beam_size,
+          beam_results = parser.abstract_log_prob_parser_beam_within_word(&hg, sentence, bert_embeddings, beam_size,
                                                                           conf["beam_filter_at_word_size"].as<int>());
         } else {
-          beam_results = parser.abstract_log_prob_parser_beam(&hg, sentence, beam_size);
+          beam_results = parser.abstract_log_prob_parser_beam(&hg, sentence, bert_embeddings, beam_size);
         }
         return beam_results[0];
       } else {
         return parser.abstract_log_prob_parser(
-                &hg, sentence, vector<int>(), &right, true, false, false,
-                0.0, nullptr, false, false, streaming_entropy, nullptr);
+                &hg,
+                sentence,
+                bert_embeddings,
+                vector<int>(),
+                &right,
+                true, // is_evaluation
+                false, // sample
+                false, // label_smoothing
+                0.0, // label_smoothing_epsilon
+                nullptr, // dynamic_oracle
+                false, // loss_augmented
+                false, // softmax_margin
+                streaming_entropy,
+                nullptr // streaming_gold_prob
+        );
       }
   };
 
-  auto get_neg_log_likelihood = [&](AbstractParser& parser, const parser::Sentence& sentence, const vector<int>& actions, double* right, StreamingStatistics* streaming_gold_prob = nullptr) {
+  auto get_neg_log_likelihood = [&](
+          AbstractParser& parser,
+          const parser::Sentence& sentence,
+          const vector<shared_ptr<Parameters>>& bert_embeddings,
+          const vector<int>& actions,
+          double* right,
+          StreamingStatistics* streaming_gold_prob = nullptr
+  ) {
     ComputationGraph hg;
-    parser.abstract_log_prob_parser(&hg, sentence, actions, right, true, false, false, 0.0, nullptr, false, false, nullptr, streaming_gold_prob);
+    parser.abstract_log_prob_parser(
+            &hg,
+            sentence,
+            bert_embeddings,
+            actions,
+            right,
+            true, // is_evaluation
+            false,  // sample
+            false, // label_smoothing
+            0.0, // label_smoothing_epsilon
+            nullptr, // dynamic_oracle
+            false, // loss_augmented
+            false, // softmax_margin
+            nullptr, // streaming_entropy
+            streaming_gold_prob
+    );
     return as_scalar(hg.incremental_forward());
   };
 
@@ -2096,7 +2204,7 @@ int main(int argc, char** argv) {
           os << ".txt";
           return os.str();
       };
-      unsigned size = sentences.size();
+      int size = sentences.size();
 
       assert(pred_parses.size() == size);
       assert(gold_parses.size() == size);
@@ -2112,7 +2220,7 @@ int main(int argc, char** argv) {
       MatchCounts match_counts;
       vector<MatchCounts> all_match_counts;
 
-      for (unsigned sii = 0; sii < size; sii++) {
+      for (int sii = 0; sii < size; sii++) {
         const auto& sentence = sentences[sii];
         const auto& pred_parse = pred_parses[sii];
         const auto& gold_parse = gold_parses[sii];
@@ -2148,7 +2256,7 @@ int main(int argc, char** argv) {
       }
       //cerr << "evalb corpus\trecall=" << corpus_results.first.recall << ", precision=" << corpus_results.first.precision << ", F1=" << corpus_results.first.f1 << "\n";
 
-      for (unsigned i = 0; i < all_match_counts.size(); i++) {
+      for (int i = 0; i < all_match_counts.size(); i++) {
         if (all_match_counts[i] != results.second[i]) {
           cerr << "mismatch for " << (i+1) << endl;
           cerr << all_match_counts[i].correct << " " << all_match_counts[i].gold << " " << all_match_counts[i].predicted << endl;
@@ -2173,8 +2281,9 @@ int main(int argc, char** argv) {
     const double err;
   };
 
-  auto dev_decode = [&](AbstractParser& parser, StreamingStatistics* streaming_entropy, StreamingStatistics* streaming_gold_prob) {
-      unsigned dev_size = dev_corpus.size();
+  auto dev_decode = [&](AbstractParser& parser, WordFeaturizer* word_featurizer, StreamingStatistics* streaming_entropy, StreamingStatistics* streaming_gold_prob) {
+      // TODO(dfried): support separate BERT word featurizers for ensemble models
+      int dev_size = dev_corpus.size();
       vector<vector<unsigned>> predicted;
 
       double trs = 0;
@@ -2182,18 +2291,42 @@ int main(int argc, char** argv) {
       double dwords = 0;
       double llh = 0;
 
-      for (unsigned sii = 0; sii < dev_size; ++sii) {
-        const auto& sentence=dev_corpus.sents[sii];
-        const vector<int>& actions=dev_corpus.actions[sii];
-        DynamicOracle oracle(dev_corpus.sents[sii], dev_corpus.actions[sii]);
+      int sii = 0;
 
-        dwords += sentence.size();
-        llh += get_neg_log_likelihood(parser, sentence, actions, &right, streaming_gold_prob);
+      while (sii < dev_size) {
+        int this_batch_size = min(batch_size, dev_size - sii);
+        assert(this_batch_size > 0);
+        const vector<parser::Sentence> batch_sentences(
+                dev_corpus.sents.begin() + sii,
+                dev_corpus.sents.begin() + sii + this_batch_size
+        );
 
-        vector<unsigned> pred = decode(parser, sentence, streaming_entropy).first;
-        predicted.push_back(pred);
-        trs += actions.size();
+        TF_Tensor* bert_feats = nullptr;
+        vector<vector<shared_ptr<Parameters>>> batch_bert_embeddings;
+
+        if (BERT) {
+          assert(word_featurizer);
+          bert_fw(word_featurizer, batch_sentences, batch_bert_embeddings, &bert_feats, nullptr);
+        } else {
+          batch_bert_embeddings.resize(batch_sentences.size());
+        }
+
+        for (int batch_index = 0; batch_index < this_batch_size; batch_index++) {
+          const auto& sentence=dev_corpus.sents[sii];
+          const vector<int>& actions=dev_corpus.actions[sii];
+          const auto& bert_embeddings = batch_bert_embeddings[batch_index];
+
+          dwords += sentence.size();
+          llh += get_neg_log_likelihood(parser, sentence, bert_embeddings, actions, &right, streaming_gold_prob);
+          vector<unsigned> pred = decode(parser, sentence, bert_embeddings, streaming_entropy).first;
+
+          predicted.push_back(pred);
+          trs += actions.size();
+          sii++;
+        }
+        TF_DeleteTensor(bert_feats);
       }
+
       Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev");
       return DecodeStats(metrics, llh, exp(llh / dwords), (trs - right) / trs);
   };
@@ -2208,6 +2341,7 @@ int main(int argc, char** argv) {
 
 
     Model model;
+    WordFeaturizer* word_featurizer = nullptr;
     ParserBuilder parser(&model, pretrained);
     unique_ptr<Trainer> optimizer = optimizer_name == "sgd"
                                     ? unique_ptr<Trainer>(new SimpleSGDTrainer(&model, 1e-6, conf["sgd_e0"].as<float>()))
@@ -2220,9 +2354,9 @@ int main(int argc, char** argv) {
       optimizer->eta_decay = 0.05;
     }
 
-    unsigned batch_size = conf["batch_size"].as<unsigned>();
+    int dev_check_frequency = conf["dev_check_frequency"].as<int>();
 
-    unsigned dev_check_frequency = conf["dev_check_frequency"].as<unsigned>();
+    string bert_model_path = "uncased_L-12_H-768_A-12/bert_model.ckpt";
 
 
     if (conf.count("model")) {
@@ -2241,8 +2375,18 @@ int main(int argc, char** argv) {
       cerr << " streaming f1 std mean: " << streaming_f1.total_standardized / streaming_f1.num_samples;
       cerr << endl;
       cerr << "after load model" << endl;
+      // TODO(dfried): load BERT into bert_model_path;
     } else {
       cerr << "using " << optimizer_name << " for training" << endl;
+    }
+
+    if (BERT) {
+      word_featurizer = new WordFeaturizer(
+              "bert_graph.pb",
+              bert_model_path,
+              BERT_LR,
+              BERT_WARMUP_STEPS
+      );
     }
 
     //AdamTrainer sgd(&model);
@@ -2253,7 +2397,7 @@ int main(int argc, char** argv) {
     bool max_margin_training = conf.count("max_margin_training") > 0;
     bool softmax_margin_training = conf.count("softmax_margin_training") > 0;
     string min_risk_method = conf["min_risk_method"].as<string>();
-    unsigned min_risk_candidates = conf["min_risk_candidates"].as<unsigned>();
+    int min_risk_candidates = conf["min_risk_candidates"].as<int>();
     bool min_risk_include_gold = conf.count("min_risk_include_gold") > 0;
     assert(min_risk_candidates > 0);
 
@@ -2285,7 +2429,7 @@ int main(int argc, char** argv) {
     //double tot_gold_score = 0.0;
     //unsigned violations = 0;
 
-    unsigned sents_since_last_status = 0;
+    int sents_since_last_status = 0;
 
     //assert(!conf.count("set_iter"));
 
@@ -2310,13 +2454,19 @@ int main(int argc, char** argv) {
     }
      */
 
-    unsigned save_frequency_minutes = conf["save_frequency_minutes"].as<unsigned>();
+    int save_frequency_minutes = conf["save_frequency_minutes"].as<int>();
 
 //    double best_dev_err = 9e99;
 //    double bestf1=0.0;
 
 
-    auto train_sentence = [&](ComputationGraph& hg, const parser::Sentence& sentence, const vector<int>& actions, double* right) -> pair<Expression, MatchCounts> {
+    auto train_sentence = [&](
+            ComputationGraph& hg,
+            const parser::Sentence& sentence,
+            const vector<shared_ptr<Parameters>>& bert_embeddings,
+            const vector<int>& actions,
+            double* right
+    ) -> pair<Expression, MatchCounts> {
         Expression loss = input(hg, 0.0);
 
         MatchCounts sentence_match_counts;
@@ -2340,9 +2490,25 @@ int main(int argc, char** argv) {
               double blank;
               pair<vector<unsigned>, Expression> sample_and_nlp;
               if (min_risk_include_gold && i == 0) {
-                sample_and_nlp = parser.abstract_log_prob_parser(&hg, sentence, actions, &blank, false, false);
+                sample_and_nlp = parser.abstract_log_prob_parser(
+                        &hg,
+                        sentence,
+                        bert_embeddings,
+                        actions,
+                        &blank,
+                        false, // is_evaluation
+                        false // sample
+                );
               } else {
-                sample_and_nlp = parser.abstract_log_prob_parser(&hg, sentence, vector<int>(), &blank, false, true);
+                sample_and_nlp = parser.abstract_log_prob_parser(
+                        &hg,
+                        sentence,
+                        bert_embeddings,
+                        vector<int>(),
+                        &blank,
+                        false, // is_evaluation
+                        true // sample
+                );
               }
               /*
               cerr << " " << i;
@@ -2356,13 +2522,25 @@ int main(int argc, char** argv) {
             loss = loss * input(hg, 1.0 / min_risk_candidates);
           } else if (min_risk_method == "beam" || min_risk_method == "beam_noprobs" ||
                      min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log") {
-            auto candidates = parser.abstract_log_prob_parser_beam(&hg, sentence,
-                                                                   min_risk_include_gold ? min_risk_candidates - 1
-                                                                                         : min_risk_candidates, false);
+            auto candidates = parser.abstract_log_prob_parser_beam(
+                    &hg,
+                    sentence,
+                    bert_embeddings,
+                    (min_risk_include_gold ? min_risk_candidates - 1 : min_risk_candidates),
+                    false // is_evaluation
+            );
 
             if (min_risk_include_gold) {
               double blank;
-              candidates.push_back(parser.abstract_log_prob_parser(&hg, sentence, actions, &blank, false, false));
+              candidates.push_back(parser.abstract_log_prob_parser(
+                      &hg,
+                      sentence,
+                      bert_embeddings,
+                      actions,
+                      &blank,
+                      false, // is_evaluation
+                      false // sample
+              ));
             }
 
             if (min_risk_method == "beam") {
@@ -2396,7 +2574,7 @@ int main(int argc, char** argv) {
               }
               Expression log_normalizer = logsumexp(normed_log_probs);
               assert(normed_log_probs.size() ==  candidates.size());
-              for (unsigned i = 0; i < normed_log_probs.size(); i++) {
+              for (int i = 0; i < normed_log_probs.size(); i++) {
                 float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, candidates[i].first);
                 scaled_f1 = streaming_f1.standardize_and_update(scaled_f1);
                 loss = loss + input(hg, -scaled_f1) * exp(normed_log_probs[i] - log_normalizer);
@@ -2486,6 +2664,7 @@ int main(int argc, char** argv) {
           if (run_gold) {
             auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
                                                                   sentence,
+                                                                  bert_embeddings,
                                                                   actions,
                                                                   right,
                                                                   false, // is_evaluation
@@ -2501,10 +2680,11 @@ int main(int argc, char** argv) {
           }
           if (run_explore) {
             DynamicOracle dynamic_oracle(sentence, actions);
-            unsigned candidates_to_generate = exploration_include_gold ? exploration_candidates - 1 : exploration_candidates;
-            for (unsigned i = 0; i < candidates_to_generate; i++) {
+            int candidates_to_generate = exploration_include_gold ? exploration_candidates - 1 : exploration_candidates;
+            for (int i = 0; i < candidates_to_generate; i++) {
               auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
                                                                     sentence,
+                                                                    bert_embeddings,
                                                                     vector<int>(),
                                                                     right,
                                                                     false, // is_evaluation
@@ -2573,23 +2753,23 @@ int main(int argc, char** argv) {
 
     };
 
-    auto train_block = [&](const parser::TopDownOracle& corpus, vector<unsigned>::iterator indices_begin, vector<unsigned>::iterator indices_end, int epoch_size, unsigned start_sentence = 0) {
-      unsigned sentence_count = std::distance(indices_begin, indices_end);
-      status_every_i_iterations = min(status_every_i_iterations, sentence_count);
+    auto train_block = [&](const parser::TopDownOracle& corpus, vector<int>::iterator indices_begin, vector<int>::iterator indices_end, int epoch_size, int start_sentence = 0) {
+      int sentence_count = std::distance(indices_begin, indices_end);
+      int status_every_n_batches = min(status_every_i_iterations, sentence_count) / batch_size;
       cerr << "Number of sentences in current block: " << sentence_count << endl;
         /*
       cerr << "First sentence: ";
       for (auto& str: corpus.sents[*indices_begin].raw) cerr << str << " ";
       cerr << endl;
          */
-      unsigned trs = 0;
-      unsigned words = 0;
+      int trs = 0;
+      int words = 0;
       double right = 0;
       double llh = 0;
       //tot_gold_score = 0.0;
       //tot_lad_score = 0.0;
 
-      unsigned sents = 0;
+      int sents = 0;
 
       //cerr << "TRAINING STARTED AT: " << put_time(localtime(&time_start), "%c %Z") << endl;
       auto time_start = chrono::system_clock::now();
@@ -2598,7 +2778,7 @@ int main(int argc, char** argv) {
         MatchCounts block_match_counts;
 
         cerr << "staring at sentence " << start_sentence << endl;
-        vector<unsigned>::iterator index_iter = indices_begin + start_sentence;
+        vector<int>::iterator index_iter = indices_begin + start_sentence;
         training_position.sentence = start_sentence;
         cerr << "first sentence (" << training_position.sentence << "): ";
         for (auto& word_id: corpus.sents[*index_iter].raw) {
@@ -2623,11 +2803,31 @@ int main(int argc, char** argv) {
           {
             ComputationGraph hg;
             vector<Expression> batch_losses;
+
+            int this_batch_size = min(batch_size, static_cast<int>(std::distance(index_iter, indices_end)));
+
+            vector<parser::Sentence> batch_sentences;
+            for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++)
+              batch_sentences.push_back(corpus.sents[*(index_iter + batch_sent)]);
+
+            TF_Tensor* bert_feats = nullptr;
+            TF_Tensor* bert_grads = nullptr;
+            vector<vector<shared_ptr<Parameters>>> batch_bert_embeddings;
+
+            if (BERT) {
+              assert(word_featurizer);
+              bert_fw(word_featurizer, batch_sentences, batch_bert_embeddings, &bert_feats, &bert_grads);
+            } else {
+              batch_bert_embeddings.resize(batch_sentences.size());
+            }
+
             // TODO(dfried): this will use a small batch at the end of every epoch if training data isn't evenly divisible by batch size
-            for (unsigned batch_sent = 0; batch_sent < batch_size && index_iter != indices_end; batch_sent++) {
+            for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++) {
+              assert(index_iter != indices_end);
               auto &sentence = corpus.sents[*index_iter];
               const vector<int> &actions = corpus.actions[*index_iter];
-              auto loss_and_mc = train_sentence(hg, sentence, actions, &right);
+              auto& bert_embeddings = batch_bert_embeddings[batch_sent];
+              auto loss_and_mc = train_sentence(hg, sentence, bert_embeddings, actions, &right);
               batch_losses.push_back(loss_and_mc.first);
               block_match_counts += loss_and_mc.second;
               double loss = as_scalar(loss_and_mc.first.value());
@@ -2649,16 +2849,32 @@ int main(int argc, char** argv) {
             double batch_loss_v = as_scalar(batch_loss.value());
             //cerr << "batch loss: " << batch_loss_v << endl;
             hg.backward();
+
+            // need to call this before calling the dynet update below, as dynet update
+            // will change the values stored in the memory pointed to by Parameters,
+            // shared between tensorflow and dynet,
+            // and we don't have a guarantee that tensorflow doesn't use those
+            // values in its own backward pass
+            if (BERT) {
+              word_featurizer->run_bw(bert_grads);
+            }
+
+            // TODO (dfried): consider marking transient Parameters to not be updated
             optimizer->update(1.0);
+
+            if (BERT) {
+              TF_DeleteTensor(bert_feats);
+              TF_DeleteTensor(bert_grads);
+            }
             training_position.batches++;
           }
 
-          if (sents_since_last_status >= status_every_i_iterations) {
+          if (training_position.batches % status_every_n_batches == 0) {
             training_position.iter++;
             optimizer->status();
             auto time_now = chrono::system_clock::now();
             auto dur = chrono::duration_cast<chrono::milliseconds>(time_now - time_start);
-            cerr << "status #" << training_position.iter << " batch #" << training_position.batches <<   " (epoch " << (static_cast<double>(training_position.tot_seen) / epoch_size) << ")";
+            cerr << "status #" << (training_position.iter + 1) << " batch #" << training_position.batches <<   " (epoch " << (static_cast<double>(training_position.tot_seen) / epoch_size) << ")";
             /*" |time=" << put_time(localtime(&time_now), "%c %Z") << ")\tllh: "<< */
             /*
           if (max_margin_training) {
@@ -2698,7 +2914,7 @@ int main(int argc, char** argv) {
                 streaming_entropy = new StreamingStatistics();
                 streaming_gold_prob = new StreamingStatistics();
               }
-              DecodeStats dev_decode_stats = dev_decode(parser, streaming_entropy, streaming_gold_prob);
+              DecodeStats dev_decode_stats = dev_decode(parser, word_featurizer, streaming_entropy, streaming_gold_prob);
               auto t_end = chrono::high_resolution_clock::now();
 
               cerr << "recall=" << dev_decode_stats.metrics.recall
@@ -2720,9 +2936,9 @@ int main(int argc, char** argv) {
                 delete streaming_gold_prob;
               }
               string model_tag = "it-" + to_string(training_position.iter) + "-f1-" + utils::to_string_precision(dev_decode_stats.metrics.f1, 2);
-              unsigned minutes_since_save = chrono::duration_cast<chrono::minutes>(chrono::system_clock::now() - last_save_time).count();
+              long minutes_since_save = chrono::duration_cast<chrono::minutes>(chrono::system_clock::now() - last_save_time).count();
               bool print_next = false;
-              if (minutes_since_save >= save_frequency_minutes){
+              if (save_frequency_minutes >= 0 && minutes_since_save >= save_frequency_minutes){
                   cerr << "  " << minutes_since_save << " minutes since save... ";
                 save_model(fname, "periodic", model_tag , true);
                 last_save_time = chrono::system_clock::now();
@@ -2758,15 +2974,15 @@ int main(int argc, char** argv) {
         }
     };
 
-    unsigned start_epoch = training_position.epoch;
+    int start_epoch = training_position.epoch;
     training_position.epoch = 0;
-    unsigned shuffle_count = 0;
+    int shuffle_count = 0;
     while (training_position.epoch < start_epoch) {
       assert(!has_gold_training_data); // not implemented, should also shuffle silver data, possibly one more time depending on whether training_position.sentence is at least the gold_corpus size
       parser::TopDownOracle* main_corpus = &corpus;
-      vector<unsigned> main_indices(main_corpus->size());
+      vector<int> main_indices(main_corpus->size());
       std::iota(main_indices.begin(), main_indices.end(), 0);
-      std::shuffle(main_indices.begin(), main_indices.end());
+      std::shuffle(main_indices.begin(), main_indices.end(), random_engine);
       training_position.epoch++;
       shuffle_count++;
     }
@@ -2791,7 +3007,7 @@ int main(int argc, char** argv) {
 
       int sentence_count = 0;
 
-      unsigned start_sentence = 0;
+      int start_sentence = 0;
       if (training_position.sentence != 0) {
         start_sentence = training_position.sentence;
         training_position.sentence = 0;
@@ -2801,18 +3017,18 @@ int main(int argc, char** argv) {
         assert(start_sentence == 0); // not implemented
         training_position.in_silver_block = true;
         main_corpus = &gold_corpus;
-        vector<unsigned> silver_indices(corpus.size());
+        vector<int> silver_indices(corpus.size());
         std::iota(silver_indices.begin(), silver_indices.end(), 0);
-        std::shuffle(silver_indices.begin(), silver_indices.end());
-        unsigned offset = std::min(corpus.size(), gold_corpus.size() * SILVER_BLOCKS_PER_GOLD);
+        std::shuffle(silver_indices.begin(), silver_indices.end(), random_engine);
+        int offset = std::min(corpus.size(), gold_corpus.size() * SILVER_BLOCKS_PER_GOLD);
         train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, offset + gold_corpus.size(), start_sentence);
         sentence_count += offset;
         training_position.in_silver_block = false;
       }
 
-      vector<unsigned> main_indices(main_corpus->size());
+      vector<int> main_indices(main_corpus->size());
       std::iota(main_indices.begin(), main_indices.end(), 0);
-      std::shuffle(main_indices.begin(), main_indices.end());
+      std::shuffle(main_indices.begin(), main_indices.end(), random_engine);
       sentence_count += main_indices.size();
       train_block(*main_corpus, main_indices.begin(), main_indices.end(), sentence_count, start_sentence);
       optimizer->update_epoch();
@@ -2832,6 +3048,9 @@ int main(int argc, char** argv) {
       */
 
     }
+    if (BERT) {
+      delete word_featurizer;
+    }
   } // should do training?
 
   if (test_corpus.size() > 0) { // do inference for test evaluation
@@ -2840,6 +3059,11 @@ int main(int argc, char** argv) {
     std::shared_ptr<EnsembledParser> ensembled_parser;
 
     AbstractParser* abstract_parser;
+
+    WordFeaturizer* word_featurizer;
+
+    // TODO(dfried) implement!
+    string bert_model_path;
 
     if (conf.count("model")) {
       models.push_back(std::make_shared<Model>());
@@ -2858,6 +3082,8 @@ int main(int argc, char** argv) {
     }
 
     else {
+      // TODO(dfried): implement ensemble BERT decoding?
+      assert(!BERT);
       map<string, EnsembledParser::CombineType> combine_types{
           {"sum", EnsembledParser::CombineType::sum},
           {"product", EnsembledParser::CombineType::product}
@@ -2888,10 +3114,19 @@ int main(int argc, char** argv) {
       abstract_parser = ensembled_parser.get();
     }
 
+    if (BERT) {
+      word_featurizer = new WordFeaturizer(
+              "bert_graph.pb",
+              bert_model_path,
+              BERT_LR, // this shouldn't be used
+              BERT_WARMUP_STEPS // this shouldn't be used
+      );
+    }
+
     if (block_count > 0) {
       assert(block_num < block_count);
-      unsigned q = test_corpus.size() / block_count;
-      unsigned r = test_corpus.size() % block_count;
+      int q = test_corpus.size() / block_count;
+      int r = test_corpus.size() % block_count;
       start_index = q * block_num + min(block_num, r);
       stop_index = q * (block_num + 1) + min(block_num + 1, r);
     }
@@ -2918,66 +3153,93 @@ int main(int argc, char** argv) {
       double right = 0;
       auto t_start = chrono::high_resolution_clock::now();
       const vector<int> actions;
-      vector<unsigned> n_distinct_samples;
-      for (unsigned sii = start_index; sii < stop_index; ++sii) {
-        const auto &sentence = test_corpus.sents[sii];
-        // TODO: this overrides dynet random seed, but should be ok if we're only sampling
-        cnn::rndeng->seed(sii);
-        set<vector<unsigned>> samples;
-        if (conf.count("samples_include_gold")) {
-          ComputationGraph hg;
-          auto result_and_nlp = abstract_parser->abstract_log_prob_parser(&hg, sentence, test_corpus.actions[sii],
-                                                                              &right, true);
-          vector<unsigned> result = result_and_nlp.first;
-          double nlp = as_scalar(result_and_nlp.second.value());
-          cout << sii << " ||| " << -nlp << " |||";
-          vector<unsigned> converted_actions(test_corpus.actions[sii].begin(), test_corpus.actions[sii].end());
-          print_parse(converted_actions, sentence, false, cout);
-          ptb_out << sii << " ||| " << -nlp << " |||";
-          print_parse(converted_actions, sentence, true, ptb_out);
-          samples.insert(converted_actions);
+      vector<int> n_distinct_samples;
+
+      int sii = start_index;
+      while (sii < stop_index) {
+        int this_batch_size = min(batch_size, static_cast<int>(stop_index - sii));
+        const vector<parser::Sentence> batch_sentences(test_corpus.sents.begin() + sii, test_corpus.sents.begin() + sii + this_batch_size);
+
+        TF_Tensor *bert_feats = nullptr;
+        vector<vector<shared_ptr<Parameters>>> batch_bert_embeddings;
+
+        if (BERT) {
+          assert(word_featurizer);
+          bert_fw(word_featurizer, batch_sentences, batch_bert_embeddings, &bert_feats, nullptr);
+        } else {
+          batch_bert_embeddings.resize(batch_sentences.size());
         }
 
-        for (unsigned z = 0; z < N_SAMPLES; ++z) {
-          ComputationGraph hg;
-          pair<vector<unsigned>, Expression> result_and_nlp = abstract_parser->abstract_log_prob_parser(&hg, sentence, actions, &right, sample,
-                                                                              true); // TODO: fix ordering of sample and eval here
-          double lp = as_scalar(result_and_nlp.second.value());
-          cout << sii << " ||| " << -lp << " |||";
-          print_parse(result_and_nlp.first, sentence, false, cout);
-          ptb_out << sii << " ||| " << -lp << " |||";
-          print_parse(result_and_nlp.first, sentence, true, ptb_out);
-          samples.insert(result_and_nlp.first);
-        }
-
-        if (output_beam_as_samples) {
-          ComputationGraph hg;
-          vector<pair<vector<unsigned>, Expression>> beam_results;
-          if (conf.count("beam_within_word")) {
-            beam_results = abstract_parser->abstract_log_prob_parser_beam_within_word(&hg, sentence,
-                                                                                      beam_size,
-                                                                                      conf["beam_filter_at_word_size"].as<int>());
-          } else {
-            beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, beam_size);
-          }
-          if (beam_results.size() < beam_size) {
-            cerr << "warning: only " << beam_results.size() << " parses found by beam search for sent " << sii << endl;
-          }
-          unsigned long num_results = beam_results.size();
-          for (unsigned long i = 0; i < beam_size; i++) {
-            unsigned long ix = std::min(i, num_results - 1);
-            pair<vector<unsigned>, Expression> result_and_nlp = beam_results[ix];
+        for (int batch_index = 0; batch_index < this_batch_size; batch_index++) {
+          const auto &sentence = test_corpus.sents[sii];
+          // TODO: this overrides dynet random seed, but should be ok if we're only sampling
+          const auto& bert_embeddings = batch_bert_embeddings[batch_index];
+          const auto& actions = test_corpus.actions[sii];
+          cnn::rndeng->seed(sii);
+          set<vector<unsigned>> samples;
+          if (conf.count("samples_include_gold")) {
+            ComputationGraph hg;
+            auto result_and_nlp = abstract_parser->abstract_log_prob_parser(
+                    &hg, sentence, bert_embeddings, actions, &right, true
+            );
+            vector<unsigned> result = result_and_nlp.first;
             double nlp = as_scalar(result_and_nlp.second.value());
             cout << sii << " ||| " << -nlp << " |||";
-            print_parse(result_and_nlp.first, sentence, false, cout);
+            vector<unsigned> converted_actions(actions.begin(), actions.end());
+            print_parse(converted_actions, sentence, false, cout);
             ptb_out << sii << " ||| " << -nlp << " |||";
+            print_parse(converted_actions, sentence, true, ptb_out);
+            samples.insert(converted_actions);
+          }
+
+          for (int z = 0; z < N_SAMPLES; ++z) {
+            ComputationGraph hg;
+            pair < vector<unsigned>,
+                    Expression > result_and_nlp = abstract_parser->abstract_log_prob_parser(
+                            &hg, sentence, bert_embeddings, actions, &right, sample, true
+                    ); // TODO: fix ordering of sample and eval here, produces correct behavior but is confusing
+            double lp = as_scalar(result_and_nlp.second.value());
+            cout << sii << " ||| " << -lp << " |||";
+            print_parse(result_and_nlp.first, sentence, false, cout);
+            ptb_out << sii << " ||| " << -lp << " |||";
             print_parse(result_and_nlp.first, sentence, true, ptb_out);
             samples.insert(result_and_nlp.first);
           }
-        }
 
-        n_distinct_samples.push_back(samples.size());
-      }
+          if (output_beam_as_samples) {
+            ComputationGraph hg;
+            vector<pair < vector<unsigned>, Expression>> beam_results;
+            if (conf.count("beam_within_word")) {
+              beam_results = abstract_parser->abstract_log_prob_parser_beam_within_word(
+                      &hg, sentence, bert_embeddings, beam_size, conf["beam_filter_at_word_size"].as<int>()
+              );
+            } else {
+              beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, bert_embeddings, beam_size);
+            }
+            if (beam_results.size() < beam_size) {
+              cerr << "warning: only " << beam_results.size() << " parses found by beam search for sent " << sii
+                   << endl;
+            }
+            int num_results = beam_results.size();
+            for (int i = 0; i < beam_size; i++) {
+              int ix = std::min(i, num_results - 1);
+              pair < vector<unsigned>, Expression > result_and_nlp = beam_results[ix];
+              double nlp = as_scalar(result_and_nlp.second.value());
+              cout << sii << " ||| " << -nlp << " |||";
+              print_parse(result_and_nlp.first, sentence, false, cout);
+              ptb_out << sii << " ||| " << -nlp << " |||";
+              print_parse(result_and_nlp.first, sentence, true, ptb_out);
+              samples.insert(result_and_nlp.first);
+            }
+          }
+
+          n_distinct_samples.push_back(samples.size());
+          sii++;
+        } // for batch_index
+        if (BERT) {
+          TF_DeleteTensor(bert_feats);
+        }
+      } // sii < stop_index
       ptb_out.close();
 
       double avg_distinct_samples = accumulate(n_distinct_samples.begin(), n_distinct_samples.end(), 0.0) /
@@ -2996,15 +3258,41 @@ int main(int argc, char** argv) {
       double neg_log_likelihood = 0;
       double actions_correct = 0;
       unsigned long num_actions = 0;
-      for (unsigned sii = 0; sii < test_size; ++sii) {
-        if (sii % 10 == 0) {
-            cerr << "\r decoding sent: " << sii;
+
+      int sii = 0;
+      while (sii < test_size) {
+        int this_batch_size = min(batch_size, stop_index - sii);
+        const vector<parser::Sentence> batch_sentences(test_corpus.sents.begin() + sii, test_corpus.sents.begin() + sii + this_batch_size);
+
+
+        TF_Tensor *bert_feats = nullptr;
+        vector<vector<shared_ptr<Parameters>>> batch_bert_embeddings;
+
+        if (BERT) {
+          assert(word_featurizer);
+          bert_fw(word_featurizer, batch_sentences, batch_bert_embeddings, &bert_feats, nullptr);
+        } else {
+          batch_bert_embeddings.resize(batch_sentences.size());
         }
-        const auto &sentence = test_corpus.sents[sii];
-        pair<vector<unsigned>, Expression> result_and_nlp = decode(*abstract_parser, sentence, &streaming_entropy);
-        predicted.push_back(result_and_nlp.first);
-        neg_log_likelihood += get_neg_log_likelihood(*abstract_parser, sentence, test_corpus.actions[sii], &actions_correct, &streaming_gold_prob);
-        num_actions += test_corpus.actions[sii].size();
+
+        for (int batch_index = 0; batch_index < batch_size && sii < stop_index; batch_index++) {
+          if (sii % 10 == 0) {
+            cerr << "\r decoding sent: " << sii;
+          }
+          const auto& sentence = test_corpus.sents[sii];
+          const auto& bert_embeddings = batch_bert_embeddings[batch_index];
+          const auto& actions = test_corpus.actions[sii];
+          pair < vector<unsigned>, Expression > result_and_nlp = decode(*abstract_parser, sentence, bert_embeddings, &streaming_entropy);
+          predicted.push_back(result_and_nlp.first);
+          neg_log_likelihood += get_neg_log_likelihood(
+                  *abstract_parser, sentence, bert_embeddings, actions, &actions_correct, &streaming_gold_prob
+          );
+          num_actions += actions.size();
+          sii++;
+        }
+        if (BERT) {
+          TF_DeleteTensor(bert_feats);
+        }
       }
       cerr << endl;
       auto t_end = chrono::high_resolution_clock::now();

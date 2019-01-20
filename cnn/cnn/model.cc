@@ -38,6 +38,21 @@ Parameters::Parameters(const Dim& d, const std::string& name, float scale) : dim
 
 Parameters::Parameters(const Dim& d, float scale) : Parameters(d, "", scale) {}
 
+  Parameters::Parameters(const Dim& d, float* value_location, float* gradient_location) : dim(d), name("") {
+    // a constructor for transient "parameters" that should not be maintained across computation graph invocations.
+    // if gradient_location is nullptr, allocate memory in the backward region (rather than in the parameter region)
+    // to be deallocated each time backward is called. otherwise, assume that this is a zero-initialzed region of
+    // memory of the proper size and store the gradient there
+    values.d = g.d = d;
+    values.v = value_location;
+    if (gradient_location) {
+      g.v = gradient_location;
+    } else {
+      g.v = static_cast<float*>(dEdfs->allocate(d.size() * sizeof(float)));
+      TensorTools::Zero(g);
+    }
+  }
+
 size_t Parameters::size() const { return dim.size(); }
 
 void Parameters::scale_parameters(float a) {

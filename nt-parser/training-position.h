@@ -7,8 +7,8 @@
 
 namespace parser {
   struct TrainingPosition {
-    unsigned epoch = 0;
-    unsigned sentence = 0;
+    int epoch = 0;
+    int sentence = 0;
     bool in_silver_block = false;
 
     // number of decodes
@@ -16,14 +16,14 @@ namespace parser {
 
 
     // total number of sentences seen
-    unsigned tot_seen = 0;
+    int tot_seen = 0;
 
     double best_dev_f1 = 0.0;
     double best_dev_error = 9e99;
 
-    unsigned tot_seen_last_status = 0;
+    int tot_seen_last_status = 0;
 
-    unsigned batches = 0;
+    int batches = 0;
 
   private:
     friend class boost::serialization::access;

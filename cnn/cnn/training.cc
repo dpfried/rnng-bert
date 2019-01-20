@@ -95,14 +95,14 @@ void SimpleSGDTrainer::update(const std::vector<LookupParameters*> &lookup_param
       cerr << endl;
       */
     if (good_grad) {
-    for (auto i : p->non_zero_grads) {
+      for (auto i : p->non_zero_grads) {
 #if HAVE_CUDA
-      gpu::sgd_update(p->values[i].d.size(), p->grads[i].v, p->values[i].v, eta * scale * gscale, lambda);
+        gpu::sgd_update(p->values[i].d.size(), p->grads[i].v, p->values[i].v, eta * scale * gscale, lambda);
 #else
-      auto reg = (p->values[i].vec()) * lambda;
-      p->values[i].vec() -= (p->grads[i].vec() * (eta * scale * gscale) + reg);
+        auto reg = (p->values[i].vec()) * lambda;
+        p->values[i].vec() -= (p->grads[i].vec() * (eta * scale * gscale) + reg);
 #endif
-    }
+      }
     }
     p->clear();
   }
