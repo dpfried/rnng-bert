@@ -1,8 +1,10 @@
 #!/bin/bash
-dynet_seed=1
 
-batch_size=16
+dynet_seed=1
+batch_size=8
 bert_lr="2e-5"
+
+prefix="inorder_bert_large_bs=${batch_size}_lr=${bert_lr}"
 
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
@@ -19,5 +21,6 @@ build/nt-parser/nt-parser \
     --batch_size $batch_size \
     --bert_lr $bert_lr \
     --bert_large \
+    --model_output_dir models/${prefix} \
     $@ \
-    # 2>&1 | tee expts/inorder_bert_large_bs=${batch_size}_lr=${bert_lr}.out
+    2>&1 | tee logs/${prefix}.out
