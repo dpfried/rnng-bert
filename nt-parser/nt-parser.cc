@@ -63,7 +63,7 @@ unsigned PRETRAINED_DIM = 50;
 unsigned LSTM_INPUT_DIM = 60;
 unsigned POS_DIM = 10;
 unsigned MORPH_DIM = 10;
-unsigned BERT_DIM = 768;
+unsigned BERT_DIM = 0; // should be initialized later
 
 unsigned MAX_CONS_NT = 8;
 
@@ -96,6 +96,16 @@ bool IN_ORDER = false;
 bool BERT = false;
 float BERT_LR = 5e-5f;
 int BERT_WARMUP_STEPS = 160;
+
+bool BERT_LARGE = false;
+
+string BERT_MODEL_PATH = ""; // will be initialized to one of the following if BERT is passed
+const string BERT_BASE_MODEL_PATH = "bert_models/uncased_L-12_H-768_A-12";
+const string BERT_LARGE_MODEL_PATH = "bert_models/uncased_L-24_H-1024_A-16";
+
+string BERT_GRAPH_PATH = ""; // will be initialized to one of the following if BERT is passed
+const string BERT_BASE_GRAPH_PATH = BERT_BASE_MODEL_PATH + "_FDS-4.0_graph.pb";
+const string BERT_LARGE_GRAPH_PATH = BERT_LARGE_MODEL_PATH + "_FDS-6.0_graph.pb";
 
 using namespace cnn::expr;
 using namespace cnn;
@@ -133,6 +143,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("words,w", po::value<string>(), "Pretrained word embeddings")
 
           ("bert", "use BERT to represent inputs")
+          ("bert_large", "use BERT-Large (otherwise use BERT-Base)")
 
           ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
           ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
@@ -1954,6 +1965,20 @@ int main(int argc, char** argv) {
 
   bool spmrl = conf.count("spmrl");
 
+  if (BERT) {
+    BERT_LARGE = conf.count("bert_large") != 0;
+    if (BERT_LARGE) {
+      BERT_GRAPH_PATH = BERT_LARGE_GRAPH_PATH;
+      BERT_MODEL_PATH = BERT_LARGE_MODEL_PATH;
+      BERT_DIM = 1024;
+    } else {
+      BERT_GRAPH_PATH = BERT_BASE_GRAPH_PATH;
+      BERT_MODEL_PATH = BERT_BASE_MODEL_PATH;
+      BERT_DIM = 768;
+    }
+    cerr << "using BERT graph " << BERT_GRAPH_PATH << " with dimension " << BERT_DIM << endl;
+  }
+
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
     return 1;
@@ -2371,7 +2396,7 @@ int main(int argc, char** argv) {
 
     int dev_check_frequency = conf["dev_check_frequency"].as<int>();
 
-    string bert_model_path = "uncased_L-12_H-768_A-12/bert_model.ckpt";
+    string bert_model_path = BERT_MODEL_PATH + "/bert_model.ckpt";
 
 
     if (conf.count("model_dir")) {
@@ -2399,7 +2424,7 @@ int main(int argc, char** argv) {
 
     if (BERT) {
       word_featurizer = new WordFeaturizer(
-              "bert_graph.pb",
+              BERT_GRAPH_PATH.c_str(),
               bert_model_path,
               BERT_LR,
               BERT_WARMUP_STEPS
@@ -3146,7 +3171,7 @@ int main(int argc, char** argv) {
 
     if (BERT) {
       word_featurizer = new WordFeaturizer(
-              "bert_graph.pb",
+              BERT_GRAPH_PATH.c_str(),
               bert_model_path,
               BERT_LR, // this shouldn't be used
               BERT_WARMUP_STEPS // this shouldn't be used

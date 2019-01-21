@@ -4,6 +4,7 @@ import get_dictionary
 from get_dictionary import is_next_open_bracket, get_between_brackets
 import types
 import bert_tokenize
+import os
 
 # tokens is a list of tokens, so no need to split it again
 def unkify(tokens, words_dict, morph_aware=True):
@@ -232,6 +233,7 @@ def main():
     parser.add_argument("corpus_file")
     parser.add_argument("--in_order", action='store_true')
     parser.add_argument("--no_morph_aware_unking", action='store_true')
+    parser.add_argument("--bert_model_dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uncased_L-12_H-768_A-12"))
     args = parser.parse_args()
     # train_file = open(sys.argv[1], 'r')
     # words_list = set(get_dictionary.get_dict(train_file))
@@ -250,6 +252,8 @@ def main():
     max_same_cons_nts = 0
     max_same_cons_nts_ix = None
     # get the oracle for the train file
+    print("loading BERT tokenizer from %s" % (args.bert_model_dir), file=sys.stderr)
+    bert_tokenizer = bert_tokenize.Tokenizer(args.bert_model_dir)
     for line in dev_file:
         line_ctr += 1
         if line_ctr % 1000 == 0:
@@ -270,7 +274,7 @@ def main():
         # print morph features, or an empty line
         print(' '.join(morphfeats))
 
-        bert_input_ids, bert_word_end_mask = bert_tokenize.tokenize(tokens)
+        bert_input_ids, bert_word_end_mask = bert_tokenizer.tokenize(tokens)
         print(' '.join(map(str, bert_word_end_mask)))
         print(' '.join(map(str, bert_input_ids)))
 

@@ -1,6 +1,5 @@
 assert __name__ == "__main__", "This script is not designed to be imported"
-from bert_path import BERT_CODE_PATH, BERT_MODEL_DIR
-BERT_OUTPUT_FILE = "bert_graph.pb"
+from bert_path import BERT_CODE_PATH
 # bert version used: https://github.com/google-research/bert/tree/f39e881b169b9d53bea03d2d341b31707a6c052b
 # BERT_CODE_PATH should be the parent folder of the repo, so "import bert" works
 
@@ -11,13 +10,24 @@ import tensorflow as tf
 import bert
 import bert.modeling, bert.optimization
 
-#%%
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--bert_model_dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uncased_L-12_H-768_A-12"))
+parser.add_argument("--bert_output_file")
+parser.add_argument("--feature_downscale", type=float, default=4.0)
+args = parser.parse_args()
+
+if not args.bert_output_file:
+    model_name = os.path.split(os.path.split(args.bert_model_dir)[0])[1]
+    # e.g. uncased_L-12_H-768_A-12_FDS-4.0_graph.pb
+    args.bert_output_file = os.path.join("bert_models", os.path.basename("{}_FDS-{}_graph.pb".format(model_name, args.feature_downscale)))
+
 
 sess = tf.InteractiveSession()
 
 # %%
 
-config = bert.modeling.BertConfig.from_json_file(os.path.join(BERT_MODEL_DIR, "bert_config.json"))
+config = bert.modeling.BertConfig.from_json_file(os.path.join(args.bert_model_dir, "bert_config.json"))
 
 # %%
 
@@ -49,8 +59,8 @@ bert.modeling.dropout = dropout_only_if_training
 # %%
 
 model = bert.modeling.BertModel(config=config,
-    is_training=True, # We disable dropout ourselves, based on a placeholder
-    input_ids=input_ids, input_mask=input_mask, token_type_ids=token_type_ids)
+                                is_training=True,  # We disable dropout ourselves, based on a placeholder
+                                input_ids=input_ids, input_mask=input_mask, token_type_ids=token_type_ids)
 
 def get_word_features():
     subword_features = model.get_sequence_output()
@@ -63,8 +73,8 @@ def get_word_features():
     # The idea behind rescaling is that the code mixes BERT vectors and vectors
     # that are output by an LSTM, which would be a magnitude mismatch without
     # any rescaling.
-    print("RESCALING word features: dividing by 4")
-    word_features_packed = word_features_packed / 4.0
+    print("RESCALING word features: dividing by {}".format(args.feature_downscale))
+    word_features_packed = word_features_packed / args.feature_downscale
 
     # input_mask is over subwords, whereas valid_mask is over words
     sentence_lengths = tf.reduce_sum(word_end_mask, -1)
@@ -93,7 +103,7 @@ saver = tf.train.Saver()
 
 # %% verify that restoring a checkpoint works
 
-saver.restore(sess, os.path.join(BERT_MODEL_DIR, "bert_model.ckpt"))
+saver.restore(sess, os.path.join(args.bert_model_dir, "bert_model.ckpt"))
 
 # %%
 
@@ -235,9 +245,9 @@ checkpoint_name: {saver.saver_def.filename_tensor_name}
 
 # %%
 
-with open(BERT_OUTPUT_FILE, 'wb') as f:
+with open(args.bert_output_file, 'wb') as f:
     f.write(sess.graph_def.SerializeToString())
 
-print("Saved tensorflow graph to to", BERT_OUTPUT_FILE)
+print("Saved tensorflow graph to to", args.bert_output_file)
 
 # %%
