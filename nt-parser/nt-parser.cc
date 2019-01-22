@@ -1425,7 +1425,7 @@ struct ParserState : public AbstractParserState {
     Expression r_t = affine_transform({parser->abias, parser->p2a, nlp_t});
     Expression r_t_aug;
     if (augmentation) {
-      r_t_aug = r_t + input(*r_t.pg, Dim({augmentation->size()}), *augmentation);
+      r_t_aug = r_t + input(*r_t.pg, Dim({static_cast<unsigned int>(augmentation->size())}), *augmentation);
     } else {
       r_t_aug = r_t;
     }
