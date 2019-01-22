@@ -71,6 +71,9 @@ unsigned SHIFT_ACTION = UINT_MAX;
 unsigned REDUCE_ACTION = UINT_MAX;
 unsigned TERM_ACTION = UINT_MAX; // only used for in-order
 
+int MAX_SENTENCE_LENGTH_EVAL = -1;
+int MAX_SENTENCE_LENGTH_TRAIN = -1;
+
 float ALPHA = 1.f;
 float DYNAMIC_EXPLORATION_PROBABILITY = 1.f;
 int N_SAMPLES = 0;
@@ -87,7 +90,7 @@ bool USE_MORPH_FEATURES = false;
 bool USE_PRETRAINED = false;  // in discriminative parser, use pretrained word embeddings (not updated)
 bool NO_STACK = false;
 bool NO_ACTION_HISTORY = false;
-unsigned SILVER_BLOCKS_PER_GOLD = 10;
+int SILVER_BLOCKS_PER_GOLD = 10;
 
 bool UNNORMALIZED = false;
 
@@ -134,8 +137,10 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("bracketing_dev_data,C", po::value<string>(), "Development bracketed corpus")
           ("gold_training_data", po::value<string>(), "List of Transitions - smaller corpus (e.g. wsj in a wsj+silver experiment)")
           ("test_data,p", po::value<string>(), "Test corpus")
+          ("max_sentence_length_train", po::value<int>()->default_value(MAX_SENTENCE_LENGTH_TRAIN), "Don't train on sentences longer than this length")
+          ("max_sentence_length_eval", po::value<int>()->default_value(MAX_SENTENCE_LENGTH_EVAL), "Don'evaluate on sentences longer than this length")
 
-          ("silver_blocks_per_gold", po::value<int>()->default_value(10), "How many same-sized blocks of the silver data should be sampled and trained, between every train on the entire gold set?")
+          ("silver_blocks_per_gold", po::value<int>()->default_value(SILVER_BLOCKS_PER_GOLD), "How many same-sized blocks of the silver data should be sampled and trained, between every train on the entire gold set?")
 
           // model parameters
           ("use_pos_tags,P", "make POS tags visible to parser")
@@ -1923,6 +1928,19 @@ std::string bert_param_path(std::string directory) {
   return directory + "/bert_model.ckpt";
 }
 
+void make_corpus_indices(const parser::TopDownOracle &source_corpus, vector<int> &indices, int max_sentence_length) {
+    assert(indices.empty());
+    if (max_sentence_length <= 0) {
+      indices.resize(source_corpus.size());
+      std::iota(indices.begin(), indices.end(), 0);
+    } else {
+      for (int i = 0; i < source_corpus.size(); i++) {
+        if (source_corpus.sents[i].size() <= max_sentence_length)
+          indices.push_back(i);
+      }
+    }
+}
+
 int main(int argc, char** argv) {
   unsigned random_seed = cnn::Initialize(argc, argv);
 
@@ -1954,6 +1972,9 @@ int main(int argc, char** argv) {
   MAX_CONS_NT = conf["max_cons_nt"].as<unsigned>();
 
   SILVER_BLOCKS_PER_GOLD = conf["silver_blocks_per_gold"].as<int>();
+
+  MAX_SENTENCE_LENGTH_TRAIN = conf["max_sentence_length_train"].as<int>();
+  MAX_SENTENCE_LENGTH_EVAL = conf["max_sentence_length_eval"].as<int>();
 
   UNNORMALIZED = conf.count("unnormalized");
 
@@ -2158,16 +2179,10 @@ int main(int argc, char** argv) {
   bool output_candidate_trees = output_beam_as_samples || conf.count("samples_include_gold") || sample;
 
   int beam_size = conf["beam_size"].as<int>();
-  int test_size = test_corpus.size();
 
 
   // used for training and decoding
   int batch_size = conf["batch_size"].as<int>();
-
-  int start_index = 0;
-  int stop_index = test_corpus.size();
-  int block_count = conf["block_count"].as<int>();
-  int block_num = conf["block_num"].as<int>();
 
   auto decode = [&](
           AbstractParser& parser,
@@ -2235,7 +2250,7 @@ int main(int argc, char** argv) {
     return as_scalar(hg.incremental_forward());
   };
 
-  auto evaluate = [&](const vector<parser::Sentence>& sentences, const vector<vector<int>>& gold_parses, const vector<vector<unsigned>>& pred_parses, const string& name) {
+  auto evaluate = [&](const vector<parser::Sentence>& corpus_sentences, const vector<vector<int>>& corpus_gold_parses, const vector<vector<unsigned>>& pred_parses, const string& name, const vector<int>& indices) {
       auto make_name = [&](const string& base) {
           ostringstream os;
           os << "/tmp/parser_" << base << "." << getpid();
@@ -2244,10 +2259,12 @@ int main(int argc, char** argv) {
           os << ".txt";
           return os.str();
       };
-      int size = sentences.size();
+      assert(corpus_gold_parses.size() == corpus_sentences.size());
 
-      assert(pred_parses.size() == size);
-      assert(gold_parses.size() == size);
+      assert(pred_parses.size() == indices.size());
+      if (pred_parses.size() != corpus_gold_parses.size()) {
+        cerr << "WARNING: evaluating " << pred_parses.size() << " sentences, fewer than full corpus size " << corpus_gold_parses.size() << " (max_sentence_length_eval=" << MAX_SENTENCE_LENGTH_EVAL << ")" << endl;
+      }
 
       const string pred_fname = make_name("pred");
       ofstream pred_out(pred_fname.c_str());
@@ -2260,10 +2277,12 @@ int main(int argc, char** argv) {
       MatchCounts match_counts;
       vector<MatchCounts> all_match_counts;
 
-      for (int sii = 0; sii < size; sii++) {
-        const auto& sentence = sentences[sii];
+      for (int sii = 0; sii < indices.size(); sii++) {
         const auto& pred_parse = pred_parses[sii];
-        const auto& gold_parse = gold_parses[sii];
+
+        int corpus_index = indices[sii];
+        const auto& sentence = corpus_sentences[corpus_index];
+        const auto& gold_parse = corpus_gold_parses[corpus_index];
         Tree pred_tree = to_tree(vector<int>(pred_parse.begin(), pred_parse.end()), sentence);
         Tree gold_tree = to_tree(gold_parse, sentence);
 
@@ -2296,16 +2315,15 @@ int main(int argc, char** argv) {
       }
       //cerr << "evalb corpus\trecall=" << corpus_results.first.recall << ", precision=" << corpus_results.first.precision << ", F1=" << corpus_results.first.f1 << "\n";
 
-      for (int i = 0; i < all_match_counts.size(); i++) {
-        if (all_match_counts[i] != results.second[i]) {
-          cerr << "mismatch for " << (i+1) << endl;
-          cerr << all_match_counts[i].correct << " " << all_match_counts[i].gold << " " << all_match_counts[i].predicted << endl;
-          cerr << results.second[i].correct << " " << results.second[i].gold << " " << results.second[i].predicted << endl;
-          Tree pred_tree = to_tree(vector<int>(pred_parses[i].begin(), pred_parses[i].end()), sentences[i]);
-          Tree gold_tree = to_tree(gold_parses[i], sentences[i]);
+      for (int sii = 0; sii < all_match_counts.size(); sii++) {
+        if (all_match_counts[sii] != results.second[sii]) {
+          int corpus_index = indices[sii];
+          cerr << "mismatch for " << (sii+1) << endl;
+          cerr << all_match_counts[sii].correct << " " << all_match_counts[sii].gold << " " << all_match_counts[sii].predicted << endl;
+          cerr << results.second[sii].correct << " " << results.second[sii].gold << " " << results.second[sii].predicted << endl;
+          Tree pred_tree = to_tree(vector<int>(pred_parses[sii].begin(), pred_parses[sii].end()), corpus_sentences[corpus_index]);
+          Tree gold_tree = to_tree(corpus_gold_parses[corpus_index], corpus_sentences[corpus_index]);
           pred_tree.compare(gold_tree, spmrl, true);
-        } else {
-
         }
       }
 
@@ -2321,9 +2339,12 @@ int main(int argc, char** argv) {
     const double err;
   };
 
+  vector<int> dev_indices;
+  make_corpus_indices(dev_corpus, dev_indices, MAX_SENTENCE_LENGTH_EVAL);
+
   auto dev_decode = [&](AbstractParser& parser, WordFeaturizer* word_featurizer, StreamingStatistics* streaming_entropy, StreamingStatistics* streaming_gold_prob) {
       // TODO(dfried): support separate BERT word featurizers for ensemble models
-      int dev_size = dev_corpus.size();
+      int dev_size = dev_indices.size();
       vector<vector<unsigned>> predicted;
 
       double trs = 0;
@@ -2336,10 +2357,9 @@ int main(int argc, char** argv) {
       while (sii < dev_size) {
         int this_batch_size = min(batch_size, dev_size - sii);
         assert(this_batch_size > 0);
-        const vector<parser::Sentence> batch_sentences(
-                dev_corpus.sents.begin() + sii,
-                dev_corpus.sents.begin() + sii + this_batch_size
-        );
+        vector<parser::Sentence> batch_sentences;
+        for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++)
+          batch_sentences.push_back(dev_corpus.sents[dev_indices[sii + batch_sent]]);
 
         TF_Tensor* bert_feats = nullptr;
         vector<vector<shared_ptr<Parameters>>> batch_bert_embeddings;
@@ -2352,8 +2372,8 @@ int main(int argc, char** argv) {
         }
 
         for (int batch_index = 0; batch_index < this_batch_size; batch_index++) {
-          const auto& sentence=dev_corpus.sents[sii];
-          const vector<int>& actions=dev_corpus.actions[sii];
+          const auto& sentence=dev_corpus.sents[dev_indices[sii]];
+          const vector<int>& actions=dev_corpus.actions[dev_indices[sii]];
           const auto& bert_embeddings = batch_bert_embeddings[batch_index];
 
           dwords += sentence.size();
@@ -2367,10 +2387,9 @@ int main(int argc, char** argv) {
         TF_DeleteTensor(bert_feats);
       }
 
-      Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev");
+      Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev", dev_indices);
       return DecodeStats(metrics, llh, exp(llh / dwords), (trs - right) / trs);
   };
-
 
   //TRAINING
   if (conf.count("train")) {
@@ -2859,7 +2878,6 @@ int main(int argc, char** argv) {
             vector<Expression> batch_losses;
 
             int this_batch_size = min(batch_size, static_cast<int>(std::distance(index_iter, indices_end)));
-
             vector<parser::Sentence> batch_sentences;
             for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++)
               batch_sentences.push_back(corpus.sents[*(index_iter + batch_sent)]);
@@ -3031,30 +3049,17 @@ int main(int argc, char** argv) {
     int start_epoch = training_position.epoch;
     training_position.epoch = 0;
     int shuffle_count = 0;
+
     while (training_position.epoch < start_epoch) {
       assert(!has_gold_training_data); // not implemented, should also shuffle silver data, possibly one more time depending on whether training_position.sentence is at least the gold_corpus size
       parser::TopDownOracle* main_corpus = &corpus;
-      vector<int> main_indices(main_corpus->size());
-      std::iota(main_indices.begin(), main_indices.end(), 0);
+      vector<int> main_indices;
+      make_corpus_indices(*main_corpus, main_indices, MAX_SENTENCE_LENGTH_TRAIN);
       std::shuffle(main_indices.begin(), main_indices.end(), random_engine);
       training_position.epoch++;
       shuffle_count++;
     }
     cerr << "shuffle count: " << shuffle_count << endl;
-
-    /*
-    // simulate, todo: delete this!
-    for (unsigned i = 0; i < 5; i++) {
-      parser::TopDownOracle* main_corpus = &corpus;
-      vector<unsigned> main_indices(main_corpus->size());
-      std::iota(main_indices.begin(), main_indices.end(), 0);
-      std::random_shuffle(main_indices.begin(), main_indices.end());
-      training_position.epoch++;
-      optimizer->update_epoch();
-      training_position.iter += main_indices.size() / 25;
-      training_position.tot_seen += main_indices.size();
-    }
-    */
 
     while (!requested_stop) {
       parser::TopDownOracle* main_corpus = &corpus;
@@ -3071,18 +3076,16 @@ int main(int argc, char** argv) {
         assert(start_sentence == 0); // not implemented
         training_position.in_silver_block = true;
         main_corpus = &gold_corpus;
-        vector<int> silver_indices(corpus.size());
-        std::iota(silver_indices.begin(), silver_indices.end(), 0);
-        std::shuffle(silver_indices.begin(), silver_indices.end(), random_engine);
+        vector<int> silver_indices;
+        make_corpus_indices(corpus, silver_indices, MAX_SENTENCE_LENGTH_TRAIN);
         int offset = std::min(corpus.size(), gold_corpus.size() * SILVER_BLOCKS_PER_GOLD);
         train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, offset + gold_corpus.size(), start_sentence);
         sentence_count += offset;
         training_position.in_silver_block = false;
       }
 
-      vector<int> main_indices(main_corpus->size());
-      std::iota(main_indices.begin(), main_indices.end(), 0);
-      std::shuffle(main_indices.begin(), main_indices.end(), random_engine);
+      vector<int> main_indices;
+      make_corpus_indices(*main_corpus, main_indices, MAX_SENTENCE_LENGTH_TRAIN);
       sentence_count += main_indices.size();
       train_block(*main_corpus, main_indices.begin(), main_indices.end(), sentence_count, start_sentence);
       optimizer->update_epoch();
@@ -3108,6 +3111,7 @@ int main(int argc, char** argv) {
   } // should do training?
 
   if (test_corpus.size() > 0) { // do inference for test evaluation
+
     vector<std::shared_ptr<Model>> models;
     vector<std::shared_ptr<ParserBuilder>> parsers;
     std::shared_ptr<EnsembledParser> ensembled_parser;
@@ -3178,10 +3182,24 @@ int main(int argc, char** argv) {
       );
     }
 
+
+    vector<int> test_indices;
+    make_corpus_indices(test_corpus, test_indices, MAX_SENTENCE_LENGTH_EVAL);
+
+    int start_index = 0;
+    int stop_index = test_indices.size();
+    int block_count = conf["block_count"].as<int>();
+    int block_num = conf["block_num"].as<int>();
+
+    if (test_indices.size() != test_corpus.size()) {
+      cerr << "WARNING: decoding " << test_indices.size() << " sentences, fewer than full corpus size " << test_corpus.size()
+           << " (max_sentence_length_eval=" << MAX_SENTENCE_LENGTH_EVAL << ")" << endl;
+    }
+
     if (block_count > 0) {
       assert(block_num < block_count);
-      int q = test_corpus.size() / block_count;
-      int r = test_corpus.size() % block_count;
+      int q = test_indices.size() / block_count;
+      int r = test_indices.size() % block_count;
       start_index = q * block_num + min(block_num, r);
       stop_index = q * (block_num + 1) + min(block_num + 1, r);
     }
@@ -3213,7 +3231,10 @@ int main(int argc, char** argv) {
       int sii = start_index;
       while (sii < stop_index) {
         int this_batch_size = min(batch_size, static_cast<int>(stop_index - sii));
-        const vector<parser::Sentence> batch_sentences(test_corpus.sents.begin() + sii, test_corpus.sents.begin() + sii + this_batch_size);
+
+        vector<parser::Sentence> batch_sentences;
+        for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++)
+          batch_sentences.push_back(test_corpus.sents[test_indices[sii + batch_sent]]);
 
         TF_Tensor *bert_feats = nullptr;
         vector<vector<shared_ptr<Parameters>>> batch_bert_embeddings;
@@ -3226,10 +3247,10 @@ int main(int argc, char** argv) {
         }
 
         for (int batch_index = 0; batch_index < this_batch_size; batch_index++) {
-          const auto &sentence = test_corpus.sents[sii];
+          const auto &sentence = test_corpus.sents[test_indices[sii]];
           // TODO: this overrides dynet random seed, but should be ok if we're only sampling
           const auto& bert_embeddings = batch_bert_embeddings[batch_index];
-          const auto& actions = test_corpus.actions[sii];
+          const auto& actions = test_corpus.actions[test_indices[sii]];
           cnn::rndeng->seed(sii);
           set<vector<unsigned>> samples;
           if (conf.count("samples_include_gold")) {
@@ -3239,10 +3260,10 @@ int main(int argc, char** argv) {
             );
             vector<unsigned> result = result_and_nlp.first;
             double nlp = as_scalar(result_and_nlp.second.value());
-            cout << sii << " ||| " << -nlp << " |||";
+            cout << test_indices[sii] << " ||| " << -nlp << " |||";
             vector<unsigned> converted_actions(actions.begin(), actions.end());
             print_parse(converted_actions, sentence, false, cout);
-            ptb_out << sii << " ||| " << -nlp << " |||";
+            ptb_out << test_indices[sii] << " ||| " << -nlp << " |||";
             print_parse(converted_actions, sentence, true, ptb_out);
             samples.insert(converted_actions);
           }
@@ -3254,9 +3275,9 @@ int main(int argc, char** argv) {
                             &hg, sentence, bert_embeddings, actions, &right, sample, true
                     ); // TODO: fix ordering of sample and eval here, produces correct behavior but is confusing
             double lp = as_scalar(result_and_nlp.second.value());
-            cout << sii << " ||| " << -lp << " |||";
+            cout << test_indices[sii] << " ||| " << -lp << " |||";
             print_parse(result_and_nlp.first, sentence, false, cout);
-            ptb_out << sii << " ||| " << -lp << " |||";
+            ptb_out << test_indices[sii] << " ||| " << -lp << " |||";
             print_parse(result_and_nlp.first, sentence, true, ptb_out);
             samples.insert(result_and_nlp.first);
           }
@@ -3272,7 +3293,7 @@ int main(int argc, char** argv) {
               beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, bert_embeddings, beam_size);
             }
             if (beam_results.size() < beam_size) {
-              cerr << "warning: only " << beam_results.size() << " parses found by beam search for sent " << sii
+              cerr << "WARNING: only " << beam_results.size() << " parses found by beam search for sent " << test_indices[sii]
                    << endl;
             }
             int num_results = beam_results.size();
@@ -3280,9 +3301,9 @@ int main(int argc, char** argv) {
               int ix = std::min(i, num_results - 1);
               pair < vector<unsigned>, Expression > result_and_nlp = beam_results[ix];
               double nlp = as_scalar(result_and_nlp.second.value());
-              cout << sii << " ||| " << -nlp << " |||";
+              cout << test_indices[sii] << " ||| " << -nlp << " |||";
               print_parse(result_and_nlp.first, sentence, false, cout);
-              ptb_out << sii << " ||| " << -nlp << " |||";
+              ptb_out << test_indices[sii] << " ||| " << -nlp << " |||";
               print_parse(result_and_nlp.first, sentence, true, ptb_out);
               samples.insert(result_and_nlp.first);
             }
@@ -3315,9 +3336,12 @@ int main(int argc, char** argv) {
       unsigned long num_actions = 0;
 
       int sii = 0;
-      while (sii < test_size) {
+      while (sii < test_indices.size()) {
         int this_batch_size = min(batch_size, stop_index - sii);
-        const vector<parser::Sentence> batch_sentences(test_corpus.sents.begin() + sii, test_corpus.sents.begin() + sii + this_batch_size);
+        //const vector<parser::Sentence> batch_sentences(test_corpus.sents.begin() + sii, test_corpus.sents.begin() + sii + this_batch_size);
+        vector<parser::Sentence> batch_sentences;
+        for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++)
+          batch_sentences.push_back(test_corpus.sents[test_indices[sii + batch_sent]]);
 
 
         TF_Tensor *bert_feats = nullptr;
@@ -3331,12 +3355,13 @@ int main(int argc, char** argv) {
         }
 
         for (int batch_index = 0; batch_index < batch_size && sii < stop_index; batch_index++) {
+          int corpus_index = test_indices[sii];
           if (sii % 10 == 0) {
             cerr << "\r decoding sent: " << sii;
           }
-          const auto& sentence = test_corpus.sents[sii];
+          const auto& sentence = test_corpus.sents[corpus_index];
           const auto& bert_embeddings = batch_bert_embeddings[batch_index];
-          const auto& actions = test_corpus.actions[sii];
+          const auto& actions = test_corpus.actions[corpus_index];
           pair < vector<unsigned>, Expression > result_and_nlp = decode(*abstract_parser, sentence, bert_embeddings, &streaming_entropy);
           predicted.push_back(result_and_nlp.first);
           neg_log_likelihood += get_neg_log_likelihood(
@@ -3351,10 +3376,10 @@ int main(int argc, char** argv) {
       }
       cerr << endl;
       auto t_end = chrono::high_resolution_clock::now();
-      Metrics metrics = evaluate(test_corpus.sents, test_corpus.actions, predicted, "test");
+      Metrics metrics = evaluate(test_corpus.sents, test_corpus.actions, predicted, "test", test_indices);
       cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
       cerr << "decode: mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
-      cerr << "gold: mean gold probability: " << streaming_gold_prob.mean_value() << " stddev gold probability: " << streaming_entropy.std << " avg log likelihood: " << -neg_log_likelihood / (test_size) << " actions correct: " << actions_correct / num_actions << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
+      cerr << "gold: mean gold probability: " << streaming_gold_prob.mean_value() << " stddev gold probability: " << streaming_entropy.std << " avg log likelihood: " << -neg_log_likelihood / (test_indices.size()) << " actions correct: " << actions_correct / num_actions << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
     }
   }
 }
