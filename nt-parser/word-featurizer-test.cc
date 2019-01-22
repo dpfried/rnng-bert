@@ -76,9 +76,20 @@ int main() {
   TF_Tensor* feats_grad = nullptr;
   f.run_fw(batch_size, num_subwords, input_ids, word_end_mask, &feats, &feats_grad);
   std::cout << "TF_TensorType(feats_grad) " << TF_TensorType(feats_grad) << std::endl;
+  *static_cast<float*>(TF_TensorData(feats_grad)) = 1.0;
   f.run_bw(feats_grad);
   TF_DeleteTensor(feats);
   TF_DeleteTensor(feats_grad);
+
+  f.run_fw(batch_size, num_subwords, input_ids, word_end_mask, &feats, &feats_grad);
+  f.run_bw(feats_grad);
+  TF_DeleteTensor(feats);
+  TF_DeleteTensor(feats_grad);
+
+  // If gradient accumulation is working properly, the gradient norm for BERT
+  // parameters should be non-zero due to the first pair of calls, where a 1.0
+  // gradient was introduced
+  f.run_step();
 
   return 0;
 }

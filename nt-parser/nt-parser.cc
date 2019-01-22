@@ -2874,69 +2874,75 @@ int main(int argc, char** argv) {
          */
         while (true) {
           {
-            ComputationGraph hg;
-            vector<Expression> batch_losses;
-
             int this_batch_size = min(batch_size, static_cast<int>(std::distance(index_iter, indices_end)));
             vector<parser::Sentence> batch_sentences;
             for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++)
               batch_sentences.push_back(corpus.sents[*(index_iter + batch_sent)]);
 
-            TF_Tensor* bert_feats = nullptr;
-            TF_Tensor* bert_grads = nullptr;
-            vector<vector<shared_ptr<Parameters>>> batch_bert_embeddings;
+            // TODO: add subbatching, by making this block a loop over subbatches
+            vector<parser::Sentence> subbatch_sentences(batch_sentences);
+            int this_subbatch_size = this_batch_size;
+            {
+              ComputationGraph hg;
+              vector<Expression> subbatch_losses;
 
-            if (BERT) {
-              assert(word_featurizer);
-              bert_fw(word_featurizer, batch_sentences, batch_bert_embeddings, &bert_feats, &bert_grads);
-            } else {
-              batch_bert_embeddings.resize(batch_sentences.size());
-            }
+              TF_Tensor* bert_feats = nullptr;
+              TF_Tensor* bert_grads = nullptr;
+              vector<vector<shared_ptr<Parameters>>> subbatch_bert_embeddings;
 
-            // TODO(dfried): this will use a small batch at the end of every epoch if training data isn't evenly divisible by batch size
-            for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++) {
-              assert(index_iter != indices_end);
-              auto &sentence = corpus.sents[*index_iter];
-              const vector<int> &actions = corpus.actions[*index_iter];
-              auto& bert_embeddings = batch_bert_embeddings[batch_sent];
-              auto loss_and_mc = train_sentence(hg, sentence, bert_embeddings, actions, &right);
-              batch_losses.push_back(loss_and_mc.first);
-              block_match_counts += loss_and_mc.second;
-              double loss = as_scalar(loss_and_mc.first.value());
-              if (!min_risk_training && !max_margin_training && loss < 0) {
-                cerr << "loss < 0 on sentence " << *index_iter << ": loss=" << loss << endl;
-                //assert(lp >= 0.0)
+              if (BERT) {
+                assert(word_featurizer);
+                bert_fw(word_featurizer, subbatch_sentences, subbatch_bert_embeddings, &bert_feats, &bert_grads);
+              } else {
+                subbatch_bert_embeddings.resize(subbatch_sentences.size());
               }
-              llh += loss;
-              trs += actions.size();
-              words += sentence.size();
-              sents++;
-              index_iter++;
-              training_position.sentence++;
-              training_position.tot_seen++;
-              sents_since_last_status++;
+
+              // TODO(dfried): this will use a small batch at the end of every epoch if training data isn't evenly divisible by batch size
+              for (int subbatch_sent = 0; subbatch_sent < this_subbatch_size; subbatch_sent++) {
+                assert(index_iter != indices_end);
+                auto &sentence = corpus.sents[*index_iter];
+                const vector<int> &actions = corpus.actions[*index_iter];
+                auto& bert_embeddings = subbatch_bert_embeddings[subbatch_sent];
+                auto loss_and_mc = train_sentence(hg, sentence, bert_embeddings, actions, &right);
+                subbatch_losses.push_back(loss_and_mc.first);
+                block_match_counts += loss_and_mc.second;
+                double loss = as_scalar(loss_and_mc.first.value());
+                if (!min_risk_training && !max_margin_training && loss < 0) {
+                  cerr << "loss < 0 on sentence " << *index_iter << ": loss=" << loss << endl;
+                  //assert(lp >= 0.0)
+                }
+                llh += loss;
+                trs += actions.size();
+                words += sentence.size();
+                sents++;
+                index_iter++;
+                training_position.sentence++;
+                training_position.tot_seen++;
+                sents_since_last_status++;
+              }
+
+              // We average the losses across the full batch, so divide by the
+              // batch size (not the subbatch size!)
+              Expression subbatch_loss = sum(subbatch_losses) / this_batch_size;
+              double subbatch_loss_v = as_scalar(subbatch_loss.value());
+              //cerr << "subbatch loss: " << subbatch_loss_v << endl;
+              hg.backward();
+
+              if (BERT) {
+                word_featurizer->run_bw(bert_grads);
+                TF_DeleteTensor(bert_feats);
+                TF_DeleteTensor(bert_grads);
+              }
             }
 
-            Expression batch_loss = average(batch_losses);
-            double batch_loss_v = as_scalar(batch_loss.value());
-            //cerr << "batch loss: " << batch_loss_v << endl;
-            hg.backward();
-
-            // need to call this before calling the dynet update below, as dynet update
-            // will change the values stored in the memory pointed to by Parameters,
-            // shared between tensorflow and dynet,
-            // and we don't have a guarantee that tensorflow doesn't use those
-            // values in its own backward pass
-            if (BERT) {
-              word_featurizer->run_bw(bert_grads);
-            }
-
-            // TODO (dfried): consider marking transient Parameters to not be updated
+            // The optimizer only references parameters that are part of the
+            // model, which does not include transient "parameters" that point
+            // to tensorflow-allocated memory. The fact that transient
+            // parameters have had their memory de-allocated shouldn't matter at
+            // this point.
             optimizer->update(1.0);
-
             if (BERT) {
-              TF_DeleteTensor(bert_feats);
-              TF_DeleteTensor(bert_grads);
+              word_featurizer->run_step();
             }
             training_position.batches++;
           }

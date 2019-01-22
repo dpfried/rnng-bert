@@ -120,8 +120,45 @@ def conditional_print_norm(do_print, tensor, message):
         )
 
 def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
-    """Creates an optimizer training op."""
+    """Sets up backward pass and optimizer, with support for subbatching"""
     global_step = tf.train.get_or_create_global_step()
+
+    print_every = 12
+    do_print = (global_step < print_every) | tf.equal(
+        global_step % print_every, print_every - 1)
+
+    tvars = tf.trainable_variables()
+
+    grad_ys = [
+        conditional_print_norm(
+            do_print,
+            tf.check_numerics(node, "check_numerics failed for placeholder {}".format(node.name.split(':')[0])),
+            "Norm for value passed to placeholder {}: ".format(node.name.split(':')[0]),
+            )
+        for node in grad_ys
+        ]
+    subbatch_grads = tf.gradients(ys=ys, xs=tvars, grad_ys=grad_ys)
+
+    grad_accumulators = []
+    accumulator_assignments = []
+    with sess.graph.as_default() as g, g.name_scope(None):
+        for grad, param in zip(subbatch_grads, tvars):
+            if grad is None or param is None:
+                continue
+
+            param_name = bert.optimization.AdamWeightDecayOptimizer._get_variable_name(None, param.name)
+            grad_accumulator = tf.get_variable(
+                name=param_name + "/grad_accumulator",
+                shape=param.shape.as_list(),
+                dtype=tf.float32,
+                trainable=False,
+                initializer=tf.zeros_initializer())
+            grad_accumulators.append(grad_accumulator)
+
+            accumulator_assignments.append(grad_accumulator.assign_add(grad))
+
+    accumulate_op = tf.group(*accumulator_assignments, name='accumulate')
+    zero_grad_op = tf.variables_initializer(grad_accumulators, name='zero_grad')
 
     with sess.graph.as_default() as g, g.name_scope(None):
         learning_rate_var = tf.get_variable(
@@ -170,45 +207,32 @@ def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
         epsilon=1e-6,
         exclude_from_weight_decay=["LayerNorm", "layer_norm", "bias"])
 
-    print_every = 12
-    do_print = (global_step < print_every) | tf.equal(
-        global_step % print_every, print_every - 1)
-
-    tvars = tf.trainable_variables()
-
-    grad_ys = [
-        conditional_print_norm(
-            do_print,
-            tf.check_numerics(node, "check_numerics failed for placeholder {}".format(node.name.split(':')[0])),
-            "Norm for value passed to placeholder {}: ".format(node.name.split(':')[0]),
-            )
-        for node in grad_ys
-        ]
-    # grads = tf.gradients(loss, tvars)
-    grads = tf.gradients(ys=ys, xs=tvars, grad_ys=grad_ys)
-
     # This is how the model was pre-trained.
-    global_norm = tf.global_norm(grads)
+    global_norm = tf.global_norm(grad_accumulators)
     global_norm = conditional_print(
         do_print,
         global_norm,
         "Gradient norm for BERT parameters: "
         )
-    (grads, _) = tf.clip_by_global_norm(grads, clip_norm=1.0, use_norm=global_norm)
+    (grads, _) = tf.clip_by_global_norm(grad_accumulators, clip_norm=1.0, use_norm=global_norm)
 
     train_op = optimizer.apply_gradients(
       zip(grads, tvars), global_step=global_step)
 
-    # Normally the global step update is done inside of `apply_gradients`.
-    # However, `AdamWeightDecayOptimizer` doesn't do this. But if you use
-    # a different optimizer, you should probably take this line out.
+    # Zero out the gradient accumulators, but only after performing the update
     new_global_step = global_step + 1
-    train_op = tf.group(train_op, [global_step.assign(new_global_step)], name='train')
-    return train_op, learning_rate_var, warmup_steps_var
+    with tf.control_dependencies([train_op]):
+        # Normally the global step update is done inside of `apply_gradients`.
+        # However, `AdamWeightDecayOptimizer` doesn't do this. But if you use
+        # a different optimizer, you should probably take this line out.
+        train_op = tf.group(zero_grad_op, global_step.assign(new_global_step), name='train')
+
+    # train_op = tf.group(train_op, [global_step.assign(new_global_step)], name='train')
+    return accumulate_op, train_op, learning_rate_var, warmup_steps_var
 
 # %%
 
-train_op, learning_rate_var, warmup_steps_var = create_optimizer([word_features], [word_features_grad])
+accumulate_op, train_op, learning_rate_var, warmup_steps_var = create_optimizer([word_features], [word_features_grad])
 
 # %%
 
@@ -237,6 +261,7 @@ new_learning_rate: {new_learning_rate.name}
 set_learning_rate_op: {set_learning_rate_op.name}
 new_warmup_steps: {new_warmup_steps.name}
 set_warmup_steps_op: {set_warmup_steps_op.name}
+accumulate_op: {accumulate_op.name}
 train_op: {train_op.name}
 save_op: {saver.saver_def.save_tensor_name}
 restore_op: {saver.saver_def.restore_op_name}

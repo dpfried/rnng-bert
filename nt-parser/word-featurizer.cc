@@ -97,6 +97,7 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     word_features_grad = get_operation(graph, "word_features_grad");
 
     init_op = get_operation(graph, "init");
+    accumulate_op = get_operation(graph, "accumulate");
     train_op = get_operation(graph, "train");
 
     restore_op = get_operation(graph, "save/restore_all");
@@ -261,7 +262,7 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
       TF_SessionPRunSetup(sess,
           feeds_all, num_feeds_all,
           fetches_all, num_fetches_all,
-          &train_op, 1,
+          &accumulate_op, 1,
           &handle,
           status);
       assert (TF_GetCode(status) == TF_OK);
@@ -313,12 +314,24 @@ void WordFeaturizer::run_bw(TF_Tensor* features_grad) {
     TF_SessionPRun(sess, handle,
       feeds_bw, feed_values_bw, num_feeds_bw,
       nullptr, nullptr, 0,
-      &train_op, 1,
+      &accumulate_op, 1,
       status
       );
     assert (TF_GetCode(status) == TF_OK);
 
     cleanup();
+  }
+
+void WordFeaturizer::run_step() {
+    TF_SessionRun(sess,
+                nullptr, // Run options.
+                nullptr, nullptr, 0, // Input tensors, input tensor values, number of inputs.
+                nullptr, nullptr, 0, // Output tensors, output tensor values, number of outputs.
+                &train_op, 1, // Target operations, number of targets.
+                nullptr, // Run metadata.
+                status // Output status.
+                );
+    assert (TF_GetCode(status) == TF_OK);
   }
 
 void WordFeaturizer::cleanup() {
