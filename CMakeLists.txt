@@ -79,7 +79,7 @@ endfunction()
 function(find_tensorflow)
   find_path(TENSORFLOW_INCLUDE_DIR c_api.h
           PATHS ${TENSORFLOW_ROOT} ${TENSORFLOW_ROOT}/include ${TENSORFLOW_ROOT}/include/tensorflow/c)
-  find_library(TENSORFLOW_LIB NAMES libtensorflow
+  find_library(TENSORFLOW_LIB NAMES libtensorflow.so
           PATHS ${TENSORFLOW_ROOT} ${TENSORFLOW_ROOT}/lib
           DOC "Tensorflow library path")
 
