@@ -173,6 +173,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("optimizer", po::value<string>()->default_value("sgd"), "sgd | adam")
           ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
           ("batch_size", po::value<int>()->default_value(1),  "number of training examples to use to compute each gradient update")
+          ("eval_batch_size", po::value<int>()->default_value(8),  "number of examples to process in parallel for evaluation")
+          ("subbatch_max_size", po::value<int>()->default_value(9999),  "maximum number of examples to process in parallel while training")
 
           ("bert_lr", po::value<float>()->default_value(BERT_LR), "BERT learning rate (after warmup)")
           ("bert_warmup_steps", po::value<int>()->default_value(BERT_WARMUP_STEPS), "number of steps in BERT warmup period")
@@ -2181,8 +2183,11 @@ int main(int argc, char** argv) {
   int beam_size = conf["beam_size"].as<int>();
 
 
-  // used for training and decoding
+  // used for training
   int batch_size = conf["batch_size"].as<int>();
+  int subbatch_max_size = conf["subbatch_max_size"].as<int>();
+  // used for decoding
+  int eval_batch_size = conf["eval_batch_size"].as<int>();
 
   auto decode = [&](
           AbstractParser& parser,
@@ -2355,7 +2360,7 @@ int main(int argc, char** argv) {
       int sii = 0;
 
       while (sii < dev_size) {
-        int this_batch_size = min(batch_size, dev_size - sii);
+        int this_batch_size = min(eval_batch_size, dev_size - sii);
         assert(this_batch_size > 0);
         vector<parser::Sentence> batch_sentences;
         for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++)
@@ -2875,14 +2880,17 @@ int main(int argc, char** argv) {
         while (true) {
           {
             int this_batch_size = min(batch_size, static_cast<int>(std::distance(index_iter, indices_end)));
-            vector<parser::Sentence> batch_sentences;
-            for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++)
-              batch_sentences.push_back(corpus.sents[*(index_iter + batch_sent)]);
+            int sentences_remaining = this_batch_size;
+            while (sentences_remaining > 0) {
+              vector<parser::Sentence> subbatch_sentences;
 
-            // TODO: add subbatching, by making this block a loop over subbatches
-            vector<parser::Sentence> subbatch_sentences(batch_sentences);
-            int this_subbatch_size = this_batch_size;
-            {
+              // note that index_iter gets updated at each iteration of this inner loop
+              for (int subbatch_sent = 0; (subbatch_sent < sentences_remaining) && (subbatch_sent < subbatch_max_size); subbatch_sent++) {
+                subbatch_sentences.push_back(corpus.sents[*(index_iter + subbatch_sent)]);
+              }
+              int this_subbatch_size = subbatch_sentences.size();
+              sentences_remaining -= this_subbatch_size;
+
               ComputationGraph hg;
               vector<Expression> subbatch_losses;
 
@@ -3236,7 +3244,7 @@ int main(int argc, char** argv) {
 
       int sii = start_index;
       while (sii < stop_index) {
-        int this_batch_size = min(batch_size, static_cast<int>(stop_index - sii));
+        int this_batch_size = min(eval_batch_size, static_cast<int>(stop_index - sii));
 
         vector<parser::Sentence> batch_sentences;
         for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++)
@@ -3343,7 +3351,7 @@ int main(int argc, char** argv) {
 
       int sii = 0;
       while (sii < test_indices.size()) {
-        int this_batch_size = min(batch_size, stop_index - sii);
+        int this_batch_size = min(eval_batch_size, stop_index - sii);
         //const vector<parser::Sentence> batch_sentences(test_corpus.sents.begin() + sii, test_corpus.sents.begin() + sii + this_batch_size);
         vector<parser::Sentence> batch_sentences;
         for (int batch_sent = 0; batch_sent < this_batch_size; batch_sent++)
@@ -3360,7 +3368,7 @@ int main(int argc, char** argv) {
           batch_bert_embeddings.resize(batch_sentences.size());
         }
 
-        for (int batch_index = 0; batch_index < batch_size && sii < stop_index; batch_index++) {
+        for (int batch_index = 0; batch_index < this_batch_size && sii < stop_index; batch_index++) {
           int corpus_index = test_indices[sii];
           if (sii % 10 == 0) {
             cerr << "\r decoding sent: " << sii;
