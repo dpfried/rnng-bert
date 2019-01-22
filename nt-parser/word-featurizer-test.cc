@@ -8,8 +8,8 @@
 
 int main() {
   WordFeaturizer f(
-    "bert_graph.pb",
-    "uncased_L-12_H-768_A-12/bert_model.ckpt",
+    "bert_models/uncased_L-12_H-768_A-12_FDS-4.0_graph.pb",
+    "bert_models/uncased_L-12_H-768_A-12/bert_model.ckpt",
     5e-5f,
     160
   );
