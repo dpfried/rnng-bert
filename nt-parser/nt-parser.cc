@@ -2888,7 +2888,7 @@ int main(int argc, char** argv) {
               for (int subbatch_sent = 0; subbatch_sent < sentences_remaining; subbatch_sent++) {
                 int candidate_index = *(index_iter + subbatch_sent);
                 if ((subbatch_sent != 0)
-                    && (static_cast<int>(corpus.sents[candidate_index].word_piece_ids_flat.size() > subbatch_tokens_remaining)) {
+                    && (static_cast<int>(corpus.sents[candidate_index].word_piece_ids_flat.size()) > subbatch_tokens_remaining)) {
                   // Move to the next subbatch if we've exceeeded the token quota for this one, but make sure
                   // sentences longer than subbatch_max_tokens still get processed in a subbatch of their own
                   break;
