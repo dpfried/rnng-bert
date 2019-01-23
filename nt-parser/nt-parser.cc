@@ -2961,6 +2961,7 @@ int main(int argc, char** argv) {
             optimizer->update(1.0);
             if (BERT) {
               word_featurizer->run_step();
+              word_featurizer->run_zero_grad();
             }
             training_position.batches++;
           }

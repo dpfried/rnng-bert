@@ -141,24 +141,26 @@ def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
 
     grad_accumulators = []
     accumulator_assignments = []
-    with sess.graph.as_default() as g, g.name_scope(None):
-        for grad, param in zip(subbatch_grads, tvars):
-            if grad is None or param is None:
-                continue
+    accumulator_clears = []
+    for grad, param in zip(subbatch_grads, tvars):
+        if grad is None or param is None:
+            grad_accumulators.append(None)
+            continue
 
-            param_name = bert.optimization.AdamWeightDecayOptimizer._get_variable_name(None, param.name)
-            grad_accumulator = tf.get_variable(
-                name=param_name + "/grad_accumulator",
-                shape=param.shape.as_list(),
-                dtype=tf.float32,
-                trainable=False,
-                initializer=tf.zeros_initializer())
-            grad_accumulators.append(grad_accumulator)
+        param_name = bert.optimization.AdamWeightDecayOptimizer._get_variable_name(None, param.name)
+        grad_accumulator = tf.get_variable(
+            name=param_name + "/grad_accumulator",
+            shape=param.shape.as_list(),
+            dtype=tf.float32,
+            trainable=False,
+            initializer=tf.zeros_initializer())
+        grad_accumulators.append(grad_accumulator)
 
-            accumulator_assignments.append(grad_accumulator.assign_add(grad))
+        accumulator_assignments.append(tf.assign_add(grad_accumulator, grad))
+        accumulator_clears.append(tf.assign(grad_accumulator, tf.zeros_like(grad_accumulator), use_locking=True))
 
     accumulate_op = tf.group(*accumulator_assignments, name='accumulate')
-    zero_grad_op = tf.variables_initializer(grad_accumulators, name='zero_grad')
+    zero_grad_op = tf.group(*accumulator_clears, name='zero_grad')
 
     with sess.graph.as_default() as g, g.name_scope(None):
         learning_rate_var = tf.get_variable(
@@ -219,20 +221,17 @@ def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
     train_op = optimizer.apply_gradients(
       zip(grads, tvars), global_step=global_step)
 
-    # Zero out the gradient accumulators, but only after performing the update
+    # Normally the global step update is done inside of `apply_gradients`.
+    # However, `AdamWeightDecayOptimizer` doesn't do this. But if you use
+    # a different optimizer, you should probably take this line out.
     new_global_step = global_step + 1
-    with tf.control_dependencies([train_op]):
-        # Normally the global step update is done inside of `apply_gradients`.
-        # However, `AdamWeightDecayOptimizer` doesn't do this. But if you use
-        # a different optimizer, you should probably take this line out.
-        train_op = tf.group(zero_grad_op, global_step.assign(new_global_step), name='train')
+    train_op = tf.group(train_op, [global_step.assign(new_global_step)], name='train')
 
-    # train_op = tf.group(train_op, [global_step.assign(new_global_step)], name='train')
-    return accumulate_op, train_op, learning_rate_var, warmup_steps_var
+    return accumulate_op, train_op, zero_grad_op, learning_rate_var, warmup_steps_var
 
 # %%
 
-accumulate_op, train_op, learning_rate_var, warmup_steps_var = create_optimizer([word_features], [word_features_grad])
+accumulate_op, train_op, zero_grad_op, learning_rate_var, warmup_steps_var = create_optimizer([word_features], [word_features_grad])
 
 # %%
 
@@ -263,6 +262,7 @@ new_warmup_steps: {new_warmup_steps.name}
 set_warmup_steps_op: {set_warmup_steps_op.name}
 accumulate_op: {accumulate_op.name}
 train_op: {train_op.name}
+zero_grad_op: {zero_grad_op.name}
 save_op: {saver.saver_def.save_tensor_name}
 restore_op: {saver.saver_def.restore_op_name}
 checkpoint_name: {saver.saver_def.filename_tensor_name}

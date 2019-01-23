@@ -13,7 +13,7 @@ private:
   TF_Session* sess;
   TF_Operation *input_ids, *word_end_mask, *is_training;
   TF_Operation *word_features, *word_features_grad;
-  TF_Operation *init_op, *accumulate_op, *train_op, *save_op, *restore_op;
+  TF_Operation *init_op, *accumulate_op, *train_op, *zero_grad_op, *save_op, *restore_op;
   TF_Output checkpoint_name;
   TF_Output new_learning_rate = {nullptr, 0};
   TF_Output new_warmup_steps = {nullptr, 0};
@@ -48,7 +48,8 @@ public:
                     TF_Tensor** features_out, TF_Tensor** features_grad_out
                   );
   void run_bw(TF_Tensor* features_grad);
-  void run_step();
+  void run_step(void);
+  void run_zero_grad(void);
   static int batch_inputs(
           const std::vector<std::vector<int32_t>>& batch_input_ids_data,
           const std::vector<std::vector<int32_t>>& batch_word_end_mask_data,

@@ -90,6 +90,7 @@ int main() {
   // parameters should be non-zero due to the first pair of calls, where a 1.0
   // gradient was introduced
   f.run_step();
+  f.run_zero_grad();
 
   return 0;
 }

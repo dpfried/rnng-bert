@@ -99,6 +99,7 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     init_op = get_operation(graph, "init");
     accumulate_op = get_operation(graph, "accumulate");
     train_op = get_operation(graph, "train");
+    zero_grad_op = get_operation(graph, "zero_grad");
 
     restore_op = get_operation(graph, "save/restore_all");
     save_op = get_operation(graph, "save/control_dependency");
@@ -324,12 +325,24 @@ void WordFeaturizer::run_bw(TF_Tensor* features_grad) {
     cleanup();
   }
 
-void WordFeaturizer::run_step() {
+void WordFeaturizer::run_step(void) {
     TF_SessionRun(sess,
                 nullptr, // Run options.
                 nullptr, nullptr, 0, // Input tensors, input tensor values, number of inputs.
                 nullptr, nullptr, 0, // Output tensors, output tensor values, number of outputs.
                 &train_op, 1, // Target operations, number of targets.
+                nullptr, // Run metadata.
+                status // Output status.
+                );
+    assert (TF_GetCode(status) == TF_OK);
+  }
+
+void WordFeaturizer::run_zero_grad(void) {
+    TF_SessionRun(sess,
+                nullptr, // Run options.
+                nullptr, nullptr, 0, // Input tensors, input tensor values, number of inputs.
+                nullptr, nullptr, 0, // Output tensors, output tensor values, number of outputs.
+                &zero_grad_op, 1, // Target operations, number of targets.
                 nullptr, // Run metadata.
                 status // Output status.
                 );
