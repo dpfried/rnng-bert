@@ -2880,26 +2880,47 @@ int main(int argc, char** argv) {
         while (true) {
           {
             int this_batch_size = min(batch_size, static_cast<int>(std::distance(index_iter, indices_end)));
-            int sentences_remaining = this_batch_size;
-            while (sentences_remaining > 0) {
-              vector<parser::Sentence> subbatch_sentences;
+            vector<std::tuple<int, int, int>> batch_length_batch_index_corpus_index;
+            for (int i = 0; i < this_batch_size; i++) {
+              int corpus_index = *(index_iter + i);
+              int length = static_cast<int>(corpus.sents[corpus_index].word_piece_ids_flat.size());
+              // put the batch index in so that ties are broken in batch (shuffled) order rather than corpus (invariant) order
+              batch_length_batch_index_corpus_index.push_back(std::tuple<int,int,int>(length, i, corpus_index));
+            }
 
-              int subbatch_tokens_remaining = subbatch_max_tokens;
-              for (int subbatch_sent = 0; subbatch_sent < sentences_remaining; subbatch_sent++) {
-                int candidate_index = *(index_iter + subbatch_sent);
-                if ((subbatch_sent != 0)
-                    && (static_cast<int>(corpus.sents[candidate_index].word_piece_ids_flat.size()) > subbatch_tokens_remaining)) {
-                  // Move to the next subbatch if we've exceeeded the token quota for this one, but make sure
-                  // sentences longer than subbatch_max_tokens still get processed in a subbatch of their own
+            // sort ascending by length (lexicographical comparison)
+            std::sort(batch_length_batch_index_corpus_index.begin(), batch_length_batch_index_corpus_index.end());
+
+            int batch_index = 0;
+            while (batch_index < this_batch_size) {
+              vector<parser::Sentence> subbatch_sentences;
+              vector<int> subbatch_corpus_indices;
+
+              int max_length = 0;
+
+              for (int subbatch_index = batch_index; subbatch_index < this_batch_size; subbatch_index++) {
+                int length = get<0>(batch_length_batch_index_corpus_index[subbatch_index]);
+                int corpus_index = get<2>(batch_length_batch_index_corpus_index[subbatch_index]);
+
+                int new_max_length = max(length, max_length);
+
+                if ((subbatch_index != batch_index)
+                    && (new_max_length * (subbatch_sentences.size() + 1) > subbatch_max_tokens)) {
+                  // Move to the next subbatch if we've exceeeded the token quota for this one (accounting
+                  // for padding), but make sure sentences longer than subbatch_max_tokens still get
+                  // processed in a subbatch of their own
                   break;
                 } else {
-                  subbatch_tokens_remaining -= corpus.sents[candidate_index].word_piece_ids_flat.size();
-                  subbatch_sentences.push_back(corpus.sents[candidate_index]);
+                  subbatch_sentences.push_back(corpus.sents[corpus_index]);
+                  subbatch_corpus_indices.push_back(corpus_index);
                 }
+                max_length = new_max_length;
               }
+              assert(subbatch_sentences.size() == subbatch_corpus_indices.size());
 
               int this_subbatch_size = subbatch_sentences.size();
-              sentences_remaining -= this_subbatch_size;
+
+              batch_index += this_subbatch_size;
 
               ComputationGraph hg;
               vector<Expression> subbatch_losses;
@@ -2917,23 +2938,22 @@ int main(int argc, char** argv) {
 
               // TODO(dfried): this will use a small batch at the end of every epoch if training data isn't evenly divisible by batch size
               for (int subbatch_sent = 0; subbatch_sent < this_subbatch_size; subbatch_sent++) {
-                assert(index_iter != indices_end);
-                auto &sentence = corpus.sents[*index_iter];
-                const vector<int> &actions = corpus.actions[*index_iter];
+                int corpus_index = subbatch_corpus_indices[subbatch_sent];
+                auto &sentence = corpus.sents[corpus_index];
+                const vector<int> &actions = corpus.actions[corpus_index];
                 auto& bert_embeddings = subbatch_bert_embeddings[subbatch_sent];
                 auto loss_and_mc = train_sentence(hg, sentence, bert_embeddings, actions, &right);
                 subbatch_losses.push_back(loss_and_mc.first);
                 block_match_counts += loss_and_mc.second;
                 double loss = as_scalar(loss_and_mc.first.value());
                 if (!min_risk_training && !max_margin_training && loss < 0) {
-                  cerr << "loss < 0 on sentence " << *index_iter << ": loss=" << loss << endl;
+                  cerr << "loss < 0 on sentence " << corpus_index << ": loss=" << loss << endl;
                   //assert(lp >= 0.0)
                 }
                 llh += loss;
                 trs += actions.size();
                 words += sentence.size();
                 sents++;
-                index_iter++;
                 training_position.sentence++;
                 training_position.tot_seen++;
                 sents_since_last_status++;
@@ -2964,6 +2984,8 @@ int main(int argc, char** argv) {
               word_featurizer->run_zero_grad();
             }
             training_position.batches++;
+            index_iter += this_batch_size;
+
           }
 
           if (training_position.batches % status_every_n_batches == 0) {
