@@ -3125,6 +3125,7 @@ int main(int argc, char** argv) {
         main_corpus = &gold_corpus;
         vector<int> silver_indices;
         make_corpus_indices(corpus, silver_indices, MAX_SENTENCE_LENGTH_TRAIN);
+        std::shuffle(silver_indices.begin(), silver_indices.end(), random_engine);
         int offset = std::min(corpus.size(), gold_corpus.size() * SILVER_BLOCKS_PER_GOLD);
         train_block(corpus, silver_indices.begin(), silver_indices.begin() + offset, offset + gold_corpus.size(), start_sentence);
         sentence_count += offset;
@@ -3133,6 +3134,7 @@ int main(int argc, char** argv) {
 
       vector<int> main_indices;
       make_corpus_indices(*main_corpus, main_indices, MAX_SENTENCE_LENGTH_TRAIN);
+      std::shuffle(main_indices.begin(), main_indices.end(), random_engine);
       sentence_count += main_indices.size();
       train_block(*main_corpus, main_indices.begin(), main_indices.end(), sentence_count, start_sentence);
       optimizer->update_epoch();
