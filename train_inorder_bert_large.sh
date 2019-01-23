@@ -19,7 +19,7 @@ build/nt-parser/nt-parser \
     --hidden_dim 128 \
     -D 0.2 \
     --batch_size $batch_size \
-    --subbatch_max_size 4 \
+    --subbatch_max_tokens 500 \
     --eval_batch_size 8 \
     --bert_lr $bert_lr \
     --bert_large \

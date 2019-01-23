@@ -174,7 +174,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
           ("batch_size", po::value<int>()->default_value(1),  "number of training examples to use to compute each gradient update")
           ("eval_batch_size", po::value<int>()->default_value(8),  "number of examples to process in parallel for evaluation")
-          ("subbatch_max_size", po::value<int>()->default_value(9999),  "maximum number of examples to process in parallel while training")
+          ("subbatch_max_tokens", po::value<int>()->default_value(9999),  "maximum number of sub-word units to process in parallel while training")
 
           ("bert_lr", po::value<float>()->default_value(BERT_LR), "BERT learning rate (after warmup)")
           ("bert_warmup_steps", po::value<int>()->default_value(BERT_WARMUP_STEPS), "number of steps in BERT warmup period")
@@ -2185,7 +2185,7 @@ int main(int argc, char** argv) {
 
   // used for training
   int batch_size = conf["batch_size"].as<int>();
-  int subbatch_max_size = conf["subbatch_max_size"].as<int>();
+  int subbatch_max_tokens = conf["subbatch_max_tokens"].as<int>();
   // used for decoding
   int eval_batch_size = conf["eval_batch_size"].as<int>();
 
@@ -2884,10 +2884,20 @@ int main(int argc, char** argv) {
             while (sentences_remaining > 0) {
               vector<parser::Sentence> subbatch_sentences;
 
-              // note that index_iter gets updated at each iteration of this inner loop
-              for (int subbatch_sent = 0; (subbatch_sent < sentences_remaining) && (subbatch_sent < subbatch_max_size); subbatch_sent++) {
-                subbatch_sentences.push_back(corpus.sents[*(index_iter + subbatch_sent)]);
+              int subbatch_tokens_remaining = subbatch_max_tokens;
+              for (int subbatch_sent = 0; subbatch_sent < sentences_remaining; subbatch_sent++) {
+                int candidate_index = *(index_iter + subbatch_sent);
+                if ((subbatch_sent != 0)
+                    && (static_cast<int>(corpus.sents[candidate_index].word_piece_ids_flat.size() > subbatch_tokens_remaining)) {
+                  // Move to the next subbatch if we've exceeeded the token quota for this one, but make sure
+                  // sentences longer than subbatch_max_tokens still get processed in a subbatch of their own
+                  break;
+                } else {
+                  subbatch_tokens_remaining -= corpus.sents[candidate_index].word_piece_ids_flat.size();
+                  subbatch_sentences.push_back(corpus.sents[candidate_index]);
+                }
               }
+
               int this_subbatch_size = subbatch_sentences.size();
               sentences_remaining -= this_subbatch_size;
 
