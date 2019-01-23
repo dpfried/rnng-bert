@@ -304,6 +304,8 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
         grad_accumulator_dims.data(),
         TF_NumDims(*features_out),
         TF_TensorByteSize(*features_out));
+      assert (*features_grad_out != nullptr);
+      assert (TF_TensorData(*features_grad_out) != nullptr);
       std::memset(TF_TensorData(*features_grad_out), 0, TF_TensorByteSize(*features_grad_out));
     }
   }
