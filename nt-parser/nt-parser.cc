@@ -173,6 +173,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 
           ("optimizer", po::value<string>()->default_value("sgd"), "sgd | adam")
           ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
+          ("sgd_eta_decay", po::value<float>()->default_value(0.05),  "initial step size for gradient descent")
           ("batch_size", po::value<int>()->default_value(1),  "number of training examples to use to compute each gradient update")
           ("eval_batch_size", po::value<int>()->default_value(8),  "number of examples to process in parallel for evaluation")
           ("subbatch_max_tokens", po::value<int>()->default_value(9999),  "maximum number of sub-word units to process in parallel while training")
@@ -2422,7 +2423,7 @@ int main(int argc, char** argv) {
 
 
     if (optimizer_name == "sgd") {
-      optimizer->eta_decay = 0.05;
+      optimizer->eta_decay = conf["sgd_eta_decay"].as<float>();
     }
 
     int dev_check_frequency = conf["dev_check_frequency"].as<int>();
