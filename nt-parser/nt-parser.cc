@@ -125,6 +125,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           // run parameters
           ("model_dir,m", po::value<string>(), "Load saved model from this directory")
           ("text_format", "serialize models in text")
+          ("git_state", "print git revision and diff to stderr")
 
           ("unnormalized", "do not locally normalize score distributions")
 
@@ -1955,6 +1956,12 @@ int main(int argc, char** argv) {
 
   po::variables_map conf;
   InitCommandLine(argc, argv, &conf);
+
+  if (conf.count("git_state")) {
+    system("git rev-parse HEAD 1>&2");
+    system("find . | egrep '*\\.(cc|h)$' | xargs git --no-pager diff -- 1>&2");
+  }
+
   USE_POS = conf.count("use_pos_tags");
   USE_MORPH_FEATURES = conf.count("use_morph_features");
   if (conf.count("dropout"))
