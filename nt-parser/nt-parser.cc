@@ -210,6 +210,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("factored_ensemble_beam", "do beam search in each model in the ensemble separately, then take the union and rescore with the entire ensemble")
 
           ("ptb_output_file", po::value<string>(), "When outputting parses, use original POS tags and non-unk'ed words")
+          ("eval_files_prefix", po::value<string>(), "When testing, output parses and output files to this prefix")
 
           ("block_count", po::value<int>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
           ("block_num", po::value<int>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
@@ -2264,9 +2265,10 @@ int main(int argc, char** argv) {
   };
 
   auto evaluate = [&](const vector<parser::Sentence>& corpus_sentences, const vector<vector<int>>& corpus_gold_parses, const vector<vector<unsigned>>& pred_parses, const string& name, const vector<int>& indices) {
+      string prefix = conf.count("eval_files_prefix") ? conf["files_prefix"].as<string>() : ("/tmp/parser_" + to_string(getpid()));
       auto make_name = [&](const string& base) {
           ostringstream os;
-          os << "/tmp/parser_" << base << "." << getpid();
+          os << prefix << "_" << base;
           if (name != "")
             os << "." << name;
           os << ".txt";
