@@ -326,6 +326,9 @@ void print_tree(const Tree& tree, const parser::Sentence& sentence, bool output_
 }
 
 void print_parse(const vector<unsigned>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
+  Tree tree = to_tree_u(actions, sentence);
+  print_tree(tree, sentence, ptb_output_format, out_stream);
+  /*
   if (IN_ORDER) {
     Tree tree = to_tree_u(actions, sentence);
     print_tree(tree, sentence, ptb_output_format, out_stream);
@@ -347,6 +350,7 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
     }
     out_stream << endl;
   }
+   */
 }
 
 void print_parse(const vector<int>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
