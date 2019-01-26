@@ -2265,7 +2265,7 @@ int main(int argc, char** argv) {
   };
 
   auto evaluate = [&](const vector<parser::Sentence>& corpus_sentences, const vector<vector<int>>& corpus_gold_parses, const vector<vector<unsigned>>& pred_parses, const string& name, const vector<int>& indices) {
-      string prefix = conf.count("eval_files_prefix") ? conf["files_prefix"].as<string>() : ("/tmp/parser_" + to_string(getpid()));
+      string prefix = conf.count("eval_files_prefix") ? conf["eval_files_prefix"].as<string>() : ("/tmp/parser_" + to_string(getpid()));
       auto make_name = [&](const string& base) {
           ostringstream os;
           os << prefix << "_" << base;
