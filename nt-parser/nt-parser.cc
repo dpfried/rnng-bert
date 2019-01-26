@@ -2156,6 +2156,8 @@ int main(int argc, char** argv) {
     cerr << "Loading test set\n";
     check_spmrl(conf["test_data"].as<string>(), spmrl);
     test_corpus.load_oracle(conf["test_data"].as<string>(), false, false, IN_ORDER, USE_MORPH_FEATURES);
+    test_corpus.load_bdata(conf["bracketing_test_data"].as<string>());
+
   }
 
   non_unked_termdict.Freeze();

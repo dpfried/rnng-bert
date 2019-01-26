@@ -164,8 +164,11 @@ public:
   }
 
   Tree expand_unary(const std::string& delim="+") {
-      assert(symbol[0] == '(');
-      // for some reason we're storing ( in the symbol, so deal with that
+      if (symbol[0] != '(') {
+          // terminal node
+          return *this;
+      }
+      //  otherwise we're storing ( in the symbol to mark it's a non-term, so deal with that
       vector<string> unaries = utils::split_string(symbol.substr(1), delim);
 
       vector<Tree> children;
