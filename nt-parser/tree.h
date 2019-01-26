@@ -171,12 +171,12 @@ public:
       //  otherwise we're storing ( in the symbol to mark it's a non-term, so deal with that
       vector<string> unaries = utils::split_string(symbol.substr(1), delim);
 
-      vector<Tree> children;
-      for (auto& child: this->children) {
-          children.push_back(child.expand_unary(delim));
+      vector<Tree> expanded_children;
+      for (auto& child: children) {
+          expanded_children.push_back(child.expand_unary(delim));
       }
 
-      Tree tree(unaries.back(), children, this->sentence, this->leaf_index);
+      Tree tree("(" + unaries.back(), expanded_children, sentence, leaf_index);
       unaries.pop_back();
 
       if (unaries.empty()) {
@@ -184,8 +184,8 @@ public:
       }
 
       for (auto it = unaries.rbegin(); it != unaries.rend(); it++) {
-        children = vector<Tree> { tree };
-        tree = Tree{("(" + *it), children, this->sentence, this->leaf_index};
+        expanded_children = vector<Tree> { tree };
+        tree = Tree{("(" + *it), expanded_children, sentence, leaf_index};
       }
       return tree;
   }
