@@ -2095,16 +2095,21 @@ int main(int argc, char** argv) {
   parser::TopDownOracle gold_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict, &morphology_classes, &morphology_dicts, &morphology_singletons);
 
   check_spmrl(conf["training_data"].as<string>(), spmrl);
-  check_spmrl(conf["bracketing_dev_data"].as<string>(), spmrl);
   corpus.load_oracle(conf["training_data"].as<string>(), true, discard_train_sents, IN_ORDER, USE_MORPH_FEATURES);
-  corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+
+  if (conf.count("bracketing_dev_data")) {
+    check_spmrl(conf["bracketing_dev_data"].as<string>(), spmrl);
+    corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+  }
 
   bool has_gold_training_data = false;
 
   if (conf.count("gold_training_data")) {
     check_spmrl(conf["gold_training_data"].as<string>(), spmrl);
     gold_corpus.load_oracle(conf["gold_training_data"].as<string>(), true, discard_train_sents, IN_ORDER, USE_MORPH_FEATURES);
-    gold_corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+    if (conf.count("bracketing_dev_data")) {
+      gold_corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+    }
     has_gold_training_data = true;
   }
 
@@ -2156,7 +2161,9 @@ int main(int argc, char** argv) {
     cerr << "Loading test set\n";
     check_spmrl(conf["test_data"].as<string>(), spmrl);
     test_corpus.load_oracle(conf["test_data"].as<string>(), false, false, IN_ORDER, USE_MORPH_FEATURES);
-    test_corpus.load_bdata(conf["bracketing_test_data"].as<string>());
+    if (conf.count("bracketing_test_data")) {
+      test_corpus.load_bdata(conf["bracketing_test_data"].as<string>());
+    }
 
   }
 
@@ -2330,10 +2337,10 @@ int main(int argc, char** argv) {
       pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(gold_fname, pred_fname, evalb_fname, spmrl);
       //pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.bracketed_fname, pred_fname, evalb_fname + "_corpus", spmrl);
 
-      if (abs(match_counts.metrics().f1 - results.first.f1) > 1e-2 || abs(match_counts.metrics().complete_match - results.first.complete_match) > 1e-2) {
+      if (abs(match_counts.metrics().f1 - results.first.f1) > 1e-2) {
         cerr << "warning: score mismatch" << endl;
-        cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << ", exact_match=" << match_counts.metrics().complete_match << "\n";
-        cerr << "evalb\trecall=" << results.first.recall << ", precision=" << results.first.precision << ", F1=" << results.first.f1 << ", exact_match=" << results.first.complete_match << "\n";
+        cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
+        cerr << "evalb\trecall=" << results.first.recall << ", precision=" << results.first.precision << ", F1=" << results.first.f1 << "\n";
         if (results.first.recall == 0.0 && results.first.precision == 0.0 && results.first.f1 == 0.0) {
             cerr << "evalb appears to not have run; returning computed score" << endl;
             return match_counts.metrics();
@@ -2356,10 +2363,10 @@ int main(int argc, char** argv) {
       if (reference_gold_fname != "") {
         cerr << "checking against " << reference_gold_fname << endl;
         pair<Metrics, vector<MatchCounts>> reference_results = metrics_from_evalb(reference_gold_fname, pred_fname, evalb_fname, spmrl);
-        if (abs(match_counts.metrics().f1 - reference_results.first.f1) > 1e-2 || abs(match_counts.metrics().complete_match - reference_results.first.complete_match) > 1e-2) {
+        if (abs(match_counts.metrics().f1 - reference_results.first.f1) > 1e-2) {
           cerr << "warning: score mismatch" << endl;
-          cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << ", exact_match=" << match_counts.metrics().complete_match << "\n";
-          cerr << "evalb\trecall=" << reference_results.first.recall << ", precision=" << reference_results.first.precision << ", F1=" << reference_results.first.f1 << ", exact_match=" << reference_results.first.complete_match << "\n";
+          cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
+          cerr << "evalb\trecall=" << reference_results.first.recall << ", precision=" << reference_results.first.precision << ", F1=" << reference_results.first.f1 << "\n";
         }
       }
 
