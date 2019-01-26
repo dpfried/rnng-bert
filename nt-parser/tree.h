@@ -11,6 +11,7 @@
 #include "nt-parser/eval.h"
 #include "nt-parser/oracle.h"
 #include "oracle.h"
+#include "utils.h"
 
 #ifndef CNN_TREE_H
 #define CNN_TREE_H
@@ -160,6 +161,30 @@ public:
       }
 
       return match_counts;
+  }
+
+  Tree expand_unary(const std::string& delim="+") {
+      assert(symbol[0] == '(');
+      // for some reason we're storing ( in the symbol, so deal with that
+      vector<string> unaries = utils::split_string(symbol.substr(1), delim);
+
+      vector<Tree> children;
+      for (auto& child: this->children) {
+          children.push_back(child.expand_unary(delim));
+      }
+
+      Tree tree(unaries.back(), children, this->sentence, this->leaf_index);
+      unaries.pop_back();
+
+      if (unaries.empty()) {
+          return tree;
+      }
+
+      for (auto it = unaries.rbegin(); it != unaries.rend(); it++) {
+        children = vector<Tree> { tree };
+        tree = Tree{("(" + *it), children, this->sentence, this->leaf_index};
+      }
+      return tree;
   }
 
   /*

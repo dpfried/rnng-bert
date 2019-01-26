@@ -38,7 +38,7 @@ struct Oracle {
   cnn::Dict* pd; // dictionary of POS tags (preterminal symbols)
   cnn::Dict* nud; // dictionary of non-unked terminal symbols
   std::unordered_map<unsigned, unsigned> raw_term_counts; // mapping from feature types to features
-  std::string devdata;
+  std::string bracketed_fname;
   std::vector<Sentence> sents;
   std::vector<std::vector<int>> actions;
  protected:

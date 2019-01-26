@@ -234,6 +234,7 @@ def main():
     parser.add_argument("--in_order", action='store_true')
     parser.add_argument("--no_morph_aware_unking", action='store_true')
     parser.add_argument("--bert_model_dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uncased_L-12_H-768_A-12"))
+    parser.add_argument("--collapse_unary", action='store_true', help='collapse unary chains, with nonterminals separated by "+"')
     args = parser.parse_args()
     # train_file = open(sys.argv[1], 'r')
     # words_list = set(get_dictionary.get_dict(train_file))
@@ -278,7 +279,14 @@ def main():
         print(' '.join(map(str, bert_word_end_mask)))
         print(' '.join(map(str, bert_input_ids)))
 
-        output_actions, mon, mcn, mscn = get_actions(line)
+        tree_string = line
+        if args.collapse_unary:
+            from nltk import Tree
+            tree = Tree.fromstring(line.rstrip())
+            tree.collapse_unary(collapseRoot=True, joinChar="+")
+            tree_string = tree._pformat_flat(nodesep='', parens='()', quotes=False)
+
+        output_actions, mon, mcn, mscn = get_actions(tree_string)
 
         if mon > max_open_nts:
             max_open_nts = mon

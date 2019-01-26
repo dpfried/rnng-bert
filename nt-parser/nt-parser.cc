@@ -138,6 +138,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("bracketing_dev_data,C", po::value<string>(), "Development bracketed corpus")
           ("gold_training_data", po::value<string>(), "List of Transitions - smaller corpus (e.g. wsj in a wsj+silver experiment)")
           ("test_data,p", po::value<string>(), "Test corpus")
+          ("bracketing_test_data", po::value<string>(), "Test bracketed corpus")
           ("max_sentence_length_train", po::value<int>()->default_value(MAX_SENTENCE_LENGTH_TRAIN), "Don't train on sentences longer than this length")
           ("max_sentence_length_eval", po::value<int>()->default_value(MAX_SENTENCE_LENGTH_EVAL), "Don'evaluate on sentences longer than this length")
 
@@ -1809,13 +1810,8 @@ vector<string> string_representation_u(const vector<unsigned>& actions, const pa
 
 Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence) {
   vector<string> string_rep = string_representation(actions, sentence);
-  if (IN_ORDER) {
-    //cerr << "parsing in order" << endl;
-    return parse_inorder(string_rep);
-  } else {
-    //cerr << "parsing linearized" << endl;
-    return parse_linearized(string_rep);
-  }
+  Tree tree = IN_ORDER ? parse_inorder(string_rep) : parse_linearized(string_rep);
+  return tree.expand_unary("+");
 }
 
 Tree to_tree_u(const vector<unsigned>& actions, const parser::Sentence& sentence) {
@@ -2182,6 +2178,19 @@ int main(int argc, char** argv) {
   for (int i = 0; i < adict.size(); ++i)
     possible_actions[i] = i;
 
+  /*
+  // TODO(dfried): take this out
+  const string dev_output = "/tmp/dev-output.txt";
+  cerr << "writing transformed dev corpus to " + dev_output;
+  ofstream dev_out(dev_output.c_str());
+  for (int i = 0; i < dev_corpus.size(); i++) {
+    Tree tree = to_tree(dev_corpus.actions[i], dev_corpus.sents[i]);
+    print_tree(tree, dev_corpus.sents[i], true, dev_out);
+  }
+  dev_out.close();
+  abort();
+   */
+
   bool factored_ensemble_beam = conf.count("factored_ensemble_beam") > 0;
 
 
@@ -2264,7 +2273,7 @@ int main(int argc, char** argv) {
     return as_scalar(hg.incremental_forward());
   };
 
-  auto evaluate = [&](const vector<parser::Sentence>& corpus_sentences, const vector<vector<int>>& corpus_gold_parses, const vector<vector<unsigned>>& pred_parses, const string& name, const vector<int>& indices) {
+  auto evaluate = [&](const vector<parser::Sentence>& corpus_sentences, const vector<vector<int>>& corpus_gold_parses, const vector<vector<unsigned>>& pred_parses, const string& name, const vector<int>& indices, const string& reference_gold_fname = "") {
       string prefix = conf.count("eval_files_prefix") ? conf["eval_files_prefix"].as<string>() : ("/tmp/parser_" + to_string(getpid()));
       auto make_name = [&](const string& base) {
           ostringstream os;
@@ -2317,12 +2326,12 @@ int main(int argc, char** argv) {
       cerr << name << " output in " << evalb_fname << endl;
 
       pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(gold_fname, pred_fname, evalb_fname, spmrl);
-      //pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.devdata, pred_fname, evalb_fname + "_corpus", spmrl);
+      //pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.bracketed_fname, pred_fname, evalb_fname + "_corpus", spmrl);
 
-      if (abs(match_counts.metrics().f1 - results.first.f1) > 1e-2) {
+      if (abs(match_counts.metrics().f1 - results.first.f1) > 1e-2 || abs(match_counts.metrics().complete_match - results.first.complete_match) > 1e-2) {
         cerr << "warning: score mismatch" << endl;
-        cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
-        cerr << "evalb\trecall=" << results.first.recall << ", precision=" << results.first.precision << ", F1=" << results.first.f1 << "\n";
+        cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << ", exact_match=" << match_counts.metrics().complete_match << "\n";
+        cerr << "evalb\trecall=" << results.first.recall << ", precision=" << results.first.precision << ", F1=" << results.first.f1 << ", exact_match=" << results.first.complete_match << "\n";
         if (results.first.recall == 0.0 && results.first.precision == 0.0 && results.first.f1 == 0.0) {
             cerr << "evalb appears to not have run; returning computed score" << endl;
             return match_counts.metrics();
@@ -2339,6 +2348,16 @@ int main(int argc, char** argv) {
           Tree pred_tree = to_tree(vector<int>(pred_parses[sii].begin(), pred_parses[sii].end()), corpus_sentences[corpus_index]);
           Tree gold_tree = to_tree(corpus_gold_parses[corpus_index], corpus_sentences[corpus_index]);
           pred_tree.compare(gold_tree, spmrl, true);
+        }
+      }
+
+      if (reference_gold_fname != "") {
+        cerr << "checking against " << reference_gold_fname << endl;
+        pair<Metrics, vector<MatchCounts>> reference_results = metrics_from_evalb(reference_gold_fname, pred_fname, evalb_fname, spmrl);
+        if (abs(match_counts.metrics().f1 - reference_results.first.f1) > 1e-2 || abs(match_counts.metrics().complete_match - reference_results.first.complete_match) > 1e-2) {
+          cerr << "warning: score mismatch" << endl;
+          cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << ", exact_match=" << match_counts.metrics().complete_match << "\n";
+          cerr << "evalb\trecall=" << reference_results.first.recall << ", precision=" << reference_results.first.precision << ", F1=" << reference_results.first.f1 << ", exact_match=" << reference_results.first.complete_match << "\n";
         }
       }
 
@@ -2402,7 +2421,7 @@ int main(int argc, char** argv) {
         TF_DeleteTensor(bert_feats);
       }
 
-      Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev", dev_indices);
+      Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev", dev_indices, dev_corpus.bracketed_fname);
       return DecodeStats(metrics, llh, exp(llh / dwords), (trs - right) / trs);
   };
 
@@ -3435,7 +3454,7 @@ int main(int argc, char** argv) {
       }
       cerr << endl;
       auto t_end = chrono::high_resolution_clock::now();
-      Metrics metrics = evaluate(test_corpus.sents, test_corpus.actions, predicted, "test", test_indices);
+      Metrics metrics = evaluate(test_corpus.sents, test_corpus.actions, predicted, "test", test_indices, test_corpus.bracketed_fname);
       cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
       cerr << "decode: mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
       cerr << "gold: mean gold probability: " << streaming_gold_prob.mean_value() << " stddev gold probability: " << streaming_entropy.std << " avg log likelihood: " << -neg_log_likelihood / (test_indices.size()) << " actions correct: " << actions_correct / num_actions << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();

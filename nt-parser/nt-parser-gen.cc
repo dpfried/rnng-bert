@@ -3441,12 +3441,12 @@ int main(int argc, char** argv) {
       //parser::EvalBResults res = parser::Evaluate("foo", pfx);
       std::string evaluable_fname = pfx + "_evaluable.txt";
       std::string evalbout_fname = pfx + "_evalbout.txt";
-      std::string command = "python remove_dev_unk.py " + corpus.devdata + " " + pfx + " > " + evaluable_fname;
+      std::string command = "python remove_dev_unk.py " + corpus.bracketed_fname + " " + pfx + " > " + evaluable_fname;
       const char *cmd = command.c_str();
       system(cmd);
 
       std::string command2 =
-              "EVALB/evalb -p EVALB/COLLINS.prm " + corpus.devdata + " " + evaluable_fname + " > " + evalbout_fname;
+              "EVALB/evalb -p EVALB/COLLINS.prm " + corpus.bracketed_fname + " " + evaluable_fname + " > " + evalbout_fname;
       const char *cmd2 = command2.c_str();
 
       system(cmd2);

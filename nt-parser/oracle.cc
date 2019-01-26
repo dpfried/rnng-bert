@@ -158,7 +158,7 @@ void TopDownOracle::ReadMorphologyFeatures(const std::string& line, std::vector<
   }
 
 void TopDownOracle::load_bdata(const string& file) {
-   devdata=file;
+   bracketed_fname=file;
 }
 
 void TopDownOracle::load_oracle(const string& file, bool is_training, bool discard_sentences, bool in_order, bool read_morphology_features) {
@@ -278,7 +278,7 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
 }
 
 void TopDownOracleGen::load_bdata(const string& file) {
-  devdata=file;
+  bracketed_fname=file;
 }
 
 void TopDownOracleGen::load_oracle(const string& file, bool discard_sentences) {

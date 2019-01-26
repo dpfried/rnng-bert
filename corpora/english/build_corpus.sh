@@ -43,6 +43,8 @@ for SPLIT in train dev test
 do
   # top_down discriminative
   python $GET_ORACLE $DICTIONARY ${SPLIT}.stripped --bert_model_dir $BERT_BASE_PATH > top_down/${SPLIT}.oracle
+  python $GET_ORACLE $DICTIONARY ${SPLIT}.stripped --bert_model_dir $BERT_BASE_PATH --collapse_unary > top_down/${SPLIT}.collapse-unary.oracle
+
   # the bert_large oracle files are identical because Base and Large, for English uncased at least, have the same vocab.txt
   #python $GET_ORACLE $DICTIONARY ${SPLIT}.stripped --bert_model_dir $BERT_LARGE_PATH > top_down/${SPLIT}_bert_large.oracle
 
@@ -51,6 +53,8 @@ do
 
   # in_order discriminative
   python $GET_ORACLE --in_order $DICTIONARY ${SPLIT}.stripped --bert_model_dir $BERT_BASE_PATH > in_order/${SPLIT}.oracle
+  python $GET_ORACLE --in_order $DICTIONARY ${SPLIT}.stripped --bert_model_dir $BERT_BASE_PATH --collapse_unary > in_order/${SPLIT}.collapse-unary.oracle
+
   # the bert_large oracle files are identical because Base and Large, for English uncased at least, have the same vocab.txt
   #python $GET_ORACLE --in_order $DICTIONARY ${SPLIT}.stripped --bert_model_dir $BERT_LARGE_PATH > in_order/${SPLIT}_bert_large.oracle
 done
