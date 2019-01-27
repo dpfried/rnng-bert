@@ -25,6 +25,9 @@ namespace parser {
 
     int batches = 0;
 
+    int best_dev_f1_or_lr_updated_epoch = 0;
+
+
   private:
     friend class boost::serialization::access;
     template<class Archive>
@@ -38,6 +41,7 @@ namespace parser {
         ar & best_dev_error;
         ar & tot_seen_last_status;
         ar & batches;
+        ar & best_dev_f1_or_lr_updated_epoch;
     }
   };
 }

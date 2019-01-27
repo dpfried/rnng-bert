@@ -42,6 +42,8 @@ public:
                );
   void load_checkpoint(std::string checkpoint_path);
   void save_checkpoint(std::string checkpoint_path);
+  void set_learning_rate(float learning_rate);
+  float get_last_set_learning_rate();
   void run_fw(int batch_size, int num_subwords,
                     std::vector<int32_t> input_ids_data,
                     std::vector<int32_t> word_end_mask_data,
@@ -58,6 +60,7 @@ public:
   );
 private:
   void cleanup();
+  float last_set_learning_rate;
 };
 
 

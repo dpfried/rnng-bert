@@ -174,12 +174,18 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 
           ("optimizer", po::value<string>()->default_value("sgd"), "sgd | adam")
           ("sgd_e0", po::value<float>()->default_value(0.1f),  "initial step size for gradient descent")
-          ("sgd_eta_decay", po::value<float>()->default_value(0.05),  "initial step size for gradient descent")
+          ("sgd_eta_decay", po::value<float>()->default_value(0.05),  "learning rate decay for gradient descent (learning rate = sgd_e0 / (1 + epoch * sgd_eta_decay)) ")
+
+          ("adam_lr", po::value<float>()->default_value(0.001f), "initial learning rate for Adam for dynet components")
+
+          ("lr_decay_patience", po::value<int>()->default_value(-1), "if non-negative, if dev accuracy doesn't improve in this many epochs, decrease the lr by lr_decay_factor (for both dynet and BERT)")
+          ("lr_decay_factor", po::value<float>()->default_value(0.5), "used with lr_decay_patience")
+
           ("batch_size", po::value<int>()->default_value(1),  "number of training examples to use to compute each gradient update")
           ("eval_batch_size", po::value<int>()->default_value(8),  "number of examples to process in parallel for evaluation")
           ("subbatch_max_tokens", po::value<int>()->default_value(9999),  "maximum number of sub-word units to process in parallel while training")
 
-          ("bert_lr", po::value<float>()->default_value(BERT_LR), "BERT learning rate (after warmup)")
+          ("bert_lr", po::value<float>()->default_value(BERT_LR), "initial BERT learning rate (after warmup)")
           ("bert_warmup_steps", po::value<int>()->default_value(BERT_WARMUP_STEPS), "number of steps in BERT warmup period")
 
           ("min_risk_training", "min risk training (default F1)")
@@ -2451,13 +2457,22 @@ int main(int argc, char** argv) {
     ParserBuilder parser(&model, pretrained);
     unique_ptr<Trainer> optimizer = optimizer_name == "sgd"
                                     ? unique_ptr<Trainer>(new SimpleSGDTrainer(&model, 1e-6, conf["sgd_e0"].as<float>()))
-                                    : unique_ptr<Trainer>(new AdamTrainer(&model)); //(&model);
+                                    : unique_ptr<Trainer>(new AdamTrainer(&model, 1e-6, conf["adam_lr"].as<float>())); //(&model);
     parser::TrainingPosition training_position;
     StreamingStatistics streaming_f1;
 
 
     if (optimizer_name == "sgd") {
       optimizer->eta_decay = conf["sgd_eta_decay"].as<float>();
+    }
+
+    int lr_decay_patience = conf["lr_decay_patience"].as<int>();
+    float lr_decay_factor = conf["lr_decay_factor"].as<float>();
+    if (lr_decay_patience >= 0) {
+      if (optimizer->eta_decay != 0.0f) {
+        cerr << "disallowing run with both epoch-based lr decay and performance tolerance" << endl;
+        abort();
+      }
     }
 
     int dev_check_frequency = conf["dev_check_frequency"].as<int>();
@@ -3108,6 +3123,7 @@ int main(int argc, char** argv) {
               if (dev_decode_stats.metrics.f1 > training_position.best_dev_f1) {
                 training_position.best_dev_error = dev_decode_stats.err;
                 training_position.best_dev_f1=dev_decode_stats.metrics.f1;
+                training_position.best_dev_f1_or_lr_updated_epoch = training_position.epoch;
                 cerr << "  new best... ";
                 save_model(fname, "best-epoch-" + to_string(training_position.epoch), model_tag, true);
                 last_save_time = chrono::system_clock::now();
@@ -3179,6 +3195,21 @@ int main(int argc, char** argv) {
       std::shuffle(main_indices.begin(), main_indices.end(), random_engine);
       sentence_count += main_indices.size();
       train_block(*main_corpus, main_indices.begin(), main_indices.end(), sentence_count, start_sentence);
+
+      if (lr_decay_patience >= 0) {
+        int since_last_update = training_position.epoch - training_position.best_dev_f1_or_lr_updated_epoch;
+        if (since_last_update > lr_decay_patience) {
+          cerr << since_last_update << " epochs have passed since the last new best F1 on dev or the last LR update; updating learning rates" << endl;
+          // make sure to set this before calling update_epoch, which will set eta for the current epoch based on eta0.
+          optimizer->eta0 *= lr_decay_factor;
+          cerr << "new dynet eta0: " << optimizer->eta0 << endl;
+          if (BERT) {
+            word_featurizer->set_learning_rate(word_featurizer->get_last_set_learning_rate() * lr_decay_factor);
+          }
+          training_position.best_dev_f1_or_lr_updated_epoch = training_position.epoch;
+        }
+      }
+
       optimizer->update_epoch();
 
       training_position.epoch++;

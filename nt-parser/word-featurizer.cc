@@ -144,21 +144,7 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     load_checkpoint(init_checkpoint_path);
 
     // ------
-    TF_Tensor* new_learning_rate_tensor = TF_AllocateTensor(TF_FLOAT, NULL, 0, sizeof(float));
-    assert (new_learning_rate_tensor != nullptr);
-    assert (TF_TensorData(new_learning_rate_tensor) != nullptr);
-    *(static_cast<float*>(TF_TensorData(new_learning_rate_tensor))) = learning_rate;
-    TF_SessionRun(sess,
-                nullptr, // Run options.
-                &new_learning_rate, &new_learning_rate_tensor, 1, // Input tensors, input tensor values, number of inputs.
-                nullptr, nullptr, 0, // Output tensors, output tensor values, number of outputs.
-                &set_learning_rate_op, 1, // Target operations, number of targets.
-                nullptr, // Run metadata.
-                status // Output status.
-                );
-    assert (TF_GetCode(status) == TF_OK);
-    TF_DeleteTensor(new_learning_rate_tensor);
-    std::cout << "WordFeaturizer: set learning rate to " << learning_rate << std::endl;
+    set_learning_rate(learning_rate);
 
     TF_Tensor* new_warmup_steps_tensor = TF_AllocateTensor(TF_INT32, NULL, 0, sizeof(int32_t));
     assert (new_warmup_steps_tensor != nullptr);
@@ -214,6 +200,29 @@ void WordFeaturizer::save_checkpoint(std::string checkpoint_path) {
     TF_DeleteTensor(checkpoint_tensor);
     std::cout << "WordFeaturizer: saved checkpoint " << checkpoint_path << std::endl;
   }
+
+void WordFeaturizer::set_learning_rate(float learning_rate) {
+  TF_Tensor* new_learning_rate_tensor = TF_AllocateTensor(TF_FLOAT, NULL, 0, sizeof(float));
+  assert (new_learning_rate_tensor != nullptr);
+  assert (TF_TensorData(new_learning_rate_tensor) != nullptr);
+  *(static_cast<float*>(TF_TensorData(new_learning_rate_tensor))) = learning_rate;
+  TF_SessionRun(sess,
+                nullptr, // Run options.
+                &new_learning_rate, &new_learning_rate_tensor, 1, // Input tensors, input tensor values, number of inputs.
+                nullptr, nullptr, 0, // Output tensors, output tensor values, number of outputs.
+                &set_learning_rate_op, 1, // Target operations, number of targets.
+                nullptr, // Run metadata.
+                status // Output status.
+  );
+  assert (TF_GetCode(status) == TF_OK);
+  TF_DeleteTensor(new_learning_rate_tensor);
+  std::cout << "WordFeaturizer: set learning rate to " << learning_rate << std::endl;
+  last_set_learning_rate = learning_rate;
+}
+
+float WordFeaturizer::get_last_set_learning_rate() {
+  return last_set_learning_rate;
+}
 
 void WordFeaturizer::run_fw(int batch_size, int num_subwords,
                     std::vector<int32_t> input_ids_data,
