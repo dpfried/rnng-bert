@@ -96,6 +96,8 @@ bool UNNORMALIZED = false;
 
 bool IN_ORDER = false;
 
+bool COLLAPSE_UNARY = false;
+
 bool BERT = false;
 float BERT_LR = 5e-5f;
 int BERT_WARMUP_STEPS = 160;
@@ -131,6 +133,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 
           ("spmrl", "Use the SPMRL variant of EVALB")
           ("inorder", "super experimental implementation of Liu and Zhang 2017, breaks many of the other flags")
+
+          ("collapse_unary", "assume that oracle files represent parses with collapsed unary chains. Don't allow producing unary chains, and uncollapse unaries when decoding (split on +)")
 
           // data
           ("training_data,T", po::value<string>(), "List of Transitions - Training corpus")
@@ -256,7 +260,12 @@ Expression log_softmax_constrained(const Expression& logits, const vector<unsign
 }
 
 // checks to see if a proposed action is valid in discriminative models
-static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsigned bsize, unsigned ssize, unsigned nopen_parens, unsigned ncons_nt, unsigned unary) {
+static bool IsActionForbidden_Discriminative(
+        unsigned action, char prev_a, unsigned bsize, unsigned ssize,
+        unsigned nopen_parens, unsigned ncons_nt, unsigned unary,
+        const Stack<Bracket>& completed_brackets, const Stack<OpenBracket>& open_brackets,
+        unsigned words_shifted
+) {
   bool is_shift = action == SHIFT_ACTION;
   bool is_reduce = action == REDUCE_ACTION;
   bool is_term = IN_ORDER ? action == TERM_ACTION : false;
@@ -264,6 +273,7 @@ static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsig
 
   if (IN_ORDER) {
     assert(is_shift || is_reduce || is_nt || is_term) ;
+    // TODO(dfried): use this
     static const unsigned MAX_OPEN_NTS = 100;
     static const unsigned MAX_UNARY = 3;
 //  if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
@@ -290,6 +300,18 @@ static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsig
     }
 
     if (is_reduce){
+      if (COLLAPSE_UNARY) {
+        // TODO(dfried): in theory we'd be able to check this using open and completed brackets,
+        //  in the same way as for top-down, but for in-order these aren't currently
+        //  initialized with the left end-point of the span but the split point
+        if (unary > 1) {
+          cerr << "error: should never have a current unary_count > 1 with COLLAPSE_UNARY (currently " << unary << ")" << endl;
+          assert(unary <= 1);
+        }
+        if (unary == 1 && prev_a == 'N') return true;
+      }
+      // TODO(dfried): doesn't this need to check if the last action was an NT
+      //  to know whether we're increasing the length of the unary chain?
       if(unary > MAX_UNARY) return true;
       if(nopen_parens == 0) return true;
       return false;
@@ -304,6 +326,15 @@ static bool IsActionForbidden_Discriminative(unsigned action, char prev_a, unsig
     if (ssize == 1) {
       if (!is_nt) return true;
       return false;
+    }
+
+    if (COLLAPSE_UNARY && is_reduce) {
+      if (!completed_brackets.empty()
+          && get<1>(completed_brackets.back()) == get<1>(open_brackets.back()) // this open bracket has the same beginning as the last one completed (which must be contained in it)
+          && get<2>(completed_brackets.back()) == words_shifted // and we haven't shifted any additional words, so this would be a unary chain
+          ) {
+        return true;
+      }
     }
 
     // be careful with top-level parens- you can only close them if you
@@ -1182,7 +1213,9 @@ struct SymbolicParserState: public AbstractParserState {
   }
 
   bool action_is_valid(unsigned action) const override {
-    return not IsActionForbidden_Discriminative(action, prev_a, bufferi.size(), stacki.size(), nopen_parens, cons_nt_count, unary);
+    return ! IsActionForbidden_Discriminative(
+            action, prev_a, bufferi.size(), stacki.size(), nopen_parens, cons_nt_count, unary, completed_brackets, open_brackets, words_shifted
+    );
   }
 
   vector<unsigned> get_valid_actions() const override {
@@ -1821,7 +1854,13 @@ vector<string> string_representation_u(const vector<unsigned>& actions, const pa
 Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence) {
   vector<string> string_rep = string_representation(actions, sentence);
   Tree tree = IN_ORDER ? parse_inorder(string_rep) : parse_linearized(string_rep);
-  return tree.expand_unary("+");
+  if (COLLAPSE_UNARY) {
+    // Assume that the representation has unary chains collapsed, so expand for evaluation
+    return tree.expand_unary("+");
+  }
+  else {
+    return tree;
+  }
 }
 
 Tree to_tree_u(const vector<unsigned>& actions, const parser::Sentence& sentence) {
@@ -1996,6 +2035,8 @@ int main(int argc, char** argv) {
   UNNORMALIZED = conf.count("unnormalized");
 
   IN_ORDER = conf.count("inorder");
+
+  COLLAPSE_UNARY = conf.count("collapse_unary");
 
   BERT = conf.count("bert");
   BERT_LR = conf["bert_lr"].as<float>();
