@@ -5,7 +5,7 @@ batch_size=16
 
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
-    --cnn-mem 3000,3000,500 \
+    --cnn-mem 1500,1500,500 \
     -T corpora/english/top_down/train.oracle \
     -d corpora/english/top_down/dev.oracle \
     -C corpora/english/dev.stripped \
