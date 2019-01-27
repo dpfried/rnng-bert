@@ -198,6 +198,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("min_risk_candidates", po::value<int>()->default_value(10), "min risk number of candidates")
 
           ("label_smoothing_epsilon", po::value<float>()->default_value(0.0f), "use epsilon interpolation with the uniform distribution in label smoothing")
+          ("entropy_regularization_weight", po::value<float>()->default_value(0.0f))
 
           ("max_margin_training", "")
           ("softmax_margin_training", "")
@@ -333,7 +334,7 @@ static bool IsActionForbidden_Discriminative(
           && get<1>(completed_brackets.back()) == get<1>(open_brackets.back()) // this open bracket has the same beginning as the last one completed (which must be contained in it)
           && get<2>(completed_brackets.back()) == words_shifted // and we haven't shifted any additional words, so this would be a unary chain
           ) {
-        // return true;
+        //return true;
         // only allow a reduce if there are no words remaining to shift
         return bsize != 1;
         // TODO(dfried): more general version of this that constrains all actions
@@ -435,7 +436,8 @@ struct AbstractParser {
       bool loss_augmented = false,
       bool softmax_margin = false,
       StreamingStatistics* streaming_entropy = nullptr,
-      StreamingStatistics* streaming_gold_prob = nullptr
+      StreamingStatistics* streaming_gold_prob = nullptr,
+      vector<Expression>* entropy_accumulator = nullptr
   ) {
     // can't have both correct actions and an oracle
     assert(correct_actions.empty() || !dynamic_oracle);
@@ -502,6 +504,14 @@ struct AbstractParser {
           entropy -= log_p * exp(log_p);
         }
         streaming_entropy->standardize_and_update(entropy);
+      }
+
+      if (entropy_accumulator) {
+        Expression entropy_e = input(*hg, 0.0);
+        for (unsigned ac: valid_actions) {
+          entropy_e = entropy_e - pick(adiste, ac) * exp(adiste);
+        }
+        entropy_accumulator->push_back(entropy_e);
       }
 
       unsigned model_action = valid_actions[0];
@@ -2570,6 +2580,8 @@ int main(int argc, char** argv) {
     assert(min_risk_candidates > 0);
 
     float label_smoothing_epsilon = conf["label_smoothing_epsilon"].as<float>();
+    float entropy_regularization_weight = conf["entropy_regularization_weight"].as<float>();
+
     bool label_smoothing = (label_smoothing_epsilon != 0.0f);
     if (label_smoothing) {
       assert(!min_risk_training);
@@ -2654,6 +2666,10 @@ int main(int argc, char** argv) {
             print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cerr);
             cerr << endl;
             */
+            vector<Expression>* entropy_accumulator = nullptr;
+            if (entropy_regularization_weight != 0.0) {
+              entropy_accumulator = new vector<Expression>();
+            }
             for (int i = 0; i < min_risk_candidates; i++) {
               double blank;
               pair<vector<unsigned>, Expression> sample_and_nlp;
@@ -2665,7 +2681,15 @@ int main(int argc, char** argv) {
                         actions,
                         &blank,
                         false, // is_evaluation
-                        false // sample
+                        false, // sample
+                        false, // label_smoothing
+                        0.0, // label_smoothing_epsilon
+                        nullptr, // dynamic_oracle
+                        false, // loss_augmented
+                        false, // softmax_margin
+                        nullptr, // streaming_entropy
+                        nullptr, // streaming_gold_prob
+                        entropy_accumulator
                 );
               } else {
                 sample_and_nlp = parser.abstract_log_prob_parser(
@@ -2675,7 +2699,15 @@ int main(int argc, char** argv) {
                         vector<int>(),
                         &blank,
                         false, // is_evaluation
-                        true // sample
+                        true, // sample
+                        false, // label_smoothing
+                        0.0, // label_smoothing_epsilon
+                        nullptr, // dynamic_oracle
+                        false, // loss_augmented
+                        false, // softmax_margin
+                        nullptr, // streaming_entropy
+                        nullptr, // streaming_gold_prob
+                        entropy_accumulator
                 );
               }
               /*
@@ -2687,9 +2719,19 @@ int main(int argc, char** argv) {
               double standardized_f1 = streaming_f1.standardize_and_update(scaled_f1);
               loss = loss + (sample_and_nlp.second * input(hg, standardized_f1));
             }
+            if (entropy_accumulator) {
+              // TODO(dfried): consider incorporating this into the reward instead
+              loss = loss - entropy_regularization_weight * sum(*entropy_accumulator);
+              delete entropy_accumulator;
+            }
             loss = loss * input(hg, 1.0 / min_risk_candidates);
           } else if (min_risk_method == "beam" || min_risk_method == "beam_noprobs" ||
                      min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log") {
+            if (entropy_regularization_weight != 0) {
+              cerr << "entropy regularization not implemented for beam min_risk" << endl;
+              abort();
+            }
+
             auto candidates = parser.abstract_log_prob_parser_beam(
                     &hg,
                     sentence,
@@ -2829,6 +2871,12 @@ int main(int argc, char** argv) {
           if (!run_explore) {
             assert(exploration_candidates == 1);
           }
+
+          vector<Expression>* entropy_accumulator = nullptr;
+          if (entropy_regularization_weight != 0.0) {
+            entropy_accumulator = new vector<Expression>();
+          }
+
           if (run_gold) {
             auto result_and_nlp = parser.abstract_log_prob_parser(&hg,
                                                                   sentence,
@@ -2871,6 +2919,12 @@ int main(int argc, char** argv) {
               get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
               loss = loss + result_and_nlp.second * input(hg, 1.0 / exploration_candidates);
             }
+          }
+
+          if (entropy_accumulator) {
+            // TODO(dfried): consider incorporating this into the reward instead
+            loss = loss - (entropy_regularization_weight / exploration_candidates * sum(*entropy_accumulator));
+            delete entropy_accumulator;
           }
           //loss_v = as_scalar(result_and_nlp.second.value());
         }
