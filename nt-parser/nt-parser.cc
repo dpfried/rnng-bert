@@ -509,7 +509,8 @@ struct AbstractParser {
       if (entropy_accumulator) {
         Expression entropy_e = input(*hg, 0.0);
         for (unsigned ac: valid_actions) {
-          entropy_e = entropy_e - pick(adiste, ac) * exp(adiste);
+          Expression log_prob = pick(adiste, ac);
+          entropy_e = entropy_e - log_prob * exp(log_prob);
         }
         entropy_accumulator->push_back(entropy_e);
       }
@@ -2889,7 +2890,10 @@ int main(int argc, char** argv) {
                                                                   label_smoothing_epsilon,
                                                                   nullptr, // dynamic_oracle
                                                                   max_margin_training, // loss_augmented
-                                                                  softmax_margin_training // softmax margin
+                                                                  softmax_margin_training, // softmax margin
+                                                                  nullptr, // streaming_entropy
+                                                                  nullptr, // streaming_gold_prob
+                                                                  entropy_accumulator
             );
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
             loss = loss + result_and_nlp.second * input(hg, 1.0 / exploration_candidates);
@@ -2910,7 +2914,10 @@ int main(int argc, char** argv) {
                                                                     label_smoothing_epsilon,
                                                                     &dynamic_oracle,
                                                                     max_margin_training, // loss_augmented
-                                                                    softmax_margin_training
+                                                                    softmax_margin_training,
+                                                                    nullptr, // streaming_entropy
+                                                                    nullptr, // streaming_gold_prob
+                                                                    entropy_accumulator
               );
               if (DYNAMIC_EXPLORATION_PROBABILITY == 0.0f) {
                 assert(vector<int>(result_and_nlp.first.begin(),
@@ -3102,7 +3109,7 @@ int main(int argc, char** argv) {
                 subbatch_losses.push_back(loss_and_mc.first);
                 block_match_counts += loss_and_mc.second;
                 double loss = as_scalar(loss_and_mc.first.value());
-                if (!min_risk_training && !max_margin_training && loss < 0) {
+                if (!min_risk_training && !max_margin_training && loss < 0 && (entropy_regularization_weight == 0.0)) {
                   cerr << "loss < 0 on sentence " << corpus_index << ": loss=" << loss << endl;
                   //assert(lp >= 0.0)
                 }
