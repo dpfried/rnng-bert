@@ -333,7 +333,11 @@ static bool IsActionForbidden_Discriminative(
           && get<1>(completed_brackets.back()) == get<1>(open_brackets.back()) // this open bracket has the same beginning as the last one completed (which must be contained in it)
           && get<2>(completed_brackets.back()) == words_shifted // and we haven't shifted any additional words, so this would be a unary chain
           ) {
-        return true;
+        // return true;
+        // only allow a reduce if there are no words remaining to shift
+        return bsize != 1;
+        // TODO(dfried): more general version of this that constrains all actions
+        //  based on number of brackets opening at the same span beginning and number of words shifted
       }
     }
 
