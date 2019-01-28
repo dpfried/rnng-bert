@@ -121,6 +121,12 @@ vector<unsigned> possible_actions;
 unordered_map<unsigned, vector<float>> pretrained;
 vector<bool> singletons; // used during training
 
+// all of these except nonterm_actions should contain only one action, but use collections for uniformity
+vector<unsigned> shift_actions;
+vector<unsigned> reduce_actions;
+vector<unsigned> terminate_actions;
+vector<unsigned> nonterm_actions;
+
 void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   po::options_description opts("Configuration options");
   opts.add_options()
@@ -214,6 +220,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("samples,s", po::value<int>(), "Sample N trees for each test sentence instead of greedy max decoding")
           ("output_beam_as_samples", "Print the items in the beam in the same format as samples")
           ("samples_include_gold", "Also include the gold parse in the list of samples output")
+          ("bracket_constrained_test_decode", "uses structural actions in --test_data to constrain action space")
+
           ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
           ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
           ("beam_size,b", po::value<int>()->default_value(1), "beam size")
@@ -243,6 +251,13 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     cerr << "Please specify --traing_data (-T): this is required to determine the vocabulary mapping, even if the parser is used in prediction mode.\n";
     exit(1);
   }
+}
+
+vector<unsigned>& actions_of_same_structural_type(unsigned action) {
+  if (IN_ORDER && action == TERM_ACTION) return terminate_actions;
+  if (action == SHIFT_ACTION) return shift_actions;
+  if (action == REDUCE_ACTION) return reduce_actions;
+  return nonterm_actions;
 }
 
 vector<float> action_mask(const vector<unsigned>& valid_actions) {
@@ -334,6 +349,7 @@ static bool IsActionForbidden_Discriminative(
           && get<1>(completed_brackets.back()) == get<1>(open_brackets.back()) // this open bracket has the same beginning as the last one completed (which must be contained in it)
           && get<2>(completed_brackets.back()) == words_shifted // and we haven't shifted any additional words, so this would be a unary chain
           ) {
+        // TODO: remove this
         //return true;
         // only allow a reduce if there are no words remaining to shift
         return bsize != 1;
@@ -422,6 +438,33 @@ struct AbstractParser {
           bool apply_dropout
   ) = 0;
 
+  pair<vector<unsigned>, vector<unsigned>> get_support_and_can_take(const vector<unsigned>& valid_actions, unsigned action_count, const vector<int>* bracket_constraint_actions, bool bracket_constraint_is_action_support) {
+    vector<unsigned> actions_in_support = valid_actions;
+    vector<unsigned> actions_can_take = actions_in_support;
+    if (bracket_constraint_actions) {
+      if (action_count >= bracket_constraint_actions->size()) {
+        cerr << "not enough bracket constraint actions for current action_count" << endl;
+        abort();
+      }
+      actions_can_take = actions_of_same_structural_type((*bracket_constraint_actions)[action_count]);
+      if (bracket_constraint_is_action_support) {
+        actions_in_support = actions_can_take;
+      }
+    }
+    if (actions_in_support.empty()) {
+      cerr << "no actions in support from current parser state" << endl;
+      abort();
+    }
+    assert(!actions_in_support.empty());
+
+    if (actions_can_take.empty()) {
+      cerr << "no actions can be taken from current parser state" << endl;
+      abort();
+    }
+    assert(!actions_can_take.empty());
+    return make_pair(actions_in_support, actions_can_take);
+  }
+
   pair<vector<unsigned>, Expression> abstract_log_prob_parser(
       ComputationGraph* hg,
       const parser::Sentence& sent,
@@ -437,7 +480,9 @@ struct AbstractParser {
       bool softmax_margin = false,
       StreamingStatistics* streaming_entropy = nullptr,
       StreamingStatistics* streaming_gold_prob = nullptr,
-      vector<Expression>* entropy_accumulator = nullptr
+      vector<Expression>* entropy_accumulator = nullptr,
+      const vector<int>* bracket_constraint_actions = nullptr,
+      bool bracket_constraint_is_action_support = false
   ) {
     // can't have both correct actions and an oracle
     assert(correct_actions.empty() || !dynamic_oracle);
@@ -460,8 +505,11 @@ struct AbstractParser {
     vector<unsigned> results;
 
     while(!state->is_finished()) {
-      vector<unsigned> valid_actions = state->get_valid_actions();
-      assert(!valid_actions.empty());
+      vector<unsigned> actions_in_support;
+      vector<unsigned> actions_can_take;
+      std::tie(actions_in_support, actions_can_take) = get_support_and_can_take(
+              state->get_valid_actions(), action_count, bracket_constraint_actions, bracket_constraint_is_action_support
+      );
 
       unsigned correct_action;
       if (build_training_graph) {
@@ -481,10 +529,10 @@ struct AbstractParser {
       if (loss_augmented || softmax_margin) {
         vector<float> aug(possible_actions.size(), 1.0f);
         aug[correct_action] = 0.0f;
-        std::tie(adiste, adiste_augmented) = state->get_action_log_probs(valid_actions, &aug);
+        std::tie(adiste, adiste_augmented) = state->get_action_log_probs(actions_in_support, &aug);
         //adiste = adiste + input(*hg, Dim({aug.size()}), aug);
       } else {
-        std::tie(adiste, adiste_augmented) = state->get_action_log_probs(valid_actions, nullptr);
+        std::tie(adiste, adiste_augmented) = state->get_action_log_probs(actions_in_support, nullptr);
       }
 
       vector<float> adist = as_vector(adiste.value());
@@ -499,7 +547,7 @@ struct AbstractParser {
       if (streaming_entropy) {
         double entropy = 0;
         // doing this with a dot product produces nans due to invalid actions
-        for (unsigned ac: valid_actions) {
+        for (unsigned ac: actions_in_support) {
           double log_p = adist[ac];
           entropy -= log_p * exp(log_p);
         }
@@ -508,40 +556,40 @@ struct AbstractParser {
 
       if (entropy_accumulator) {
         Expression entropy_e = input(*hg, 0.0);
-        for (unsigned ac: valid_actions) {
+        for (unsigned ac: actions_in_support) {
           Expression log_prob = pick(adiste, ac);
           entropy_e = entropy_e - log_prob * exp(log_prob);
         }
         entropy_accumulator->push_back(entropy_e);
       }
 
-      unsigned model_action = valid_actions[0];
+      unsigned model_action = actions_can_take[0];
       if (sample) {
         double p = rand01();
-        assert(valid_actions.size() > 0);
+        assert(actions_can_take.size() > 0);
         vector<float> dist_to_sample;
         if (ALPHA != 1.0f) {
           // Expression r_t_smoothed = r_t * ALPHA;
           // Expression adiste_smoothed = log_softmax(r_t_smoothed, current_valid_actions);
           //Expression adiste_smoothed = log_softmax(adiste * ALPHA, valid_actions);
-          Expression adiste_smoothed = log_softmax_constrained(adiste * ALPHA, valid_actions);
+          Expression adiste_smoothed = log_softmax_constrained(adiste * ALPHA, actions_can_take);
           dist_to_sample = as_vector(hg->incremental_forward());
         } else {
           dist_to_sample = adist;
         }
         unsigned w = 0;
-        for (; w < valid_actions.size(); ++w) {
-          p -= exp(dist_to_sample[valid_actions[w]]);
+        for (; w < actions_can_take.size(); ++w) {
+          p -= exp(dist_to_sample[actions_can_take[w]]);
           if (p < 0.0) break;
         }
-        if (w == valid_actions.size()) w--;
-        model_action = valid_actions[w];
+        if (w == actions_can_take.size()) w--;
+        model_action = actions_can_take[w];
       } else { // max
-        double best_score = adist[valid_actions[0]];
-        for (int i = 1; i < valid_actions.size(); ++i) {
-          if (adist[valid_actions[i]] > best_score) {
-            best_score = adist[valid_actions[i]];
-            model_action = valid_actions[i];
+        double best_score = adist[actions_can_take[0]];
+        for (int i = 1; i < actions_can_take.size(); ++i) {
+          if (adist[actions_can_take[i]] > best_score) {
+            best_score = adist[actions_can_take[i]];
+            model_action = actions_can_take[i];
           }
         }
       }
@@ -565,8 +613,8 @@ struct AbstractParser {
           assert(!UNNORMALIZED);
           Expression cross_entropy = pick(adiste_augmented, correct_action) * input(*hg, (1 - label_smoothing_epsilon));
           // add uniform cross entropy
-          for (unsigned a: valid_actions) {
-            cross_entropy = cross_entropy + pick(adiste_augmented, a) * input(*hg, label_smoothing_epsilon / valid_actions.size());
+          for (unsigned a: actions_in_support) {
+            cross_entropy = cross_entropy + pick(adiste_augmented, a) * input(*hg, label_smoothing_epsilon / actions_in_support.size());
           }
           scores.push_back(cross_entropy);
         } else {
@@ -607,7 +655,9 @@ struct AbstractParser {
       const parser::Sentence& sent,
       const vector<shared_ptr<Parameters>>& bert_embeddings,
       int beam_size,
-      bool is_evaluation = true
+      bool is_evaluation = true,
+      const vector<int>* bracket_constraint_actions = nullptr,
+      bool bracket_constraint_is_action_support = false
   ) {
     //ComputationGraph hg;
     struct BeamItem {
@@ -633,7 +683,6 @@ struct AbstractParser {
 
     int action_count = 0;
     while (completed.size() < beam_size && !beam.empty()) {
-      action_count += 1;
       // old beam item, action to be applied, resulting total score
       vector<std::tuple<Stack<BeamItem>, unsigned, Expression>> successors;
 
@@ -642,11 +691,17 @@ struct AbstractParser {
         beam.pop_back();
 
         std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
-        vector<unsigned> valid_actions = current_parser_state->get_valid_actions();
-        Expression adiste = current_parser_state->get_action_log_probs(valid_actions, nullptr).first;
+
+        vector<unsigned> actions_in_support;
+        vector<unsigned> actions_can_take;
+        std::tie(actions_in_support, actions_can_take) = get_support_and_can_take(
+                current_parser_state->get_valid_actions(), action_count, bracket_constraint_actions, bracket_constraint_is_action_support
+        );
+
+        Expression adiste = current_parser_state->get_action_log_probs(actions_in_support, nullptr).first;
         vector<float> adist = as_vector(hg->incremental_forward());
 
-        for (unsigned action: valid_actions) {
+        for (unsigned action: actions_can_take) {
           Expression action_score = pick(adiste, action);
           Expression total_score = current_stack_item.back().score + action_score;
           successors.push_back(
@@ -654,6 +709,8 @@ struct AbstractParser {
           );
         }
       }
+
+      action_count += 1;
 
       int num_pruned_successors = std::min(beam_size, static_cast<int>(successors.size()));
       partial_sort(successors.begin(),
@@ -749,6 +806,7 @@ struct AbstractParser {
 
           std::shared_ptr<AbstractParserState> current_parser_state = current_stack_item.back().state;
           vector<unsigned> valid_actions = current_parser_state->get_valid_actions();
+
           Expression adiste = current_parser_state->get_action_log_probs(valid_actions, nullptr).first;
           vector<float> adist = as_vector(hg->incremental_forward());
 
@@ -2201,10 +2259,13 @@ int main(int argc, char** argv) {
   }
 
   SHIFT_ACTION = adict.Convert("SHIFT");
+  shift_actions.push_back(SHIFT_ACTION);
   REDUCE_ACTION = adict.Convert("REDUCE");
+  reduce_actions.push_back(REDUCE_ACTION);
 
   if (IN_ORDER) {
     TERM_ACTION = adict.Convert("TERM");
+    terminate_actions.push_back(TERM_ACTION);
   }
 
   {  // compute the singletons in the parser's training data
@@ -2243,6 +2304,7 @@ int main(int argc, char** argv) {
     int nt = ntermdict.Convert(a.substr(start, end - start));
     action2NTindex[i] = nt;
     ntIndex2Action[nt] = i;
+    nonterm_actions.push_back(i);
   }
 
   NT_SIZE = ntermdict.size();
@@ -2286,7 +2348,8 @@ int main(int argc, char** argv) {
           AbstractParser& parser,
           const parser::Sentence& sentence,
           const vector<shared_ptr<Parameters>>& bert_embeddings,
-          StreamingStatistics* streaming_entropy = nullptr
+          StreamingStatistics* streaming_entropy = nullptr,
+          const vector<int>* bracket_constraint_actions = nullptr
   ) {
       double right = 0;
       // get parse and negative log probability
@@ -2294,10 +2357,14 @@ int main(int argc, char** argv) {
       if (beam_size > 1 || conf.count("beam_within_word")) {
         vector<pair<vector<unsigned>, Expression>> beam_results;
         if (conf.count("beam_within_word")) {
+          if (bracket_constraint_actions) {
+            cerr << "bracket constraint actions not implemented for beam_within_word" << endl;
+            abort();
+          }
           beam_results = parser.abstract_log_prob_parser_beam_within_word(&hg, sentence, bert_embeddings, beam_size,
                                                                           conf["beam_filter_at_word_size"].as<int>());
         } else {
-          beam_results = parser.abstract_log_prob_parser_beam(&hg, sentence, bert_embeddings, beam_size);
+          beam_results = parser.abstract_log_prob_parser_beam(&hg, sentence, bert_embeddings, beam_size, true, bracket_constraint_actions);
         }
         return beam_results[0];
       } else {
@@ -2315,7 +2382,9 @@ int main(int argc, char** argv) {
                 false, // loss_augmented
                 false, // softmax_margin
                 streaming_entropy,
-                nullptr // streaming_gold_prob
+                nullptr, // streaming_gold_prob
+                nullptr, // entropy_accumulator
+                bracket_constraint_actions
         );
       }
   };
@@ -2486,7 +2555,7 @@ int main(int argc, char** argv) {
           const auto& bert_embeddings = batch_bert_embeddings[batch_index];
 
           dwords += sentence.size();
-          llh += get_neg_log_likelihood(parser, sentence, bert_embeddings, actions, &right, streaming_gold_prob);
+          llh -= get_neg_log_likelihood(parser, sentence, bert_embeddings, actions, &right, streaming_gold_prob);
           vector<unsigned> pred = decode(parser, sentence, bert_embeddings, streaming_entropy).first;
 
           predicted.push_back(pred);
@@ -2497,7 +2566,7 @@ int main(int argc, char** argv) {
       }
 
       Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev", dev_indices, dev_corpus.bracketed_fname);
-      return DecodeStats(metrics, llh, exp(llh / dwords), (trs - right) / trs);
+      return DecodeStats(metrics, llh, exp(-llh / dwords), (trs - right) / trs);
   };
 
   //TRAINING
@@ -2647,8 +2716,9 @@ int main(int argc, char** argv) {
             const vector<shared_ptr<Parameters>>& bert_embeddings,
             const vector<int>& actions,
             double* right
-    ) -> pair<Expression, MatchCounts> {
+    ) -> tuple<Expression, Expression, MatchCounts> {
         Expression loss = input(hg, 0.0);
+        Expression llh = input(hg, 0.0);
 
         MatchCounts sentence_match_counts;
 
@@ -2718,6 +2788,7 @@ int main(int argc, char** argv) {
               */
               float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, sample_and_nlp.first);
               double standardized_f1 = streaming_f1.standardize_and_update(scaled_f1);
+              llh = llh - sample_and_nlp.second;
               loss = loss + (sample_and_nlp.second * input(hg, standardized_f1));
             }
             if (entropy_accumulator) {
@@ -2725,6 +2796,7 @@ int main(int argc, char** argv) {
               loss = loss - entropy_regularization_weight * sum(*entropy_accumulator);
               delete entropy_accumulator;
             }
+            llh = llh * input(hg, 1.0 / min_risk_candidates);
             loss = loss * input(hg, 1.0 / min_risk_candidates);
           } else if (min_risk_method == "beam" || min_risk_method == "beam_noprobs" ||
                      min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log") {
@@ -2780,6 +2852,7 @@ int main(int argc, char** argv) {
                  */
               vector<Expression> normed_log_probs;
               for (auto &parse_and_loss: candidates) {
+                llh = llh - parse_and_loss.second;
                 Expression normed_log_prob = -parse_and_loss.second * input(hg, 1.0 / parse_and_loss.first.size());
                 normed_log_probs.push_back(normed_log_prob);
               }
@@ -2791,9 +2864,11 @@ int main(int argc, char** argv) {
                 loss = loss + input(hg, -scaled_f1) * exp(normed_log_probs[i] - log_normalizer);
               }
             } else if (min_risk_method == "beam_noprobs") {
+              // TODO(dfried): this is hiding outer loss
               Expression loss = input(hg, 0.0f);
               float normalizer = 0.0;
               for (auto &parse_and_loss: candidates) {
+                llh = llh - parse_and_loss.second;
                 float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, parse_and_loss.first);
                 //scaled_f1 = standardize_and_update_f1(scaled_f1);
                 loss = loss + (parse_and_loss.second * input(hg, scaled_f1));
@@ -2801,10 +2876,12 @@ int main(int argc, char** argv) {
               loss = loss * input(hg, 1.0 / candidates.size());
             } else {
               assert(min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log");
+              // TODO(dfried): this is hiding outer loss
               Expression loss = input(hg, 0.0f);
               float normalizer = 0.0;
               for (auto &parse_and_loss: candidates) {
                 Expression log_prob = -parse_and_loss.second;
+                llh = llh - parse_and_loss.second;
                 Expression prob = exp(log_prob);
                 float prob_v = as_scalar(hg.incremental_forward());
                 float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, parse_and_loss.first);
@@ -2927,6 +3004,7 @@ int main(int argc, char** argv) {
               loss = loss + result_and_nlp.second * input(hg, 1.0 / exploration_candidates);
             }
           }
+          llh = -1.0 * loss;
 
           if (entropy_accumulator) {
             // TODO(dfried): consider incorporating this into the reward instead
@@ -2935,7 +3013,7 @@ int main(int argc, char** argv) {
           }
           //loss_v = as_scalar(result_and_nlp.second.value());
         }
-        return pair<Expression, MatchCounts>(loss, sentence_match_counts);
+        return tuple<Expression, Expression, MatchCounts>(loss, llh, sentence_match_counts);
     };
 
 
@@ -3105,15 +3183,18 @@ int main(int argc, char** argv) {
                 auto &sentence = corpus.sents[corpus_index];
                 const vector<int> &actions = corpus.actions[corpus_index];
                 auto& bert_embeddings = subbatch_bert_embeddings[subbatch_sent];
-                auto loss_and_mc = train_sentence(hg, sentence, bert_embeddings, actions, &right);
-                subbatch_losses.push_back(loss_and_mc.first);
-                block_match_counts += loss_and_mc.second;
-                double loss = as_scalar(loss_and_mc.first.value());
-                if (!min_risk_training && !max_margin_training && loss < 0 && (entropy_regularization_weight == 0.0)) {
-                  cerr << "loss < 0 on sentence " << corpus_index << ": loss=" << loss << endl;
+                auto loss_llh_and_mc = train_sentence(hg, sentence, bert_embeddings, actions, &right);
+                subbatch_losses.push_back(get<0>(loss_llh_and_mc));
+                double subbatch_llh = as_scalar(get<1>(loss_llh_and_mc).value());
+                block_match_counts += get<2>(loss_llh_and_mc);
+                if (!min_risk_training && !max_margin_training && (entropy_regularization_weight == 0.0)) {
+                  double subbatch_loss = as_scalar(get<0>(loss_llh_and_mc).value());
+                  if (subbatch_loss < 0) {
+                    cerr << "loss < 0 on sentence " << corpus_index << ": loss=" << subbatch_loss << endl;
+                  }
                   //assert(lp >= 0.0)
                 }
-                llh += loss;
+                llh += subbatch_llh;
                 trs += actions.size();
                 words += sentence.size();
                 sents++;
@@ -3168,9 +3249,9 @@ int main(int argc, char** argv) {
              */
             {
               cerr <<
-                   " per-action-ppl: " << exp(llh / trs) <<
-                   " per-input-ppl: " << exp(llh / words) <<
-                   " per-sent-ppl: " << exp(llh / sents_since_last_status) <<
+                   " per-action-ppl: " << exp(-llh / trs) <<
+                   " per-input-ppl: " << exp(-llh / words) <<
+                   " per-sent-ppl: " << exp(-llh / sents_since_last_status) <<
                    " err: " << (trs - right) / trs;
             }
             cerr <<
@@ -3206,7 +3287,7 @@ int main(int argc, char** argv) {
                    << endl;
               cerr << "  **dev (iter=" << training_position.iter
                    << " epoch=" << (static_cast<double>(training_position.tot_seen) / epoch_size)
-                   << ")\tllh=" << llh
+                   << ")\tllh=" << dev_decode_stats.llh
                    << " ppl: " << dev_decode_stats.perplexity
                    << " f1: " << dev_decode_stats.metrics.f1
                    << " err: " << dev_decode_stats.err
@@ -3349,6 +3430,8 @@ int main(int argc, char** argv) {
     WordFeaturizer* word_featurizer;
 
     string bert_model_path;
+
+    bool bracket_constrained_decode = conf.count("bracket_constrained_test_decode");
 
     if (conf.count("model_dir")) {
       string model_dir = conf["model_dir"].as<string>();
@@ -3498,9 +3581,21 @@ int main(int argc, char** argv) {
 
           for (int z = 0; z < N_SAMPLES; ++z) {
             ComputationGraph hg;
+            // TODO(dfried): should remove actions here?
             pair < vector<unsigned>,
                     Expression > result_and_nlp = abstract_parser->abstract_log_prob_parser(
-                            &hg, sentence, bert_embeddings, actions, &right, sample, true
+                            &hg, sentence, bert_embeddings, actions, &right,
+                            true, // is_evaluation
+                            sample, // sample
+                            false, // label_smoothing
+                            0.0, // label_smoothing_epsilon
+                            nullptr, // dynamic_oracle
+                            false, // loss_augmented
+                            false, // softmax_margin
+                            nullptr, // streaming_entropy
+                            nullptr, // streaming_gold_prob
+                            nullptr, // entropy_accumulator
+                            bracket_constrained_decode ? &actions : nullptr
                     ); // TODO: fix ordering of sample and eval here, produces correct behavior but is confusing
             double lp = as_scalar(result_and_nlp.second.value());
             cout << test_indices[sii] << " ||| " << -lp << " |||";
@@ -3514,11 +3609,18 @@ int main(int argc, char** argv) {
             ComputationGraph hg;
             vector<pair < vector<unsigned>, Expression>> beam_results;
             if (conf.count("beam_within_word")) {
+              if (bracket_constrained_decode) {
+                cerr << "bracket constraint actions not implemented for beam_within_word" << endl;
+                abort();
+              }
               beam_results = abstract_parser->abstract_log_prob_parser_beam_within_word(
                       &hg, sentence, bert_embeddings, beam_size, conf["beam_filter_at_word_size"].as<int>()
               );
             } else {
-              beam_results = abstract_parser->abstract_log_prob_parser_beam(&hg, sentence, bert_embeddings, beam_size);
+              beam_results = abstract_parser->abstract_log_prob_parser_beam(
+                      &hg, sentence, bert_embeddings, beam_size, true,
+                      bracket_constrained_decode ? &actions : nullptr
+              );
             }
             if (beam_results.size() < beam_size) {
               cerr << "WARNING: only " << beam_results.size() << " parses found by beam search for sent " << test_indices[sii]
@@ -3590,7 +3692,10 @@ int main(int argc, char** argv) {
           const auto& sentence = test_corpus.sents[corpus_index];
           const auto& bert_embeddings = batch_bert_embeddings[batch_index];
           const auto& actions = test_corpus.actions[corpus_index];
-          pair < vector<unsigned>, Expression > result_and_nlp = decode(*abstract_parser, sentence, bert_embeddings, &streaming_entropy);
+          pair <vector<unsigned>, Expression> result_and_nlp = decode(
+                  *abstract_parser, sentence, bert_embeddings, &streaming_entropy,
+                  bracket_constrained_decode ? &actions : nullptr
+          );
           predicted.push_back(result_and_nlp.first);
           neg_log_likelihood += get_neg_log_likelihood(
                   *abstract_parser, sentence, bert_embeddings, actions, &actions_correct, &streaming_gold_prob
