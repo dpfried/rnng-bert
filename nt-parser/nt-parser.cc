@@ -94,6 +94,8 @@ int SILVER_BLOCKS_PER_GOLD = 10;
 
 bool UNNORMALIZED = false;
 
+bool BRACKET_CONSTRAINED_TRAINING = false;
+
 bool IN_ORDER = false;
 
 bool COLLAPSE_UNARY = false;
@@ -136,6 +138,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("git_state", "print git revision and diff to stderr")
 
           ("unnormalized", "do not locally normalize score distributions")
+          ("bracket_constrained", "uses gold bracketing structure to constrain possible action probability distribution")
 
           ("spmrl", "Use the SPMRL variant of EVALB")
           ("inorder", "super experimental implementation of Liu and Zhang 2017, breaks many of the other flags")
@@ -220,7 +223,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("samples,s", po::value<int>(), "Sample N trees for each test sentence instead of greedy max decoding")
           ("output_beam_as_samples", "Print the items in the beam in the same format as samples")
           ("samples_include_gold", "Also include the gold parse in the list of samples output")
-          ("bracket_constrained_test_decode", "uses structural actions in --test_data to constrain action space")
+          ("bracket_constrained_test_decode", "uses gold bracketing structure to constrain possible actions taken in decode (note: this doesn't affect the possible actions for computing probability distribution supports, and can be set even if --bracket_constrained is unset)")
 
           ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
           ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
@@ -438,7 +441,7 @@ struct AbstractParser {
           bool apply_dropout
   ) = 0;
 
-  pair<vector<unsigned>, vector<unsigned>> get_support_and_can_take(const vector<unsigned>& valid_actions, unsigned action_count, const vector<int>* bracket_constraint_actions, bool bracket_constraint_is_action_support) {
+  pair<vector<unsigned>, vector<unsigned>> get_support_and_can_take(const vector<unsigned>& valid_actions, unsigned action_count, const vector<int>* bracket_constraint_actions) {
     vector<unsigned> actions_in_support = valid_actions;
     vector<unsigned> actions_can_take = actions_in_support;
     if (bracket_constraint_actions) {
@@ -447,7 +450,10 @@ struct AbstractParser {
         abort();
       }
       actions_can_take = actions_of_same_structural_type((*bracket_constraint_actions)[action_count]);
-      if (bracket_constraint_is_action_support) {
+      if (BRACKET_CONSTRAINED_TRAINING) {
+        if (!bracket_constraint_actions) {
+          cerr << "must pass bracket_constraint_actions to all model invocations when bracket_constrained_training is set" << endl;
+        }
         actions_in_support = actions_can_take;
       }
     }
@@ -481,8 +487,7 @@ struct AbstractParser {
       StreamingStatistics* streaming_entropy = nullptr,
       StreamingStatistics* streaming_gold_prob = nullptr,
       vector<Expression>* entropy_accumulator = nullptr,
-      const vector<int>* bracket_constraint_actions = nullptr,
-      bool bracket_constraint_is_action_support = false
+      const vector<int>* bracket_constraint_actions = nullptr
   ) {
     // can't have both correct actions and an oracle
     assert(correct_actions.empty() || !dynamic_oracle);
@@ -508,7 +513,7 @@ struct AbstractParser {
       vector<unsigned> actions_in_support;
       vector<unsigned> actions_can_take;
       std::tie(actions_in_support, actions_can_take) = get_support_and_can_take(
-              state->get_valid_actions(), action_count, bracket_constraint_actions, bracket_constraint_is_action_support
+              state->get_valid_actions(), action_count, bracket_constraint_actions
       );
 
       unsigned correct_action;
@@ -656,8 +661,7 @@ struct AbstractParser {
       const vector<shared_ptr<Parameters>>& bert_embeddings,
       int beam_size,
       bool is_evaluation = true,
-      const vector<int>* bracket_constraint_actions = nullptr,
-      bool bracket_constraint_is_action_support = false
+      const vector<int>* bracket_constraint_actions = nullptr
   ) {
     //ComputationGraph hg;
     struct BeamItem {
@@ -695,7 +699,7 @@ struct AbstractParser {
         vector<unsigned> actions_in_support;
         vector<unsigned> actions_can_take;
         std::tie(actions_in_support, actions_can_take) = get_support_and_can_take(
-                current_parser_state->get_valid_actions(), action_count, bracket_constraint_actions, bracket_constraint_is_action_support
+                current_parser_state->get_valid_actions(), action_count, bracket_constraint_actions
         );
 
         Expression adiste = current_parser_state->get_action_log_probs(actions_in_support, nullptr).first;
@@ -2106,10 +2110,16 @@ int main(int argc, char** argv) {
   MAX_SENTENCE_LENGTH_EVAL = conf["max_sentence_length_eval"].as<int>();
 
   UNNORMALIZED = conf.count("unnormalized");
+  BRACKET_CONSTRAINED_TRAINING = conf.count("bracket_constrained");
 
   IN_ORDER = conf.count("inorder");
 
   COLLAPSE_UNARY = conf.count("collapse_unary");
+
+  if (BRACKET_CONSTRAINED_TRAINING && !COLLAPSE_UNARY) {
+    cerr << "must set --collapse_unary with --bracket_constrained" << endl;
+    abort();
+  }
 
   BERT = conf.count("bert");
   BERT_LR = conf["bert_lr"].as<float>();
@@ -2344,12 +2354,11 @@ int main(int argc, char** argv) {
   // used for decoding
   int eval_batch_size = conf["eval_batch_size"].as<int>();
 
-  auto decode = [&](
-          AbstractParser& parser,
-          const parser::Sentence& sentence,
-          const vector<shared_ptr<Parameters>>& bert_embeddings,
-          StreamingStatistics* streaming_entropy = nullptr,
-          const vector<int>* bracket_constraint_actions = nullptr
+  auto decode = [&](AbstractParser& parser,
+                    const parser::Sentence& sentence,
+                    const vector<shared_ptr<Parameters>>& bert_embeddings,
+                    StreamingStatistics* streaming_entropy = nullptr,
+                    const vector<int>* bracket_constraint_actions = nullptr
   ) {
       double right = 0;
       // get parse and negative log probability
@@ -2395,7 +2404,8 @@ int main(int argc, char** argv) {
           const vector<shared_ptr<Parameters>>& bert_embeddings,
           const vector<int>& actions,
           double* right,
-          StreamingStatistics* streaming_gold_prob = nullptr
+          StreamingStatistics* streaming_gold_prob = nullptr,
+          const vector<int>* bracket_constraint_actions = nullptr
   ) {
     ComputationGraph hg;
     parser.abstract_log_prob_parser(
@@ -2412,12 +2422,14 @@ int main(int argc, char** argv) {
             false, // loss_augmented
             false, // softmax_margin
             nullptr, // streaming_entropy
-            streaming_gold_prob
+            streaming_gold_prob,
+            nullptr, // entropy_accumulator
+            bracket_constraint_actions
     );
     return as_scalar(hg.incremental_forward());
   };
 
-  auto evaluate = [&](const vector<parser::Sentence>& corpus_sentences, const vector<vector<int>>& corpus_gold_parses, const vector<vector<unsigned>>& pred_parses, const string& name, const vector<int>& indices, const string& reference_gold_fname = "") {
+  auto evaluate = [&](const vector<parser::Sentence>& corpus_sentences, const vector<vector<int>>* corpus_gold_parses, const vector<vector<unsigned>>& pred_parses, const string& name, const vector<int>& indices, const string& reference_gold_fname = "") {
       string prefix = conf.count("eval_files_prefix") ? conf["eval_files_prefix"].as<string>() : ("/tmp/parser_" + to_string(getpid()));
       auto make_name = [&](const string& base) {
           ostringstream os;
@@ -2427,18 +2439,28 @@ int main(int argc, char** argv) {
           os << ".txt";
           return os.str();
       };
-      assert(corpus_gold_parses.size() == corpus_sentences.size());
+      if (corpus_gold_parses)
+        assert(corpus_gold_parses->size() == corpus_sentences.size());
 
       assert(pred_parses.size() == indices.size());
-      if (pred_parses.size() != corpus_gold_parses.size()) {
-        cerr << "WARNING: evaluating " << pred_parses.size() << " sentences, fewer than full corpus size " << corpus_gold_parses.size() << " (max_sentence_length_eval=" << MAX_SENTENCE_LENGTH_EVAL << ")" << endl;
+      if (corpus_gold_parses && pred_parses.size() != corpus_gold_parses->size()) {
+        cerr << "WARNING: evaluating " << pred_parses.size() << " sentences, fewer than full corpus size " << corpus_gold_parses->size() << " (max_sentence_length_eval=" << MAX_SENTENCE_LENGTH_EVAL << ")" << endl;
       }
 
       const string pred_fname = make_name("pred");
       ofstream pred_out(pred_fname.c_str());
 
-      const string gold_fname = make_name("gold");
-      ofstream gold_out(gold_fname.c_str());
+      if (!corpus_gold_parses && reference_gold_fname == "") {
+        cerr << "must pass gold reference parses or a reference filename" << endl;
+        abort();
+      }
+
+      ofstream gold_out;
+      const string gold_fname = (corpus_gold_parses) ? make_name("gold") : reference_gold_fname;
+
+      if (corpus_gold_parses) {
+        gold_out = ofstream(gold_fname.c_str());
+      }
 
       const string evalb_fname = make_name("evalb");
 
@@ -2450,61 +2472,80 @@ int main(int argc, char** argv) {
 
         int corpus_index = indices[sii];
         const auto& sentence = corpus_sentences[corpus_index];
-        const auto& gold_parse = corpus_gold_parses[corpus_index];
         Tree pred_tree = to_tree(vector<int>(pred_parse.begin(), pred_parse.end()), sentence);
-        Tree gold_tree = to_tree(gold_parse, sentence);
+        print_tree(pred_tree, sentence, true, pred_out);
 
-        MatchCounts this_counts = pred_tree.compare(gold_tree, spmrl);
-        all_match_counts.push_back(this_counts);
-        match_counts += this_counts;
+        if (corpus_gold_parses) {
+          const auto &gold_parse = (*corpus_gold_parses)[corpus_index];
+          Tree gold_tree = to_tree(gold_parse, sentence);
+
+          MatchCounts this_counts = pred_tree.compare(gold_tree, spmrl);
+          all_match_counts.push_back(this_counts);
+          match_counts += this_counts;
+          print_tree(gold_tree, sentence, true, gold_out);
+        }
 
         //print_parse(pred_parse, sentence, true, pred_out);
         //print_parse(gold_parse, sentence, true, gold_out);
-        print_tree(pred_tree, sentence, true, pred_out);
-        print_tree(gold_tree, sentence, true, gold_out);
       }
 
       pred_out.close();
-      gold_out.close();
+      if (corpus_gold_parses) {
+        gold_out.close();
+      }
       cerr << name << " parses in " << pred_fname << endl;
       cerr << name << " output in " << evalb_fname << endl;
 
-      pair<Metrics, vector<MatchCounts>> results = metrics_from_evalb(gold_fname, pred_fname, evalb_fname, spmrl);
-      //pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.bracketed_fname, pred_fname, evalb_fname + "_corpus", spmrl);
+      pair < Metrics, vector<MatchCounts>> results = metrics_from_evalb(gold_fname, pred_fname, evalb_fname, spmrl);
 
-      if (abs(match_counts.metrics().f1 - results.first.f1) > 1e-2) {
-        cerr << "warning: score mismatch" << endl;
-        cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
-        cerr << "evalb\trecall=" << results.first.recall << ", precision=" << results.first.precision << ", F1=" << results.first.f1 << "\n";
-        if (results.first.recall == 0.0 && results.first.precision == 0.0 && results.first.f1 == 0.0) {
+      if (corpus_gold_parses) {
+        // ensure that match_counts match the status
+        //pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.bracketed_fname, pred_fname, evalb_fname + "_corpus", spmrl);
+
+        // first, check that we computed evalb correctly
+        if (abs(match_counts.metrics().f1 - results.first.f1) > 1e-2) {
+          cerr << "warning: score mismatch" << endl;
+          cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision="
+               << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
+          cerr << "evalb\trecall=" << results.first.recall << ", precision=" << results.first.precision << ", F1="
+               << results.first.f1 << "\n";
+          if (results.first.recall == 0.0 && results.first.precision == 0.0 && results.first.f1 == 0.0) {
             cerr << "evalb appears to not have run; returning computed score" << endl;
             return match_counts.metrics();
+          }
         }
-      }
-      //cerr << "evalb corpus\trecall=" << corpus_results.first.recall << ", precision=" << corpus_results.first.precision << ", F1=" << corpus_results.first.f1 << "\n";
+        //cerr << "evalb corpus\trecall=" << corpus_results.first.recall << ", precision=" << corpus_results.first.precision << ", F1=" << corpus_results.first.f1 << "\n";
 
-      for (int sii = 0; sii < all_match_counts.size(); sii++) {
-        if (all_match_counts[sii] != results.second[sii]) {
-          int corpus_index = indices[sii];
-          cerr << "mismatch for " << (sii+1) << endl;
-          cerr << all_match_counts[sii].correct << " " << all_match_counts[sii].gold << " " << all_match_counts[sii].predicted << endl;
-          cerr << results.second[sii].correct << " " << results.second[sii].gold << " " << results.second[sii].predicted << endl;
-          Tree pred_tree = to_tree(vector<int>(pred_parses[sii].begin(), pred_parses[sii].end()), corpus_sentences[corpus_index]);
-          Tree gold_tree = to_tree(corpus_gold_parses[corpus_index], corpus_sentences[corpus_index]);
-          pred_tree.compare(gold_tree, spmrl, true);
+        for (int sii = 0; sii < all_match_counts.size(); sii++) {
+          if (all_match_counts[sii] != results.second[sii]) {
+            int corpus_index = indices[sii];
+            cerr << "mismatch for " << (sii + 1) << endl;
+            cerr << all_match_counts[sii].correct << " " << all_match_counts[sii].gold << " "
+                 << all_match_counts[sii].predicted << endl;
+            cerr << results.second[sii].correct << " " << results.second[sii].gold << " "
+                 << results.second[sii].predicted << endl;
+            Tree pred_tree = to_tree(vector<int>(pred_parses[sii].begin(), pred_parses[sii].end()),
+                                     corpus_sentences[corpus_index]);
+            Tree gold_tree = to_tree((*corpus_gold_parses)[corpus_index], corpus_sentences[corpus_index]);
+            pred_tree.compare(gold_tree, spmrl, true);
+          }
         }
-      }
 
-      if (reference_gold_fname != "") {
-        cerr << "checking against " << reference_gold_fname << endl;
-        pair<Metrics, vector<MatchCounts>> reference_results = metrics_from_evalb(reference_gold_fname, pred_fname, evalb_fname, spmrl);
-        if (abs(match_counts.metrics().f1 - reference_results.first.f1) > 1e-2) {
-          cerr << "warning: score mismatch" << endl;
-          cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision=" << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
-          cerr << "evalb\trecall=" << reference_results.first.recall << ", precision=" << reference_results.first.precision << ", F1=" << reference_results.first.f1 << "\n";
+        // then, if we have a reference file, double-check that scores against the gold parses in it are the same as the ones we dumped
+        if (reference_gold_fname != "") {
+          cerr << "checking against " << reference_gold_fname << endl;
+          pair < Metrics, vector<MatchCounts>>
+          reference_results = metrics_from_evalb(reference_gold_fname, pred_fname, evalb_fname, spmrl);
+          if (abs(match_counts.metrics().f1 - reference_results.first.f1) > 1e-2) {
+            cerr << "warning: score mismatch" << endl;
+            cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision="
+                 << match_counts.metrics().precision << ", F1=" << match_counts.metrics().f1 << "\n";
+            cerr << "evalb\trecall=" << reference_results.first.recall << ", precision="
+                 << reference_results.first.precision << ", F1=" << reference_results.first.f1 << "\n";
+          }
         }
-      }
 
+      }
       return results.first;
   };
 
@@ -2520,7 +2561,11 @@ int main(int argc, char** argv) {
   vector<int> dev_indices;
   make_corpus_indices(dev_corpus, dev_indices, MAX_SENTENCE_LENGTH_EVAL);
 
-  auto dev_decode = [&](AbstractParser& parser, WordFeaturizer* word_featurizer, StreamingStatistics* streaming_entropy, StreamingStatistics* streaming_gold_prob) {
+  auto dev_decode = [&](AbstractParser& parser,
+                        WordFeaturizer* word_featurizer,
+                        StreamingStatistics* streaming_entropy,
+                        StreamingStatistics* streaming_gold_prob
+          ) {
       // TODO(dfried): support separate BERT word featurizers for ensemble models
       int dev_size = dev_indices.size();
       vector<vector<unsigned>> predicted;
@@ -2555,8 +2600,8 @@ int main(int argc, char** argv) {
           const auto& bert_embeddings = batch_bert_embeddings[batch_index];
 
           dwords += sentence.size();
-          llh -= get_neg_log_likelihood(parser, sentence, bert_embeddings, actions, &right, streaming_gold_prob);
-          vector<unsigned> pred = decode(parser, sentence, bert_embeddings, streaming_entropy).first;
+          llh -= get_neg_log_likelihood(parser, sentence, bert_embeddings, actions, &right, streaming_gold_prob, BRACKET_CONSTRAINED_TRAINING ? &actions : nullptr);
+          vector<unsigned> pred = decode(parser, sentence, bert_embeddings, streaming_entropy, BRACKET_CONSTRAINED_TRAINING ? &actions : nullptr).first;
 
           predicted.push_back(pred);
           trs += actions.size();
@@ -2565,7 +2610,7 @@ int main(int argc, char** argv) {
         TF_DeleteTensor(bert_feats);
       }
 
-      Metrics metrics = evaluate(dev_corpus.sents, dev_corpus.actions, predicted, "dev", dev_indices, dev_corpus.bracketed_fname);
+      Metrics metrics = evaluate(dev_corpus.sents, &dev_corpus.actions, predicted, "dev", dev_indices, dev_corpus.bracketed_fname);
       return DecodeStats(metrics, llh, exp(-llh / dwords), (trs - right) / trs);
   };
 
@@ -2603,7 +2648,6 @@ int main(int argc, char** argv) {
     int dev_check_frequency = conf["dev_check_frequency"].as<int>();
 
     string bert_model_path = BERT_MODEL_PATH + "/bert_model.ckpt";
-
 
     if (conf.count("model_dir")) {
       string model_dir = conf["model_dir"].as<string>();
@@ -2760,7 +2804,8 @@ int main(int argc, char** argv) {
                         false, // softmax_margin
                         nullptr, // streaming_entropy
                         nullptr, // streaming_gold_prob
-                        entropy_accumulator
+                        entropy_accumulator,
+                        BRACKET_CONSTRAINED_TRAINING ? &actions : nullptr
                 );
               } else {
                 sample_and_nlp = parser.abstract_log_prob_parser(
@@ -2778,7 +2823,8 @@ int main(int argc, char** argv) {
                         false, // softmax_margin
                         nullptr, // streaming_entropy
                         nullptr, // streaming_gold_prob
-                        entropy_accumulator
+                        entropy_accumulator,
+                        BRACKET_CONSTRAINED_TRAINING ? &actions : nullptr
                 );
               }
               /*
@@ -2802,6 +2848,11 @@ int main(int argc, char** argv) {
                      min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log") {
             if (entropy_regularization_weight != 0) {
               cerr << "entropy regularization not implemented for beam min_risk" << endl;
+              abort();
+            }
+
+            if (BRACKET_CONSTRAINED_TRAINING) {
+              cerr << "bracket constrained training not implemented for beam min_risk" << endl;
               abort();
             }
 
@@ -2970,7 +3021,8 @@ int main(int argc, char** argv) {
                                                                   softmax_margin_training, // softmax margin
                                                                   nullptr, // streaming_entropy
                                                                   nullptr, // streaming_gold_prob
-                                                                  entropy_accumulator
+                                                                  entropy_accumulator,
+                                                                  BRACKET_CONSTRAINED_TRAINING ? &actions : nullptr
             );
             get_f1_and_update_mc(gold_tree, sentence, result_and_nlp.first);
             loss = loss + result_and_nlp.second * input(hg, 1.0 / exploration_candidates);
@@ -2994,7 +3046,8 @@ int main(int argc, char** argv) {
                                                                     softmax_margin_training,
                                                                     nullptr, // streaming_entropy
                                                                     nullptr, // streaming_gold_prob
-                                                                    entropy_accumulator
+                                                                    entropy_accumulator,
+                                                                    BRACKET_CONSTRAINED_TRAINING ? &actions : nullptr
               );
               if (DYNAMIC_EXPLORATION_PROBABILITY == 0.0f) {
                 assert(vector<int>(result_and_nlp.first.begin(),
@@ -3431,7 +3484,12 @@ int main(int argc, char** argv) {
 
     string bert_model_path;
 
-    bool bracket_constrained_decode = conf.count("bracket_constrained_test_decode");
+    bool bracket_constrained_decode = conf.count("bracket_constrained_test_decode") || BRACKET_CONSTRAINED_TRAINING;
+
+    if (bracket_constrained_decode && !COLLAPSE_UNARY) {
+      cerr << "must set --collapse_unary with --bracket_constrained_test_decode" << endl;
+      abort();
+    }
 
     if (conf.count("model_dir")) {
       string model_dir = conf["model_dir"].as<string>();
@@ -3698,7 +3756,8 @@ int main(int argc, char** argv) {
           );
           predicted.push_back(result_and_nlp.first);
           neg_log_likelihood += get_neg_log_likelihood(
-                  *abstract_parser, sentence, bert_embeddings, actions, &actions_correct, &streaming_gold_prob
+                  *abstract_parser, sentence, bert_embeddings, actions, &actions_correct, &streaming_gold_prob,
+                  bracket_constrained_decode ? &actions : nullptr
           );
           num_actions += actions.size();
           sii++;
@@ -3709,7 +3768,7 @@ int main(int argc, char** argv) {
       }
       cerr << endl;
       auto t_end = chrono::high_resolution_clock::now();
-      Metrics metrics = evaluate(test_corpus.sents, test_corpus.actions, predicted, "test", test_indices, test_corpus.bracketed_fname);
+      Metrics metrics = evaluate(test_corpus.sents, bracket_constrained_decode ? nullptr : &test_corpus.actions, predicted, "test", test_indices, test_corpus.bracketed_fname);
       cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
       cerr << "decode: mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
       cerr << "gold: mean gold probability: " << streaming_gold_prob.mean_value() << " stddev gold probability: " << streaming_entropy.std << " avg log likelihood: " << -neg_log_likelihood / (test_indices.size()) << " actions correct: " << actions_correct / num_actions << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
