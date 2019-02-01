@@ -327,7 +327,7 @@ static bool IsActionForbidden_Discriminative(
           cerr << "error: should never have a current unary_count > 1 with COLLAPSE_UNARY (currently " << unary << ")" << endl;
           assert(unary <= 1);
         }
-        if (unary == 1 && prev_a == 'N') return true;
+        if (unary == 1 && prev_a == 'N' && bsize != 1) return true;
       }
       // TODO(dfried): doesn't this need to check if the last action was an NT
       //  to know whether we're increasing the length of the unary chain?
