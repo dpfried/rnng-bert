@@ -1,5 +1,6 @@
 import re
 import fileinput
+import argparse
 
 #!/usr/bin/env python
 
@@ -33,6 +34,18 @@ class PhraseTree(object):
         
         self._str = None
 
+    def remove_nodes(self, symbol_list):
+        children = []
+        for child in self.children:
+            if child.symbol in symbol_list:
+                children.extend(child.children)
+            else:
+                children.append(child)
+        assert self.symbol not in symbol_list
+        return PhraseTree(self.symbol, 
+                          [child.remove_nodes(symbol_list) for child in children],
+                          self.sentence,
+                          leaf=self.leaf)
 
     def __str__(self):
         if self._str is None:
@@ -129,7 +142,14 @@ class PhraseTree(object):
         return (index + 1), t
 
 if __name__ == "__main__":
-    for line in fileinput.input():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--remove_symbols', nargs='*')
+    parser.add_argument('files', metavar='FILE', nargs='*', help='files to read, if empty, stdin is used')
+    args = parser.parse_args()
+
+    remove_symbols = set(args.remove_symbols)
+
+    for line in fileinput.input(files=args.files if len(args.files) > 0 else ('-', )):
         line = line.strip()
         if line.startswith("( "):
             assert line[-1] == ')'
@@ -164,4 +184,6 @@ if __name__ == "__main__":
         # linearized = re.sub('\) ', ')', linearized)
         # print(linearized)
         tree = PhraseTree.parse(line)
+        if args.remove_symbols:
+            tree = tree.remove_nodes(remove_symbols)
         print(tree)
