@@ -34,6 +34,8 @@ def get_dict(lines):
     words_dict = {}
     for terminal in output:
         terminal_split = terminal.split()
+        if len(terminal_split) != 2:
+            print(terminal_split)
         assert len(terminal_split) == 2 # each terminal contains a POS tag and word
         if not(terminal_split[1] in words_dict):
             words_dict[terminal_split[1]] = 1

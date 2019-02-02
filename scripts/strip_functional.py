@@ -1,13 +1,13 @@
 import re
 import fileinput
-from bllipparser import Tree
-
 
 #!/usr/bin/env python
 
 from collections import defaultdict
 
 def remove_symbol_functionals(symbol):
+    if symbol[0] == '-' and symbol[-1] == '-':
+        return symbol
     morph_split = symbol.split('##')
     morph_split[0] = morph_split[0].split('-')[0]
     morph_split[0] = morph_split[0].split('=')[0]
