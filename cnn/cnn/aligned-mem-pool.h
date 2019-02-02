@@ -8,7 +8,7 @@ namespace cnn {
 
 class AlignedMemoryPool {
  public:
-  explicit AlignedMemoryPool(size_t cap, MemAllocator* a) : a(a) {
+  explicit AlignedMemoryPool(size_t cap, MemAllocator* a, const std::string& name) : a(a), name(name) {
     sys_alloc(cap);
     zero_all();
   }
@@ -16,7 +16,7 @@ class AlignedMemoryPool {
   void* allocate(size_t n) {
     auto rounded_n = a->round_up_align(n);
     if (rounded_n + used > capacity) {
-      std::cerr << "cnn is out of memory, try increasing with --cnn-mem\n";
+      std::cerr << "cnn " << name << " pool is out of memory, try increasing with --cnn-mem\n";
       abort();
     }
     void* res = static_cast<char*>(mem) + used;
@@ -52,6 +52,7 @@ class AlignedMemoryPool {
   bool shared;
   MemAllocator* a;
   void* mem;
+  const std::string name;
 };
 
 } // namespace cnn

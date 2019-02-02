@@ -57,9 +57,9 @@ Device_CPU::Device_CPU(int mb_fwd, int mb_bwd, int mb_params, bool shared) :
     cerr << "allocating memory for fwd/bwd/params: " << mb_fwd << "/" << mb_bwd << "/" << mb_params << endl;
         
   //size_t byte_count = (size_t)mb << 20;
-  fxs = new AlignedMemoryPool((size_t)mb_fwd << 20, mem); // memory for node values
-  dEdfs = new AlignedMemoryPool((size_t)mb_bwd << 20, mem); // memory for node gradients
-  ps = new AlignedMemoryPool((size_t)mb_params << 20, mem); // memory for parameters
+  fxs = new AlignedMemoryPool((size_t)mb_fwd << 20, mem, "forward"); // memory for node values
+  dEdfs = new AlignedMemoryPool((size_t)mb_bwd << 20, mem, "backward"); // memory for node gradients
+  ps = new AlignedMemoryPool((size_t)mb_params << 20, mem, "parameters"); // memory for parameters
 
 }
 
