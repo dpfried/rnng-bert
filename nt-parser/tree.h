@@ -61,6 +61,7 @@ bool open_matches_closed(const Bracket& closed, const OpenBracket& open) {
 class Tree {
 public:
 
+  // leaf_index: should be -1 for non-terminals, otherwise the index of the terminal in the sentence
   Tree(const string& symbol, const vector<Tree>& children, shared_ptr<vector<string>> sentence, int leaf_index):
           symbol(symbol), children(children), sentence(sentence), leaf_index(leaf_index) {}
 
@@ -204,9 +205,13 @@ public:
       }
 
       assert(reversed_sentence->size() == sentence->size());
-      int reversed_leaf_index = static_cast<int>(reversed_sentence->size()) - leaf_index - 1;
-      assert(reversed_leaf_index >= 0);
-      assert(reversed_leaf_index <= reversed_sentence->size());
+
+      int reversed_leaf_index = leaf_index;
+      if (leaf_index >= 0) {
+          reversed_leaf_index = static_cast<int>(reversed_sentence->size()) - leaf_index - 1;
+          assert(reversed_leaf_index >= 0);
+          assert(reversed_leaf_index <= reversed_sentence->size());
+      }
 
       return Tree { symbol, children_rev, reversed_sentence, reversed_leaf_index };
   }
@@ -224,7 +229,9 @@ private:
   string symbol;
   vector<Tree> children;
   shared_ptr<vector<string>> sentence;
+  // -1 for non-terminals, otherwise the 0-based index of the terminal
   int leaf_index = -1;
+  // used to cache left_span() and right_span()
   int _left_span = -1;
   int _right_span = -1;
 };
