@@ -104,8 +104,7 @@ bool REVERSE_TREES = false;
 bool BERT = false;
 
 bool BERT_BUFFER_LSTM = false;
-bool BERT_BUFFER_SEP = false;
-bool BERT_BUFFER_CLS = false;
+bool BERT_BUFFER_USE_CLS = false;
 bool BERT_LARGE = false;
 
 float BERT_LR = 5e-5f;
@@ -134,6 +133,10 @@ vector<unsigned> shift_actions;
 vector<unsigned> reduce_actions;
 vector<unsigned> terminate_actions;
 vector<unsigned> nonterm_actions;
+
+bool USES_BUFFER_LSTM() {
+  return !BERT || BERT_BUFFER_LSTM;
+}
 
 void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   po::options_description opts("Configuration options");
@@ -173,8 +176,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("bert_large", "use BERT-Large (otherwise use BERT-Base)")
 
           ("bert_buffer_lstm", "run the regular buffer lstm over the BERT embeddings")
-          ("bert_buffer_sep", "use the BERT SEP embedding as the buffer guard")
-          ("bert_buffer_cls", "use the BERT CLS embedding as the buffer guard")
+          ("bert_buffer_use_cls", "use the BERT CLS embedding as the buffer guard")
 
           ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
           ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
@@ -969,6 +971,7 @@ struct ParserBuilder : public AbstractParser {
   Parameters* p_stack_guard;  // end of stack
   Parameters* p_cW;
   Parameters* p_bert_stack_bias;
+  Parameters* p_B_bert_buffer;
 
   std::unordered_map<std::string, LookupParameters*> p_morph_embeddings;
   std::unordered_map<std::string, Parameters*> p_morph_W;
@@ -998,6 +1001,12 @@ struct ParserBuilder : public AbstractParser {
       p_bert_stack_bias = model->add_parameters({HIDDEN_DIM});
       p_t = nullptr;
       p_t2l = nullptr;
+      // initialize buffer_lstm in both BERT and !BERT conditional branches for backward compatibilty re: parameter ordering.
+      // note the difference in the input dimensions
+      if (USES_BUFFER_LSTM()) {
+        buffer_lstm = new LSTMBuilder(LAYERS, BERT_DIM, HIDDEN_DIM, model);
+        p_B_bert_buffer = model->add_parameters({HIDDEN_DIM, HIDDEN_DIM}, "B_bert_buffer");
+      }
     } else {
       p_w = model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM}); // word embeddings
       p_w2l = model->add_parameters({LSTM_INPUT_DIM, INPUT_DIM}, "w2l");
@@ -1007,7 +1016,9 @@ struct ParserBuilder : public AbstractParser {
         p_pos = model->add_lookup_parameters(POS_SIZE, {POS_DIM});
         p_p2w = model->add_parameters({LSTM_INPUT_DIM, POS_DIM}, "p2w");
       }
-      buffer_lstm = new LSTMBuilder(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model);
+      // initialize this in both conditional branches for backward compatibilty re: parameter ordering
+      if (USES_BUFFER_LSTM())
+        buffer_lstm = new LSTMBuilder(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model);
       p_buffer_guard = model->add_parameters({LSTM_INPUT_DIM}, "buffer_guard");
       if (pretrained.size() > 0) {
         p_t = model->add_lookup_parameters(VOCAB_SIZE, {PRETRAINED_DIM});
@@ -1033,7 +1044,7 @@ struct ParserBuilder : public AbstractParser {
   // instance variables for each sentence
   ComputationGraph* hg;
   bool apply_dropout;
-  Expression pbias, S, B, A, ptbias, ptW, p2w, ib, cbias, w2l, t2l, p2a, abias, action_start, cW, bert_stack_bias;
+  Expression pbias, S, B, A, ptbias, ptW, p2w, ib, cbias, w2l, t2l, p2a, abias, action_start, cW, bert_stack_bias, B_bert_buffer;
   unordered_map<string, Expression> morph_W;
 
   std::shared_ptr<AbstractParserState> new_sentence(
@@ -1048,24 +1059,24 @@ struct ParserBuilder : public AbstractParser {
     this->apply_dropout = apply_dropout;
 
     if (!NO_STACK) stack_lstm.new_graph(*hg);
-    if (!BERT) buffer_lstm->new_graph(*hg);
+    if (USES_BUFFER_LSTM()) buffer_lstm->new_graph(*hg);
     if (!NO_ACTION_HISTORY) action_lstm.new_graph(*hg);
     const_lstm_fwd.new_graph(*hg);
     const_lstm_rev.new_graph(*hg);
 
     if (!NO_STACK) stack_lstm.start_new_sequence();
-    if (!BERT) buffer_lstm->start_new_sequence();
+    if (USES_BUFFER_LSTM()) buffer_lstm->start_new_sequence();
     if (!NO_ACTION_HISTORY) action_lstm.start_new_sequence();
 
     if (apply_dropout) {
       if (!NO_STACK) stack_lstm.set_dropout(DROPOUT);
-      if (!BERT) buffer_lstm->set_dropout(DROPOUT);
+      if (USES_BUFFER_LSTM()) buffer_lstm->set_dropout(DROPOUT);
       if (!NO_ACTION_HISTORY) action_lstm.set_dropout(DROPOUT);
       const_lstm_fwd.set_dropout(DROPOUT);
       const_lstm_rev.set_dropout(DROPOUT);
     } else {
       if (!NO_STACK) stack_lstm.disable_dropout();
-      if (!BERT) buffer_lstm->disable_dropout();
+      if (USES_BUFFER_LSTM()) buffer_lstm->disable_dropout();
       if (!NO_ACTION_HISTORY) action_lstm.disable_dropout();
       const_lstm_fwd.disable_dropout();
       const_lstm_rev.disable_dropout();
@@ -1085,6 +1096,7 @@ struct ParserBuilder : public AbstractParser {
     action_start = parameter(*hg, p_action_start);
     cW = parameter(*hg, p_cW);
     if (BERT) bert_stack_bias = parameter(*hg, p_bert_stack_bias);
+    if (BERT && USES_BUFFER_LSTM()) B_bert_buffer = parameter(*hg, p_B_bert_buffer);
     for (auto& pair: p_morph_W) {
       morph_W[pair.first] = parameter(*hg, pair.second);
     }
@@ -1101,7 +1113,6 @@ struct ParserBuilder : public AbstractParser {
         for (int i = 0; i < bert_embeddings.size() - 1; i++) {
           buffer[i + 1] = parameter(*hg, bert_embeddings[i].get());
         }
-        // this will be overwritten later to p_buffer_guard, but for consistency
         buffer[0] = parameter(*hg, bert_embeddings[bert_embeddings.size() - 1].get());
       } else {
         for (int i = 0; i < bert_embeddings.size(); ++i) {
@@ -1151,6 +1162,8 @@ struct ParserBuilder : public AbstractParser {
       // dummy symbol to represent the empty buffer
       buffer[0] = parameter(*hg, p_buffer_guard);
 
+    }
+    if (USES_BUFFER_LSTM()) {
       for (auto& b : buffer)
         buffer_lstm->add_input(b);
     }
@@ -1170,7 +1183,7 @@ struct ParserBuilder : public AbstractParser {
         std::make_shared<ParserState>(
             this,
             action_lstm.state(),
-            (BERT ? cnn::NULL_RNN_POINTER : buffer_lstm->state()),
+            (USES_BUFFER_LSTM() ? buffer_lstm->state() : cnn::NULL_RNN_POINTER),
             stack_lstm.state(),
             Stack<Expression>(buffer),
             Stack<Expression>(stack),
@@ -1545,15 +1558,15 @@ struct ParserState : public AbstractParserState {
   std::pair<Expression, Expression> get_action_log_probs(const vector<unsigned>& valid_actions, vector<float>* augmentation) const override {
     Expression stack_summary = NO_STACK ? Expression() : parser->stack_lstm.get_h(stack_state).back();
     Expression action_summary = NO_ACTION_HISTORY ? Expression() : parser->action_lstm.get_h(action_state).back();
-    Expression buffer_summary = BERT ? buffer.back() : parser->buffer_lstm->get_h(buffer_state).back();
+    Expression buffer_summary = USES_BUFFER_LSTM() ? parser->buffer_lstm->get_h(buffer_state).back() : buffer.back();
 
     assert (symbolic_parser_state->bufferi.size() == buffer.size());
 
     if (parser->apply_dropout) { // TODO: don't the outputs of the LSTMs already have dropout applied?
       if (!NO_STACK) stack_summary = dropout(stack_summary, DROPOUT);
       if (!NO_ACTION_HISTORY) action_summary = dropout(action_summary, DROPOUT);
-      if (!BERT) {
-        // TODO(dfried): consider applying dropout here as well
+      if (USES_BUFFER_LSTM()) {
+        // TODO(dfried): consider applying dropout to BERT as well
         buffer_summary = dropout(buffer_summary, DROPOUT);
       }
     }
@@ -1563,7 +1576,8 @@ struct ParserState : public AbstractParserState {
       elements.push_back(parser->S);
       elements.push_back(stack_summary);
     }
-    elements.push_back(parser->B);
+    // with no-buffer BERT, parser->B was already applied
+    elements.push_back(BERT && USES_BUFFER_LSTM() ? parser->B_bert_buffer : parser->B);
     elements.push_back(buffer_summary);
     if (!NO_ACTION_HISTORY) {
       elements.push_back(parser->A);
@@ -2059,8 +2073,14 @@ void bert_fw(WordFeaturizer* word_featurizer,
   batch_bert_embeddings.resize(batch_size);
   for (int instance_within_batch = 0; instance_within_batch < batch_size; instance_within_batch++) {
     auto& bert_embeddings = batch_bert_embeddings[instance_within_batch];
-    for (int word_index = 1; word_index < batch_sentences[instance_within_batch].word_piece_ids.size(); word_index++) {
-      int64_t feat_index = instance_within_batch * num_words * BERT_DIM + word_index * BERT_DIM;
+    // CLS w1 w2 w3 ... wn SEP
+    int max_index = batch_sentences[instance_within_batch].word_piece_ids.size() - 2;
+    for (int word_index = 0; word_index <= max_index; word_index++) {
+      int embedding_index = word_index + 1;
+      if (word_index == max_index && BERT_BUFFER_USE_CLS) {
+        embedding_index = 0;
+      }
+      int64_t feat_index = instance_within_batch * num_words * BERT_DIM + embedding_index * BERT_DIM;
       assert(feat_index >= 0);
       float *grads_location = grads_tensor ? &(grads_arr[feat_index]) : nullptr;
       shared_ptr<Parameters> params = make_shared<Parameters>(bert_dim, &(feat_arr[feat_index]), grads_location);
@@ -2165,20 +2185,7 @@ int main(int argc, char** argv) {
   }
 
   BERT_BUFFER_LSTM = conf.count("bert_buffer_lstm");
-  BERT_BUFFER_SEP = conf.count("bert_buffer_sep");
-  BERT_BUFFER_CLS = conf.count("bert_buffer_cls");
-
-  if (BERT_BUFFER_SEP || BERT_BUFFER_CLS) {
-    if (!BERT_BUFFER_LSTM) {
-      cerr << "bert_buffer_sep and bert_buffer_cls have no effect without bert_buffer_lstm\n";
-      return 1;
-    }
-  }
-
-  if (BERT_BUFFER_SEP && BERT_BUFFER_CLS) {
-    cerr << "currently cannot use both bert_buffer_sep and bert_buffer_cls\n";
-    return 1;
-  }
+  BERT_BUFFER_USE_CLS = conf.count("bert_buffer_use_cls");
 
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
@@ -2582,6 +2589,7 @@ int main(int argc, char** argv) {
             cerr << "evalb\trecall=" << reference_results.first.recall << ", precision="
                  << reference_results.first.precision << ", F1=" << reference_results.first.f1 << "\n";
           }
+          return reference_results.first;
         }
 
       }
