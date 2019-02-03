@@ -6,6 +6,16 @@ import types
 import bert_tokenize
 import os
 
+def reverse_tree(tree):
+    import nltk
+    if isinstance(tree, nltk.Tree):
+        children = []
+        for child in tree:
+            children.append(reverse_tree(child))
+        return nltk.Tree(tree.label(), list(reversed(children)))
+    else:
+        return tree
+
 # tokens is a list of tokens, so no need to split it again
 def unkify(tokens, words_dict, morph_aware=True):
     final = []
@@ -141,11 +151,18 @@ def get_actions(line):
     max_open_nts = 0
     max_cons_nts = 0
     max_same_cons_nts = 0
+    # this works because ADV don't contain other NTs, at least for Brown
+    in_adv = False
 
     while i <= max_idx:
         assert line_strip[i] == '(' or line_strip[i] == ')'
         if line_strip[i] == '(':
-            if is_next_open_bracket(line_strip, i): # open non-terminal
+            if line_strip[i:i+5] == '(ADV ' or line_strip[i:i+5] == '(AUX ':
+                in_adv = True
+                i += 1
+                while line_strip[i] != '(':
+                    i += 1
+            elif is_next_open_bracket(line_strip, i): # open non-terminal
                 curr_NT = get_nonterminal(line_strip, i)
                 if '-' in curr_NT:
                     curr_NT = curr_NT.split('-')[0]
@@ -167,7 +184,8 @@ def get_actions(line):
                 i += 1
                 while line_strip[i] != '(': # get the next open bracket, which may be a terminal or another non-terminal
                     i += 1
-            else: # it's a terminal symbol
+            else:
+                # it's a terminal symbol
                 cons_nts = 0
                 same_nts = 0
                 last_nt = None
@@ -179,11 +197,13 @@ def get_actions(line):
                 while line_strip[i] != ')' and line_strip[i] != '(':
                     i += 1
         else:
-             open_nts -= 1
-             cons_nts = 0
-             same_nts = 0
-             last_nt = None
-             output_actions.append('REDUCE')
+             if not in_adv:
+                open_nts -= 1
+                cons_nts = 0
+                same_nts = 0
+                last_nt = None
+                output_actions.append('REDUCE')
+             in_adv = False
              if i == max_idx:
                  break
              i += 1
@@ -235,6 +255,7 @@ def main():
     parser.add_argument("--no_morph_aware_unking", action='store_true')
     parser.add_argument("--bert_model_dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uncased_L-12_H-768_A-12"))
     parser.add_argument("--collapse_unary", action='store_true', help='collapse unary chains, with nonterminals separated by "+"')
+    parser.add_argument("--reverse_trees", action='store_true', help='treat trees as horizontally mirrored for the sake of traversal orders')
     args = parser.parse_args()
     # train_file = open(sys.argv[1], 'r')
     # words_list = set(get_dictionary.get_dict(train_file))
@@ -280,10 +301,13 @@ def main():
         print(' '.join(map(str, bert_input_ids)))
 
         tree_string = line
-        if args.collapse_unary:
+        if args.collapse_unary or args.reverse_trees:
             from nltk import Tree
-            tree = Tree.fromstring(line.rstrip())
-            tree.collapse_unary(collapseRoot=True, joinChar="+")
+            tree = Tree.fromstring(tree_string.rstrip())
+            if args.collapse_unary:
+                tree.collapse_unary(collapseRoot=True, joinChar="+")
+            if args.reverse_trees:
+                tree = reverse_tree(tree)
             tree_string = tree._pformat_flat(nodesep='', parens='()', quotes=False)
 
         output_actions, mon, mcn, mscn = get_actions(tree_string)
