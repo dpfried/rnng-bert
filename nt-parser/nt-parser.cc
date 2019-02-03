@@ -65,8 +65,6 @@ unsigned POS_DIM = 10;
 unsigned MORPH_DIM = 10;
 unsigned BERT_DIM = 0; // should be initialized later
 
-unsigned MAX_CONS_NT = 8;
-
 unsigned SHIFT_ACTION = UINT_MAX;
 unsigned REDUCE_ACTION = UINT_MAX;
 unsigned TERM_ACTION = UINT_MAX; // only used for in-order
@@ -110,14 +108,16 @@ bool BERT_LARGE = false;
 float BERT_LR = 5e-5f;
 int BERT_WARMUP_STEPS = 160;
 
+float BERT_FEATURE_DOWNSCALE = 1.0;
+
 
 string BERT_MODEL_PATH = ""; // will be initialized to one of the following if BERT is passed
 const string BERT_BASE_MODEL_PATH = "bert_models/uncased_L-12_H-768_A-12";
 const string BERT_LARGE_MODEL_PATH = "bert_models/uncased_L-24_H-1024_A-16";
 
 string BERT_GRAPH_PATH = ""; // will be initialized to one of the following if BERT is passed
-const string BERT_BASE_GRAPH_PATH = BERT_BASE_MODEL_PATH + "_FDS-4.0_graph.pb";
-const string BERT_LARGE_GRAPH_PATH = BERT_LARGE_MODEL_PATH + "_FDS-6.0_graph.pb";
+const string BERT_BASE_GRAPH_PATH = BERT_BASE_MODEL_PATH + "_graph.pb";
+const string BERT_LARGE_GRAPH_PATH = BERT_LARGE_MODEL_PATH + "_graph.pb";
 
 using namespace cnn::expr;
 using namespace cnn;
@@ -174,6 +174,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 
           ("bert", "use BERT to represent inputs")
           ("bert_large", "use BERT-Large (otherwise use BERT-Base)")
+          ("bert_feature_downscale", po::value<float>(), "scale down BERT features by this much")
 
           ("bert_buffer_lstm", "run the regular buffer lstm over the BERT embeddings")
           ("bert_buffer_use_cls", "use the BERT CLS embedding as the buffer guard")
@@ -353,6 +354,10 @@ static bool IsActionForbidden_Discriminative(
   } else { // standard top-down RNNG
     assert(is_shift || is_reduce || is_nt) ;
     static const unsigned MAX_OPEN_NTS = 100;
+
+    // TODO: check that these are sufficient for other languages
+    unsigned MAX_CONS_NT = REVERSE_TREES ? 38 : 8;
+
     if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
     if (is_nt && ncons_nt >= MAX_CONS_NT) return true;
     if (ssize == 1) {
@@ -556,6 +561,7 @@ struct AbstractParser {
       vector<float> adist = as_vector(adiste.value());
 
       if (build_training_graph) {
+        assert(std::find(actions_in_support.begin(), actions_in_support.end(), correct_action) != actions_in_support.end());
         if (streaming_gold_prob) {
           Expression log_gold_prob = pick(adiste, correct_action);
           streaming_gold_prob->standardize_and_update(exp(as_scalar(log_gold_prob.value())));
@@ -1117,6 +1123,11 @@ struct ParserBuilder : public AbstractParser {
       } else {
         for (int i = 0; i < bert_embeddings.size(); ++i) {
           buffer[bert_embeddings.size() - 1 - i] = parameter(*hg, bert_embeddings[i].get());
+        }
+      }
+      if (BERT_FEATURE_DOWNSCALE != 1.0) {
+        for (int i = 0; i < bert_embeddings.size(); i++) {
+          buffer[i] = buffer[i] * input(*hg, 1.0 / BERT_FEATURE_DOWNSCALE);
         }
       }
     } else {
@@ -2144,8 +2155,6 @@ int main(int argc, char** argv) {
   NO_STACK = conf.count("no_stack");
   NO_ACTION_HISTORY = conf.count("no_action_history");
 
-  MAX_CONS_NT = conf["max_cons_nt"].as<unsigned>();
-
   SILVER_BLOCKS_PER_GOLD = conf["silver_blocks_per_gold"].as<int>();
 
   MAX_SENTENCE_LENGTH_TRAIN = conf["max_sentence_length_train"].as<int>();
@@ -2181,7 +2190,13 @@ int main(int argc, char** argv) {
       BERT_MODEL_PATH = BERT_BASE_MODEL_PATH;
       BERT_DIM = 768;
     }
+    if (conf.count("bert_feature_downscale")) {
+      BERT_FEATURE_DOWNSCALE = conf["bert_feature_downscale"].as<float>();
+    } else {
+      BERT_FEATURE_DOWNSCALE = BERT_LARGE ? 6.0 : 4.0;
+    }
     cerr << "using BERT graph " << BERT_GRAPH_PATH << " with dimension " << BERT_DIM << endl;
+    cerr << "BERT_FEATURE_DOWNSCALE: " << BERT_FEATURE_DOWNSCALE << endl;
   }
 
   BERT_BUFFER_LSTM = conf.count("bert_buffer_lstm");

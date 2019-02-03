@@ -14,13 +14,16 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--bert_model_dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uncased_L-12_H-768_A-12"))
 parser.add_argument("--bert_output_file")
-parser.add_argument("--feature_downscale", type=float, default=4.0)
+parser.add_argument("--feature_downscale", type=float, default=1.0)
 args = parser.parse_args()
 
 if not args.bert_output_file:
     model_name = os.path.split(os.path.split(args.bert_model_dir)[0])[1]
     # e.g. uncased_L-12_H-768_A-12_FDS-4.0_graph.pb
-    args.bert_output_file = os.path.join("bert_models", os.path.basename("{}_FDS-{}_graph.pb".format(model_name, args.feature_downscale)))
+    if args.feature_downscale != 1.0:
+        model_name += "_FDS-{}".format(args.feature_downscale)
+    model_name = "{}_graph.pb".format(model_name)
+    args.bert_output_file = os.path.join("bert_models", os.path.basename(model_name))
 
 
 sess = tf.InteractiveSession()
@@ -73,8 +76,9 @@ def get_word_features():
     # The idea behind rescaling is that the code mixes BERT vectors and vectors
     # that are output by an LSTM, which would be a magnitude mismatch without
     # any rescaling.
-    print("RESCALING word features: dividing by {}".format(args.feature_downscale))
-    word_features_packed = word_features_packed / args.feature_downscale
+    if args.feature_downscale != 1.0:
+        print("RESCALING word features: dividing by {}".format(args.feature_downscale))
+        word_features_packed = word_features_packed / args.feature_downscale
 
     # input_mask is over subwords, whereas valid_mask is over words
     sentence_lengths = tf.reduce_sum(word_end_mask, -1)
