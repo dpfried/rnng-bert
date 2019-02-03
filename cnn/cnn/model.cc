@@ -23,7 +23,7 @@ namespace cnn {
 
 ParametersBase::~ParametersBase() {}
 
-Parameters::Parameters(const Dim& d, const std::string& name, float scale) : dim(d), name(name) {
+Parameters::Parameters(const Dim& d, const std::string& name, float scale) : dim(d), name(name), can_store_gradient(true) {
   values.d = g.d = d;
   values.v = static_cast<float*>(ps->allocate(d.size() * sizeof(float)));
   if (scale) {
@@ -40,16 +40,17 @@ Parameters::Parameters(const Dim& d, float scale) : Parameters(d, "", scale) {}
 
   Parameters::Parameters(const Dim& d, float* value_location, float* gradient_location) : dim(d), name("") {
     // a constructor for transient "parameters" that should not be maintained across computation graph invocations.
-    // if gradient_location is nullptr, allocate memory in the backward region (rather than in the parameter region)
-    // to be deallocated each time backward is called. otherwise, assume that this is a zero-initialzed region of
-    // memory of the proper size and store the gradient there
+    // if gradient_location is nullptr, allocate memory in the forward region (rather than in the parameter region,
+    // which won't be cleared, or backward, which requires calling backward to clear) to be deallocated each time
+    // the computation is called. otherwise, assume that this is a zero-initialzed region of memory of the proper
+    // size and store the gradient there
     values.d = g.d = d;
     values.v = value_location;
     if (gradient_location) {
       g.v = gradient_location;
+      can_store_gradient = true;
     } else {
-      g.v = static_cast<float*>(dEdfs->allocate(d.size() * sizeof(float)));
-      TensorTools::Zero(g);
+      can_store_gradient = false;
     }
   }
 
@@ -68,6 +69,10 @@ void Parameters::squared_l2norm(float* sqnorm) const {
 }
 
 void Parameters::g_squared_l2norm(float* sqnorm) const {
+  if (!can_store_gradient) {
+    cerr << "calling g_squared_l2norm on a parameter that can't store gradients" << endl;
+    abort();
+  }
 #if HAVE_CUDA
   gpu::l2_norm_reducer(g.d.size(), g.v, sqnorm, true, false);
 #else
@@ -81,6 +86,10 @@ void Parameters::copy(const Parameters & param) {
 }
 
 void Parameters::accumulate_grad(const Tensor& d) {
+  if (!can_store_gradient) {
+    cerr << "calling accumulate_grad on a parameter that can't store gradients" << endl;
+    abort();
+  }
 #if HAVE_CUDA
   CUBLAS_CHECK(cublasSaxpy(cublas_handle, g.d.size(), kSCALAR_ONE, d.v, 1, g.v, 1));
 #else
@@ -89,6 +98,10 @@ void Parameters::accumulate_grad(const Tensor& d) {
 }
 
 void Parameters::clear() {
+  if (!can_store_gradient) {
+    cerr << "calling clear on a parameter that can't store gradients" << endl;
+    abort();
+  }
   TensorTools::Zero(g);
 }
 

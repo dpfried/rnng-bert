@@ -40,6 +40,10 @@ bool CheckGrad(Model& m, ComputationGraph& g, int verbosity) {
       float E_right = as_scalar(g.forward());
       TensorTools::SetElement(p.values, i, old);
       float g = (E_right - E_left) / (2 * alpha);
+      if (!p.can_store_gradient) {
+        cerr << "calling grad check on a parameter that can't store gradients" << endl;
+        abort();
+      }
       float g_act = TensorTools::AccessElement(p.g, i);
       float f = fabs(g - g_act);
       float m = max(fabs(g), fabs(g_act));

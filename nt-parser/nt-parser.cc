@@ -99,12 +99,18 @@ bool BRACKET_CONSTRAINED_TRAINING = false;
 bool IN_ORDER = false;
 
 bool COLLAPSE_UNARY = false;
+bool REVERSE_TREES = false;
 
 bool BERT = false;
+
+bool BERT_BUFFER_LSTM = false;
+bool BERT_BUFFER_SEP = false;
+bool BERT_BUFFER_CLS = false;
+bool BERT_LARGE = false;
+
 float BERT_LR = 5e-5f;
 int BERT_WARMUP_STEPS = 160;
 
-bool BERT_LARGE = false;
 
 string BERT_MODEL_PATH = ""; // will be initialized to one of the following if BERT is passed
 const string BERT_BASE_MODEL_PATH = "bert_models/uncased_L-12_H-768_A-12";
@@ -144,6 +150,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("inorder", "super experimental implementation of Liu and Zhang 2017, breaks many of the other flags")
 
           ("collapse_unary", "assume that oracle files represent parses with collapsed unary chains. Don't allow producing unary chains, and uncollapse unaries when decoding (split on +)")
+          ("reverse_trees", "assume that oracle files represent travels of mirrored trees (i.e. right-to-left). Mirror the trees when decoding")
 
           // data
           ("training_data,T", po::value<string>(), "List of Transitions - Training corpus")
@@ -164,6 +171,10 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 
           ("bert", "use BERT to represent inputs")
           ("bert_large", "use BERT-Large (otherwise use BERT-Base)")
+
+          ("bert_buffer_lstm", "run the regular buffer lstm over the BERT embeddings")
+          ("bert_buffer_sep", "use the BERT SEP embedding as the buffer guard")
+          ("bert_buffer_cls", "use the BERT CLS embedding as the buffer guard")
 
           ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
           ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
@@ -1086,8 +1097,16 @@ struct ParserBuilder : public AbstractParser {
     // in the discriminative model, here we set up the buffer contents
     if (BERT) {
       assert(bert_embeddings.size() == sent.size() + 1); // should also contain the SEP embedding at the end
-      for (int i = 0; i < bert_embeddings.size(); ++i) {
-        buffer[bert_embeddings.size() - 1 - i] = parameter(*hg, bert_embeddings[i].get());
+      if (REVERSE_TREES) {
+        for (int i = 0; i < bert_embeddings.size() - 1; i++) {
+          buffer[i + 1] = parameter(*hg, bert_embeddings[i].get());
+        }
+        // this will be overwritten later to p_buffer_guard, but for consistency
+        buffer[0] = parameter(*hg, bert_embeddings[bert_embeddings.size() - 1].get());
+      } else {
+        for (int i = 0; i < bert_embeddings.size(); ++i) {
+          buffer[bert_embeddings.size() - 1 - i] = parameter(*hg, bert_embeddings[i].get());
+        }
       }
     } else {
       w2l = parameter(*hg, p_w2l);
@@ -1127,7 +1146,7 @@ struct ParserBuilder : public AbstractParser {
             args.push_back(lookup(*hg, p_morph_embeddings[class_], feature_idx));
           }
         }
-        buffer[sent.size() - i] = rectify(affine_transform(args));
+        buffer[REVERSE_TREES ? i + 1 : sent.size() - i] = rectify(affine_transform(args));
       }
       // dummy symbol to represent the empty buffer
       buffer[0] = parameter(*hg, p_buffer_guard);
@@ -1911,7 +1930,8 @@ vector<string> string_representation(const vector<int>& actions, const parser::S
       string_rep.push_back("(" + ntermdict.Convert(action2NTindex.find(a)->second));
     }
     else if (adict.Convert(a)[0] == 'S') {
-      string_rep.push_back(posdict.Convert(sentence.pos[ti++]));
+      string_rep.push_back(posdict.Convert(sentence.pos[REVERSE_TREES ? sentence.pos.size() - 1 - ti : ti]));
+      ti++;
     } else if (adict.Convert(a)[0] == 'T') {
       assert(IN_ORDER);
       // todo: check that we're at the end
@@ -1933,11 +1953,13 @@ Tree to_tree(const vector<int>& actions, const parser::Sentence& sentence) {
   Tree tree = IN_ORDER ? parse_inorder(string_rep) : parse_linearized(string_rep);
   if (COLLAPSE_UNARY) {
     // Assume that the representation has unary chains collapsed, so expand for evaluation
-    return tree.expand_unary("+");
+    tree = tree.expand_unary("+");
   }
-  else {
-    return tree;
+  if (REVERSE_TREES) {
+    tree = tree.reverse();
   }
+
+  return tree;
 }
 
 Tree to_tree_u(const vector<unsigned>& actions, const parser::Sentence& sentence) {
@@ -2115,6 +2137,7 @@ int main(int argc, char** argv) {
   IN_ORDER = conf.count("inorder");
 
   COLLAPSE_UNARY = conf.count("collapse_unary");
+  REVERSE_TREES = conf.count("reverse_trees");
 
   if (BRACKET_CONSTRAINED_TRAINING && !COLLAPSE_UNARY) {
     cerr << "must set --collapse_unary with --bracket_constrained" << endl;
@@ -2139,6 +2162,22 @@ int main(int argc, char** argv) {
       BERT_DIM = 768;
     }
     cerr << "using BERT graph " << BERT_GRAPH_PATH << " with dimension " << BERT_DIM << endl;
+  }
+
+  BERT_BUFFER_LSTM = conf.count("bert_buffer_lstm");
+  BERT_BUFFER_SEP = conf.count("bert_buffer_sep");
+  BERT_BUFFER_CLS = conf.count("bert_buffer_cls");
+
+  if (BERT_BUFFER_SEP || BERT_BUFFER_CLS) {
+    if (!BERT_BUFFER_LSTM) {
+      cerr << "bert_buffer_sep and bert_buffer_cls have no effect without bert_buffer_lstm\n";
+      return 1;
+    }
+  }
+
+  if (BERT_BUFFER_SEP && BERT_BUFFER_CLS) {
+    cerr << "currently cannot use both bert_buffer_sep and bert_buffer_cls\n";
+    return 1;
   }
 
   if (conf.count("train") && conf.count("dev_data") == 0) {
@@ -3716,12 +3755,20 @@ int main(int argc, char** argv) {
     // shortcut: only do a test decode if we aren't outputting any candidate trees
     if (!output_candidate_trees) {
       auto t_start = chrono::high_resolution_clock::now();
-      vector<vector<unsigned>> predicted;
+      vector<vector<unsigned>> predicted(test_indices.size());
       StreamingStatistics streaming_entropy;
       StreamingStatistics streaming_gold_prob;
       double neg_log_likelihood = 0;
       double actions_correct = 0;
       unsigned long num_actions = 0;
+
+      /*
+      // decode longer sentences first to fail faster if OOM
+      sort(test_indices.begin(), test_indices.end(),
+           [&](int ix1, int ix2) {
+               return test_corpus.sents[ix1].size() > test_corpus.sents[ix2].size();
+      });
+       */
 
       int sii = 0;
       while (sii < test_indices.size()) {
@@ -3754,7 +3801,7 @@ int main(int argc, char** argv) {
                   *abstract_parser, sentence, bert_embeddings, &streaming_entropy,
                   bracket_constrained_decode ? &actions : nullptr
           );
-          predicted.push_back(result_and_nlp.first);
+          predicted[corpus_index] = result_and_nlp.first;
           neg_log_likelihood += get_neg_log_likelihood(
                   *abstract_parser, sentence, bert_embeddings, actions, &actions_correct, &streaming_gold_prob,
                   bracket_constrained_decode ? &actions : nullptr

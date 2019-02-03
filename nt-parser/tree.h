@@ -190,6 +190,27 @@ public:
       return tree;
   }
 
+  Tree reverse() {
+      vector<string> reversed_sentence{*sentence};
+      std::reverse(reversed_sentence.begin(), reversed_sentence.end());
+      return _reverse_helper(make_shared<vector<string>>(reversed_sentence));
+  }
+
+  Tree _reverse_helper(const shared_ptr<vector<string>>& reversed_sentence) {
+      vector<Tree> children_rev;
+
+      for (auto i = children.rbegin(); i != children.rend(); i++) {
+        children_rev.push_back(i->_reverse_helper(reversed_sentence));
+      }
+
+      assert(reversed_sentence->size() == sentence->size());
+      int reversed_leaf_index = static_cast<int>(reversed_sentence->size()) - leaf_index - 1;
+      assert(reversed_leaf_index >= 0);
+      assert(reversed_leaf_index <= reversed_sentence->size());
+
+      return Tree { symbol, children_rev, reversed_sentence, reversed_leaf_index };
+  }
+
   /*
   void set_sentence(vector<string>& sent) {
       sentence = sent;

@@ -45,6 +45,7 @@ struct Parameters : public ParametersBase {
   Tensor g;
   std::string name;
   explicit Parameters(const Dim& d, float* value_location, float* gradient_location); // initialize with values at v
+  bool can_store_gradient;
  private:
   Parameters() {}
   explicit Parameters(const Dim& d, float minmax); // initialize with ~U(-minmax,+minmax)
