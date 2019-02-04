@@ -5,6 +5,7 @@ from get_dictionary import is_next_open_bracket, get_between_brackets
 import types
 import bert_tokenize
 import os
+import fileinput
 
 def reverse_tree(tree):
     import nltk
@@ -264,7 +265,6 @@ def main():
     words_list = set(line.strip() for line in dictionary_file)
     dictionary_file.close()
 
-    dev_file = open(args.corpus_file, 'r')
     # dev_lines = dev_file.readlines()
     line_ctr = 0
     max_open_nts = 0
@@ -276,7 +276,9 @@ def main():
     # get the oracle for the train file
     print("loading BERT tokenizer from %s" % (args.bert_model_dir), file=sys.stderr)
     bert_tokenizer = bert_tokenize.Tokenizer(args.bert_model_dir)
-    for line in dev_file:
+    # use fileinput so that we can pass '-' to read from stdin
+    for line in fileinput.input(files=[args.corpus_file]):
+        line = line.split("|||")[-1].strip()
         line_ctr += 1
         if line_ctr % 1000 == 0:
             sys.stderr.write("\rget oracle %d" % line_ctr)
@@ -332,7 +334,6 @@ def main():
     print("max open nts: %d, line %d" % (max_open_nts, max_open_nts_ix), file=sys.stderr)
     print("max cons nts: %d, line %d" % (max_cons_nts, max_cons_nts_ix), file=sys.stderr)
     print("max same cons nts: %d, line %d" % (max_same_cons_nts, max_same_cons_nts_ix), file=sys.stderr)
-    dev_file.close()
 
 if __name__ == "__main__":
     main()

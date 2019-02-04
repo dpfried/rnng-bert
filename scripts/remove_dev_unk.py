@@ -64,7 +64,7 @@ def main():
     assert len(gold_lines) == len(sys_lines)
     for gold_line, sys_line in zip(gold_lines, sys_lines):
         output_string = remove_dev_unk(gold_line, sys_line)
-        print output_string.rstrip()
+        print(output_string.rstrip())
 
 if __name__ == '__main__':
     main()
