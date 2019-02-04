@@ -3,7 +3,7 @@ import sys
 from remove_dev_unk import get_tags_tokens_lowercase
 
 def parse_line(line):
-    return line.strip().split(' ||| ')
+    return line.strip().split('|||')
 
 if __name__ == "__main__":
     file_with_correct_indices = sys.argv[1]
@@ -18,5 +18,4 @@ if __name__ == "__main__":
             assert(cor_tags == to_up_tags)
             assert(cor_words == to_up_words)
             # correct index, new score, new parse
-            print("%s ||| %s ||| %s" % (cor_toks[0], to_upd_toks[1], cor_toks[2]))
-
+            print("%s|||%s|||%s" % (cor_toks[0], to_upd_toks[1], cor_toks[2]))
