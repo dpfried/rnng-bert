@@ -9,11 +9,12 @@
 #include "nt-parser/compressed-fstream.h"
 
 #include <boost/algorithm/string.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/json_parser.hpp>
 
 using namespace std;
 
 namespace parser {
-
 
 Oracle::~Oracle() {}
 
@@ -40,65 +41,6 @@ void Oracle::ReadSentenceView(const std::string& line, cnn::Dict* dict, vector<i
   assert(sent->size() > 0); // empty sentences not allowed
 }
 
-void TopDownOracle::ReadMorphologyFeatures(const std::string& line, std::vector<std::unordered_map<unsigned, unsigned>>* morphology_feats) {
-  std::vector<std::string> features_by_word;
-  std::string trimmed_line = boost::trim_copy(line);
-  boost::split(features_by_word, trimmed_line, boost::is_space(), boost::token_compress_on);
-  for (const string& word_features: features_by_word) {
-    std::vector<std::string> features_by_class;
-    boost::split(features_by_class, word_features, boost::is_any_of("|"));
-
-    std::unordered_map<unsigned, unsigned> word_feature_map;
-
-    for (std::string& class_feature: features_by_class) {
-      //std::vector<std::string> class_and_feature;
-      //boost::split(class_and_feature, class_feature, boost::is_any_of("="));
-      /*
-      if (class_and_feature.size() != 2) {
-        if (class_feature != "_") {
-          cerr << "line: " << line << endl;
-          cerr << "class_feature: " << class_feature << endl;
-        }
-        assert(class_feature == "_");
-        continue;
-      }
-      std::string _class = class_and_feature.at(0);
-      std::string feature = class_and_feature.at(1);
-      */
-      auto pos = class_feature.find('=');
-      if (pos == std::string::npos) {
-        continue;
-      }
-      std::string _class = class_feature.substr(0, pos);
-      std::string feature = class_feature.substr(pos+1);
-
-      if (!morphology_dicts->count(_class)) {
-        (*morphology_dicts)[_class] = cnn::Dict();
-      }
-      if (!morphology_singletons->count(_class)) {
-        (*morphology_singletons)[_class] = std::vector<bool>();
-      }
-      int class_index = morphology_classes->Convert(_class);
-      auto& dict = (*morphology_dicts)[_class];
-      int feature_index = dict.Convert(feature);
-      auto& singletons = (*morphology_singletons)[_class];
-      if (feature_index >= singletons.size()) {
-        singletons.push_back(true);
-        assert(singletons.size() == dict.size());
-        assert(singletons.size() == feature_index + 1);
-      } else {
-        singletons[feature_index] = false;
-      }
-      assert(class_index >= 0);
-      assert(feature_index >= 0);
-      assert(!word_feature_map.count((unsigned) class_index));
-      word_feature_map[(unsigned) class_index] = (unsigned) feature_index;
-    }
-
-    morphology_feats->push_back(word_feature_map);
-  }
-  assert(morphology_feats->size() > 0); // empty sentences not allowed
-}
 
 
   void Oracle::ReadWordEndMask(const std::string& line, vector<unsigned>& lengths, vector<int32_t>& word_end_mask) {
@@ -276,6 +218,93 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
   cerr << "    cumulative nonterminal vocab size: " << nd->size() << endl;
   cerr << "    cumulative         pos vocab size: " << pd->size() << endl;
 }
+
+void TopDownOracle::ReadMorphologyFeatures(const std::string& line, std::vector<std::unordered_map<unsigned, unsigned>>* morphology_feats) {
+  std::vector<std::string> features_by_word;
+  std::string trimmed_line = boost::trim_copy(line);
+  boost::split(features_by_word, trimmed_line, boost::is_space(), boost::token_compress_on);
+  for (const string& word_features: features_by_word) {
+    std::vector<std::string> features_by_class;
+    boost::split(features_by_class, word_features, boost::is_any_of("|"));
+
+    std::unordered_map<unsigned, unsigned> word_feature_map;
+
+    for (std::string& class_feature: features_by_class) {
+      //std::vector<std::string> class_and_feature;
+      //boost::split(class_and_feature, class_feature, boost::is_any_of("="));
+      /*
+      if (class_and_feature.size() != 2) {
+        if (class_feature != "_") {
+          cerr << "line: " << line << endl;
+          cerr << "class_feature: " << class_feature << endl;
+        }
+        assert(class_feature == "_");
+        continue;
+      }
+      std::string _class = class_and_feature.at(0);
+      std::string feature = class_and_feature.at(1);
+      */
+      auto pos = class_feature.find('=');
+      if (pos == std::string::npos) {
+        continue;
+      }
+      std::string _class = class_feature.substr(0, pos);
+      std::string feature = class_feature.substr(pos+1);
+
+      if (!morphology_dicts->count(_class)) {
+        (*morphology_dicts)[_class] = cnn::Dict();
+      }
+      if (!morphology_singletons->count(_class)) {
+        (*morphology_singletons)[_class] = std::vector<bool>();
+      }
+      int class_index = morphology_classes->Convert(_class);
+      auto& dict = (*morphology_dicts)[_class];
+      int feature_index = dict.Convert(feature);
+      auto& singletons = (*morphology_singletons)[_class];
+      if (feature_index >= singletons.size()) {
+        singletons.push_back(true);
+        assert(singletons.size() == dict.size());
+        assert(singletons.size() == feature_index + 1);
+      } else {
+        singletons[feature_index] = false;
+      }
+      assert(class_index >= 0);
+      assert(feature_index >= 0);
+      assert(!word_feature_map.count((unsigned) class_index));
+      word_feature_map[(unsigned) class_index] = (unsigned) feature_index;
+    }
+
+    morphology_feats->push_back(word_feature_map);
+  }
+  assert(morphology_feats->size() > 0); // empty sentences not allowed
+}
+
+
+Sentence TopDownOracle::sentence_from_json(const boost::property_tree::ptree &json_data, bool is_training, bool read_morphology_features, bool read_bert) {
+  Sentence cur_sent;
+
+  ReadSentenceView(json_data.get<string>("pos"), pd, &cur_sent.pos);
+  ReadSentenceView(json_data.get<string>("raw"), nud, &cur_sent.non_unked_raw);
+  ReadSentenceView(json_data.get<string>("lc"), d, &cur_sent.lc);
+  ReadSentenceView(json_data.get<string>("unk"), d, &cur_sent.unk);
+  if (is_training) {
+    ReadSentenceView(json_data.get<string>("raw"), d, &cur_sent.raw);
+  } else {
+    cur_sent.raw = cur_sent.unk;
+  }
+  if (read_morphology_features) {
+    ReadMorphologyFeatures(json_data.get<string>("morph"), &cur_sent.morphology_features);
+    assert(cur_sent.morphology_features.size() == cur_sent.raw.size());
+  }
+  if (read_bert) {
+    vector<unsigned> word_lengths_in_pieces;
+    ReadWordEndMask(json_data.get<string>("bert_wem"), word_lengths_in_pieces, cur_sent.word_end_mask);
+    ReadWordPieceIds(json_data.get<string>("bert_wpi"), word_lengths_in_pieces, cur_sent.word_piece_ids, cur_sent.word_piece_ids_flat);
+    assert(cur_sent.word_end_mask.size() == cur_sent.word_piece_ids_flat.size());
+  }
+  return cur_sent;
+}
+
 
 void TopDownOracleGen::load_bdata(const string& file) {
   bracketed_fname=file;

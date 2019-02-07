@@ -6,6 +6,8 @@
 #include <string>
 #include <unordered_map>
 #include <map>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/json_parser.hpp>
 
 namespace cnn { class Dict; }
 
@@ -45,6 +47,7 @@ struct Oracle {
   static void ReadSentenceView(const std::string& line, cnn::Dict* dict, std::vector<int>* sent);
   static void ReadWordEndMask(const std::string& line, std::vector<unsigned>& lengths, std::vector<int32_t>& word_end_mask);
   static void ReadWordPieceIds(const std::string& line, const std::vector<unsigned>& lengths, std::vector<std::vector<int32_t>>& word_piece_ids, std::vector<int32_t>& word_piece_ids_flat);
+
 };
 
 // oracle that predicts nonterminal symbols with a NT(X) action
@@ -66,6 +69,7 @@ class TopDownOracle : public Oracle {
   cnn::Dict* morphology_classes;
   std::unordered_map<std::string, cnn::Dict>* morphology_dicts;
   std::unordered_map<std::string, std::vector<bool>>* morphology_singletons;
+  Sentence sentence_from_json(const boost::property_tree::ptree& json_data, bool is_training, bool read_morphology_features, bool read_bert);
 protected:
   void ReadMorphologyFeatures(const std::string& line, std::vector<std::unordered_map<unsigned, unsigned>>* morphology_feats);
 };

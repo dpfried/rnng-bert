@@ -406,16 +406,17 @@ static bool IsActionForbidden_Discriminative(
   }
 }
 
-void print_tree(const Tree& tree, const parser::Sentence& sentence, bool output_tags, ostream& out_stream) {
+void print_tree(const Tree& tree, const parser::Sentence& sentence, bool output_tags, ostream& out_stream, bool suppress_newline=false) {
   for (auto& tok: linearize_tree(tree, sentence, output_tags, true)) {
     out_stream << tok << " ";
   }
-  out_stream << endl;
+  if (!suppress_newline)
+    out_stream << endl;
 }
 
-void print_parse(const vector<unsigned>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
+void print_parse(const vector<unsigned>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream, bool suppress_newline = false) {
   Tree tree = to_tree_u(actions, sentence);
-  print_tree(tree, sentence, ptb_output_format, out_stream);
+  print_tree(tree, sentence, ptb_output_format, out_stream, suppress_newline);
   /*
   if (IN_ORDER) {
     Tree tree = to_tree_u(actions, sentence);
@@ -441,10 +442,10 @@ void print_parse(const vector<unsigned>& actions, const parser::Sentence& senten
    */
 }
 
-void print_parse(const vector<int>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream) {
+void print_parse(const vector<int>& actions, const parser::Sentence& sentence, bool ptb_output_format, ostream& out_stream, bool suppress_newline = false) {
   for (auto action : actions)
     assert(action >= 0);
-  print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, ptb_output_format, out_stream);
+  print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, ptb_output_format, out_stream, suppress_newline);
 }
 
 Expression logsumexp_stable(const vector<Expression>& all_log_probs) {
@@ -2415,7 +2416,7 @@ int main(int argc, char** argv) {
 
   }
 
-  non_unked_termdict.Freeze();
+  //non_unked_termdict.Freeze();
 
   for (int i = 0; i < adict.size(); ++i) {
     const string& a = adict.Convert(i);
@@ -2474,21 +2475,20 @@ int main(int argc, char** argv) {
       double right = 0;
       // get parse and negative log probability
       ComputationGraph hg;
+      vector<pair<vector<unsigned>, Expression>> results;
       if (beam_size > 1 || conf.count("beam_within_word")) {
-        vector<pair<vector<unsigned>, Expression>> beam_results;
         if (conf.count("beam_within_word")) {
           if (bracket_constraint_actions) {
             cerr << "bracket constraint actions not implemented for beam_within_word" << endl;
             abort();
           }
-          beam_results = parser.abstract_log_prob_parser_beam_within_word(&hg, sentence, bert_embeddings, beam_size,
+          results = parser.abstract_log_prob_parser_beam_within_word(&hg, sentence, bert_embeddings, beam_size,
                                                                           conf["beam_filter_at_word_size"].as<int>());
         } else {
-          beam_results = parser.abstract_log_prob_parser_beam(&hg, sentence, bert_embeddings, beam_size, true, bracket_constraint_actions);
+          results = parser.abstract_log_prob_parser_beam(&hg, sentence, bert_embeddings, beam_size, true, bracket_constraint_actions);
         }
-        return beam_results[0];
       } else {
-        return parser.abstract_log_prob_parser(
+        results.push_back(parser.abstract_log_prob_parser(
                 &hg,
                 sentence,
                 bert_embeddings,
@@ -2505,8 +2505,11 @@ int main(int argc, char** argv) {
                 nullptr, // streaming_gold_prob
                 nullptr, // entropy_accumulator
                 bracket_constraint_actions
-        );
+        ));
       }
+      auto parse = results[0].first;
+      float neg_log_prob = as_scalar(results[0].second.value());
+      return make_pair(parse, neg_log_prob);
   };
 
   auto get_neg_log_likelihood = [&](
@@ -3584,7 +3587,9 @@ int main(int argc, char** argv) {
     }
   } // should do training?
 
-  if (test_corpus.size() > 0) { // do inference for test evaluation
+  bool interactive_mode = conf.count("interactive");
+
+  if (test_corpus.size() > 0 || interactive_mode) { // do inference for test evaluation
 
     vector<std::shared_ptr<Model>> models;
     vector<std::shared_ptr<ParserBuilder>> parsers;
@@ -3661,6 +3666,80 @@ int main(int argc, char** argv) {
               BERT_LR, // this shouldn't be used
               BERT_WARMUP_STEPS // this shouldn't be used
       );
+    }
+
+    if (conf.count("interactive")) {
+      boost::asio::io_service io_service;
+
+      boost::asio::posix::stream_descriptor in(io_service, ::dup(STDIN_FILENO));
+      //boost::asio::posix::stream_descriptor out(io_service, ::dup(STDOUT_FILENO));
+
+      cout << "READY" << endl;
+
+      int num_failures = 0;
+      while (num_failures < 10) {
+        TF_Tensor *bert_feats = nullptr;
+        try {
+          boost::asio::streambuf input_buffer;
+          boost::asio::read_until(in, input_buffer, '\n');
+          std::istream buffer(&input_buffer);
+          std::string line;
+          std::getline(buffer, line);
+          std::stringstream stream(line);
+          boost::property_tree::ptree json_data_in;
+          boost::property_tree::read_json(stream, json_data_in);
+
+          if (json_data_in.get<string>("action", "") == "exit") {
+            abort();
+          }
+
+          for (auto &property: json_data_in) {
+            cerr << property.first << " " << json_data_in.get<string>(property.first) << endl;
+          }
+
+          parser::Sentence sentence = corpus.sentence_from_json(
+                  json_data_in,
+                  false, // is_training
+                  USE_MORPH_FEATURES, // read_morphology_features
+                  BERT // read_bert
+          );
+
+          vector<parser::Sentence> batch_sentences { sentence };
+          vector<vector<shared_ptr<Parameters>>> batch_bert_embeddings;
+
+          if (BERT) {
+            assert(word_featurizer);
+            bert_fw(word_featurizer, batch_sentences, batch_bert_embeddings, &bert_feats, nullptr);
+          } else {
+            batch_bert_embeddings.resize(batch_sentences.size());
+          }
+
+          const auto& bert_embeddings = batch_bert_embeddings.back();
+          pair <vector<unsigned>, float> result_and_nlp = decode(
+                  *abstract_parser, sentence, bert_embeddings
+          );
+
+          std::ostringstream parse_out_stream;
+          print_parse(result_and_nlp.first, sentence, true, parse_out_stream, true);
+          float log_likelihood = -1 * result_and_nlp.second;
+
+          boost::property_tree::ptree json_data_out;
+          json_data_out.put("parse", parse_out_stream.str());
+          json_data_out.put("llh", log_likelihood);
+
+          boost::property_tree::write_json(cout, json_data_out, false);
+          cout << endl;
+
+        } catch (const std::exception& e) {
+          cerr << e.what() << endl;
+          num_failures++;
+          if (BERT && bert_feats) {
+            TF_DeleteTensor(bert_feats);
+          }
+        }
+
+      }
+
     }
 
 
@@ -3870,7 +3949,7 @@ int main(int argc, char** argv) {
           const auto& sentence = test_corpus.sents[corpus_index];
           const auto& bert_embeddings = batch_bert_embeddings[batch_index];
           const auto& actions = test_corpus.actions[corpus_index];
-          pair <vector<unsigned>, Expression> result_and_nlp = decode(
+          pair <vector<unsigned>, float> result_and_nlp = decode(
                   *abstract_parser, sentence, bert_embeddings, &streaming_entropy,
                   bracket_constrained_decode ? &actions : nullptr
           );
@@ -3895,33 +3974,5 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (conf.count("interactive")) {
-    boost::asio::io_service io_service;
-
-    boost::asio::posix::stream_descriptor in(io_service, ::dup(STDIN_FILENO));
-    //boost::asio::posix::stream_descriptor out(io_service, ::dup(STDOUT_FILENO));
-
-
-    while (true) {
-      try {
-        boost::asio::streambuf input_buffer;
-        size_t n_read = boost::asio::read_until(in, input_buffer, '\n');
-        input_buffer.commit(n_read);
-        std::istream buffer(&input_buffer);
-        std::stringstream string_buffer;
-        string_buffer << buffer.rdbuf();
-        cerr << string_buffer.str() << endl;
-        boost::property_tree::ptree data;
-        boost::property_tree::read_json(string_buffer, data);
-
-        for (auto &property: data) {
-          cerr << property.first << endl;
-        }
-      } catch (const std::exception& e) {
-        cerr << e.what() << endl;
-      }
-    }
-
-  }
 
 }
