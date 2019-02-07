@@ -21,6 +21,11 @@
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/asio.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/exception/all.hpp>
+#include <boost/throw_exception.hpp>
 
 #include "cnn/init.h"
 #include "cnn/training.h"
@@ -103,6 +108,7 @@ bool BERT = false;
 
 bool BERT_BUFFER_LSTM = false;
 bool BERT_BUFFER_USE_CLS = false;
+bool BERT_BUFFER_LSTM_USE_CLS_SEP = false;
 bool BERT_LARGE = false;
 
 float BERT_LR = 5e-5f;
@@ -178,6 +184,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 
           ("bert_buffer_lstm", "run the regular buffer lstm over the BERT embeddings")
           ("bert_buffer_use_cls", "use the BERT CLS embedding as the buffer guard")
+          ("bert_buffer_lstm_use_cls_sep", "use both CLS and SEP in the BERT lstm buffer")
 
           ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
           ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
@@ -251,6 +258,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 
           ("block_count", po::value<int>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
           ("block_num", po::value<int>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
+
+          ("interactive", "Run in interactive mode")
 
           // ensemble inference
           ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
@@ -1109,12 +1118,18 @@ struct ParserBuilder : public AbstractParser {
 
     if (!NO_ACTION_HISTORY) action_lstm.add_input(action_start);
 
-    vector<Expression> buffer(sent.size() + 1);  // variables representing word embeddings
+    vector<Expression> buffer(BERT_BUFFER_LSTM_USE_CLS_SEP ? sent.size() + 2 : sent.size() + 1);  // variables representing word embeddings
     // precompute buffer representation from left to right
 
     // in the discriminative model, here we set up the buffer contents
     if (BERT) {
-      assert(bert_embeddings.size() == sent.size() + 1); // should also contain the SEP embedding at the end
+      if (BERT_BUFFER_LSTM_USE_CLS_SEP)
+        // should contain CLS at the beginning and SEP at the end
+        assert(bert_embeddings.size() == sent.size() + 2);
+      else
+        // should contain the SEP or CLS embedding at the end
+        assert(bert_embeddings.size() == sent.size() + 1);
+
       if (REVERSE_TREES) {
         for (int i = 0; i < bert_embeddings.size() - 1; i++) {
           buffer[i + 1] = parameter(*hg, bert_embeddings[i].get());
@@ -1178,7 +1193,12 @@ struct ParserBuilder : public AbstractParser {
       for (auto& b : buffer)
         buffer_lstm->add_input(b);
     }
+    if (BERT_BUFFER_LSTM_USE_CLS_SEP) {
+      // remove the CLS token from the front of the buffer so that tokens line up properly
+      buffer.erase(buffer.begin(), buffer.begin() + 1);
+    }
 
+    assert(buffer.size() == sent.size() + 1);
 
     vector<Expression> stack;  // variables representing subtree embeddings
     stack.push_back(parameter(*hg, p_stack_guard));
@@ -1637,6 +1657,7 @@ struct ParserState : public AbstractParserState {
 
     if (ac =='S' && ac2=='H') {  // SHIFT
       assert(buffer.size() > 1); // dummy symbol means > 1 (not >= 1)
+
       if (BERT) {
         new_stack = new_stack.push_back(affine_transform({parser->bert_stack_bias, parser->B, buffer.back()}));
       } else {
@@ -1753,6 +1774,7 @@ struct ParserState : public AbstractParserState {
   void finish_sentence() const override {
     symbolic_parser_state->finish_sentence();
     assert(stack.size() == 2); // guard symbol, root
+
     assert(buffer.size() == 1); // guard symbol
   }
 };
@@ -2083,12 +2105,18 @@ void bert_fw(WordFeaturizer* word_featurizer,
 
   batch_bert_embeddings.resize(batch_size);
   for (int instance_within_batch = 0; instance_within_batch < batch_size; instance_within_batch++) {
-    auto& bert_embeddings = batch_bert_embeddings[instance_within_batch];
     // CLS w1 w2 w3 ... wn SEP
-    int max_index = batch_sentences[instance_within_batch].word_piece_ids.size() - 2;
+    auto& bert_embeddings = batch_bert_embeddings[instance_within_batch];
+
+    // if BERT_BUFFER_LSTM_USE_CLS_SEP is set, then place both CLS and SEP, otherwise just w1 ... [SEP|CLS], depending on value of BERT_BUFFER_USE_CLS
+    // TODO(dfried): if this is actually useful, clean this up
+    int max_index = batch_sentences[instance_within_batch].word_piece_ids.size() - (BERT_BUFFER_LSTM_USE_CLS_SEP ? 1 : 2);
+
     for (int word_index = 0; word_index <= max_index; word_index++) {
-      int embedding_index = word_index + 1;
+      int embedding_index = BERT_BUFFER_LSTM_USE_CLS_SEP ? word_index : word_index + 1;
       if (word_index == max_index && BERT_BUFFER_USE_CLS) {
+        // use CLS instead of SEP
+        assert(!BERT_BUFFER_LSTM_USE_CLS_SEP);
         embedding_index = 0;
       }
       int64_t feat_index = instance_within_batch * num_words * BERT_DIM + embedding_index * BERT_DIM;
@@ -2201,6 +2229,28 @@ int main(int argc, char** argv) {
 
   BERT_BUFFER_LSTM = conf.count("bert_buffer_lstm");
   BERT_BUFFER_USE_CLS = conf.count("bert_buffer_use_cls");
+  BERT_BUFFER_LSTM_USE_CLS_SEP = conf.count("bert_buffer_lstm_use_cls_sep");
+
+  if (BERT_BUFFER_LSTM_USE_CLS_SEP && !BERT) {
+    cerr << "must set --bert if --bert_buffer_lstm_use_cls_sep is set" << endl;
+    return 1;
+  }
+
+
+  if (BERT_BUFFER_LSTM_USE_CLS_SEP && REVERSE_TREES) {
+    cerr << "--bert_buffer_lstm_use_cls_sep and --reverse_trees not currently implemented" << endl;
+    return 1;
+  }
+
+  if (BERT_BUFFER_LSTM_USE_CLS_SEP && ! BERT_BUFFER_LSTM) {
+    cerr << "must set --bert_buffer_lstm if --bert_buffer_lstm_use_cls_sep is set" << endl;
+    return 1;
+  }
+
+  if (BERT_BUFFER_LSTM_USE_CLS_SEP && BERT_BUFFER_USE_CLS) {
+    cerr << "cannot set both --bert_buffer_use_cls and --bert_buffer_lstm_use_cls_sep" << endl;
+    return 1;
+  }
 
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
@@ -3844,4 +3894,34 @@ int main(int argc, char** argv) {
       cerr << "gold: mean gold probability: " << streaming_gold_prob.mean_value() << " stddev gold probability: " << streaming_entropy.std << " avg log likelihood: " << -neg_log_likelihood / (test_indices.size()) << " actions correct: " << actions_correct / num_actions << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();
     }
   }
+
+  if (conf.count("interactive")) {
+    boost::asio::io_service io_service;
+
+    boost::asio::posix::stream_descriptor in(io_service, ::dup(STDIN_FILENO));
+    //boost::asio::posix::stream_descriptor out(io_service, ::dup(STDOUT_FILENO));
+
+
+    while (true) {
+      try {
+        boost::asio::streambuf input_buffer;
+        size_t n_read = boost::asio::read_until(in, input_buffer, '\n');
+        input_buffer.commit(n_read);
+        std::istream buffer(&input_buffer);
+        std::stringstream string_buffer;
+        string_buffer << buffer.rdbuf();
+        cerr << string_buffer.str() << endl;
+        boost::property_tree::ptree data;
+        boost::property_tree::read_json(string_buffer, data);
+
+        for (auto &property: data) {
+          cerr << property.first << endl;
+        }
+      } catch (const std::exception& e) {
+        cerr << e.what() << endl;
+      }
+    }
+
+  }
+
 }
