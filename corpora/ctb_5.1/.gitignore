@@ -1,0 +1,4 @@
+*.original
+*.stripped
+in_order/
+top_down/

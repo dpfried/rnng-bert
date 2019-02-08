@@ -1,90 +1,7 @@
 import sys
 import get_dictionary
-
-# tokens is a list of tokens, so no need to split it again
-def unkify(tokens, words_dict):
-    final = []
-    for token in tokens:
-        # only process the train singletons and unknown words
-        if len(token.rstrip()) == 0:
-            final.append('UNK')
-        elif not(token.rstrip() in words_dict):
-            numCaps = 0
-            hasDigit = False
-            hasDash = False
-            hasLower = False
-            for char in token.rstrip():
-                if char.isdigit():
-                    hasDigit = True
-                elif char == '-':
-                    hasDash = True
-                elif char.isalpha():
-                    if char.islower():
-                        hasLower = True
-                    elif char.isupper():
-                        numCaps += 1
-            result = 'UNK'
-            lower = token.rstrip().lower()
-            ch0 = token.rstrip()[0]
-            if ch0.isupper():
-                if numCaps == 1:
-                    result = result + '-INITC'
-                    if lower in words_dict:
-                        result = result + '-KNOWNLC'
-                else:
-                    result = result + '-CAPS'
-            elif not(ch0.isalpha()) and numCaps > 0:
-                result = result + '-CAPS'
-            elif hasLower:
-                result = result + '-LC'
-            if hasDigit:
-                result = result + '-NUM'
-            if hasDash:
-                result = result + '-DASH'
-            if lower[-1] == 's' and len(lower) >= 3:
-                ch2 = lower[-2]
-                if not(ch2 == 's') and not(ch2 == 'i') and not(ch2 == 'u'):
-                    result = result + '-s'
-            elif len(lower) >= 5 and not(hasDash) and not(hasDigit and numCaps > 0):
-                if lower[-2:] == 'ed':
-                    result = result + '-ed'
-                elif lower[-3:] == 'ing':
-                    result = result + '-ing'
-                elif lower[-3:] == 'ion':
-                    result = result + '-ion'
-                elif lower[-2:] == 'er':
-                    result = result + '-er'
-                elif lower[-3:] == 'est':
-                    result = result + '-est'
-                elif lower[-2:] == 'ly':
-                    result = result + '-ly'
-                elif lower[-3:] == 'ity':
-                    result = result + '-ity'
-                elif lower[-1] == 'y':
-                    result = result + '-y'
-                elif lower[-2:] == 'al':
-                    result = result + '-al'
-            final.append(result)
-        else:
-            final.append(token.rstrip())
-    return final
-
-def is_next_open_bracket(line, start_idx):
-    for char in line[(start_idx + 1):]:
-        if char == '(':
-            return True
-        elif char == ')':
-            return False
-    raise IndexError('Bracket possibly not balanced, open bracket not followed by closed bracket')
-
-def get_between_brackets(line, start_idx):
-    output = []
-    for char in line[(start_idx + 1):]:
-        if char == ')':
-            break
-        assert not(char == '(')
-        output.append(char)
-    return ''.join(output)
+from get_oracle import unkify, get_nonterminal
+from get_dictionary import is_next_open_bracket, get_between_brackets
 
 # start_idx = open bracket
 #def skip_terminals(line, start_idx):
@@ -116,17 +33,6 @@ def get_tags_tokens_lowercase(line):
         output_tokens.append(terminal_split[1])
         output_lowercase.append(terminal_split[1].lower())
     return [output_tags, output_tokens, output_lowercase]
-
-def get_nonterminal(line, start_idx):
-    assert line[start_idx] == '(' # make sure it's an open bracket
-    output = []
-    for char in line[(start_idx + 1):]:
-        if char == ' ':
-            break
-        assert not(char == '(') and not(char == ')')
-        output.append(char)
-    return ''.join(output)
-
 
 def get_actions(line):
     output_actions = []
@@ -160,42 +66,45 @@ def get_actions(line):
     return output_actions
 
 def main():
-    if len(sys.argv) != 3:
-        raise NotImplementedError('Program only takes two arguments:  train file and dev file (for vocabulary mapping purposes)')
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("dictionary_file")
+    parser.add_argument("corpus_file")
+    parser.add_argument("--no_morph_aware_unking", action='store_true')
+    args = parser.parse_args()
+
     # train_file = open(sys.argv[1], 'r')
     # # lines = train_file.readlines()
     # words_list = set(get_dictionary.get_dict(train_file) )
     # train_file.close()
-    dictionary_file = open(sys.argv[1], 'r')
-    words_list = set(line.strip() for line in dictionary_file)
-    dictionary_file.close()
+    with open(args.dictionary_file, 'r') as f:
+        words_list = set(line.strip() for line in f)
 
-    dev_file = open(sys.argv[2], 'r')
-    line_ctr = 0
-    # get the oracle for the train file
-    for i, line in enumerate(dev_file):
-        if i % 1000 == 0:
-            sys.stderr.write("\rget oracle %d" % i)
-        line_ctr += 1
-        # assert that the parenthesis are balanced
-        if line.count('(') != line.count(')'):
-            raise NotImplementedError('Unbalanced number of parenthesis in line ' + str(line_ctr))
-        # first line: the bracketed tree itself itself
-        print('# ' + line.rstrip())
-        tags, tokens, lowercase = get_tags_tokens_lowercase(line)
-        assert len(tags) == len(tokens)
-        assert len(tokens) == len(lowercase)
-        #print ' '.join(tags)
-        print(' '.join(tokens))
-        #print ' '.join(lowercase)
-        unkified = unkify(tokens, words_list)
-        print(' '.join(unkified))
-        output_actions = get_actions(line)
-        for action in output_actions:
-            print(action)
-        print('')
-    dev_file.close()
+    with open(args.corpus_file, 'r') as dev_file:
+        line_ctr = 0
+        # get the oracle for the train file
+        for i, line in enumerate(dev_file):
+            if i % 1000 == 0:
+                sys.stderr.write("\rget oracle %d" % i)
+            line_ctr += 1
+            # assert that the parenthesis are balanced
+            if line.count('(') != line.count(')'):
+                raise NotImplementedError('Unbalanced number of parenthesis in line ' + str(line_ctr))
+            # first line: the bracketed tree itself itself
+            print('# ' + line.rstrip())
+            tags, tokens, lowercase = get_tags_tokens_lowercase(line)
+            assert len(tags) == len(tokens)
+            assert len(tokens) == len(lowercase)
+            #print ' '.join(tags)
+            print(' '.join(tokens))
+            #print ' '.join(lowercase)
+            unkified = unkify(tokens, words_list, not args.no_morph_aware_unking)
+            print(' '.join(unkified))
+            output_actions = get_actions(line)
+            for action in output_actions:
+                print(action)
+            print('')
 
 
-if __name__ == "__main__":
-    main()
+    if __name__ == "__main__":
+        main()

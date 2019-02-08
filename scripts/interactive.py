@@ -13,16 +13,16 @@ with open(dictionary_file, 'r') as f:
 
 morph_aware_unking = True
 
-model = "models/ntparse_pos_pretrained_inorder_2_32_128_16_128-seed1-pid13621_best-epoch-7_it-8-f1-3.97_model/"
+model = "models/inorder_bert_large_bs=32_lr=2e-5_adam_patience=2_best-epoch-14_it-6121-f1-95.71_model"
 
 command = "build/nt-parser/nt-parser \
+        --cnn-mem 1000,0,500 \
         --model_dir {}\
-        -T corpora/english_small/in_order/train.oracle \
+        -T corpora/english/in_order/train.oracle \
         --interactive \
         --inorder \
-        -P \
-        --pretrained_dim 100 \
-        -w embeddings/sskip.100.filtered.vectors \
+        --bert \
+        --bert_large \
         --lstm_input_dim 128 \
         --hidden_dim 128 ".format(model)
 
@@ -64,7 +64,7 @@ if __name__ == "__main__":
 
     while True:
         line = proc.stdout.readline().decode("utf-8")
-        print(line)
+        #print(line)
         if line.startswith("READY"):
             break
 

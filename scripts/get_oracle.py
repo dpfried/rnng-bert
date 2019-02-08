@@ -261,9 +261,8 @@ def main():
     # train_file = open(sys.argv[1], 'r')
     # words_list = set(get_dictionary.get_dict(train_file))
     # train_file.close()
-    dictionary_file = open(args.dictionary_file, 'r')
-    words_list = set(line.strip() for line in dictionary_file)
-    dictionary_file.close()
+    with open(args.dictionary_file, 'r') as f:
+        words_list = set(line.strip() for line in f)
 
     # dev_lines = dev_file.readlines()
     line_ctr = 0

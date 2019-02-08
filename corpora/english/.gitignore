@@ -1,2 +1,3 @@
 *.stripped
 *.oracle
+predictions/

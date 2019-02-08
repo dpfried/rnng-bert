@@ -182,6 +182,9 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("bert_large", "use BERT-Large (otherwise use BERT-Base)")
           ("bert_feature_downscale", po::value<float>(), "scale down BERT features by this much")
 
+          ("bert_model_dir", po::value<string>(), "path to directory containing the BERT model (overrides defaults: bert_models/uncased_L-12_H-768_A-12 or bert_models/uncased_L-24_H-1024_A-16 for BERT-large")
+          ("bert_graph_path", po::value<string>(), "path to *_graph.pb file containing the BERT graph (overrides defaults: bert_models/uncased_L-12_H-768_A-12_graph.pb or bert_models/uncased_L-24_H-1024_A-16_graph.pb for BERT-large")
+
           ("bert_buffer_lstm", "run the regular buffer lstm over the BERT embeddings")
           ("bert_buffer_use_cls", "use the BERT CLS embedding as the buffer guard")
           ("bert_buffer_lstm_use_cls_sep", "use both CLS and SEP in the BERT lstm buffer")
@@ -2223,6 +2226,14 @@ int main(int argc, char** argv) {
       BERT_FEATURE_DOWNSCALE = conf["bert_feature_downscale"].as<float>();
     } else {
       BERT_FEATURE_DOWNSCALE = BERT_LARGE ? 6.0 : 4.0;
+    }
+    if (conf.count("bert_model_dir")) {
+      BERT_MODEL_PATH = conf["bert_model_dir"].as<string>();
+      if (!conf.count("bert_graph_path")) {
+        cerr << "must set --bert_graph_path if --bert_model_dir is set" << endl;
+        abort();
+      }
+      BERT_GRAPH_PATH = conf["bert_graph_path"].as<string>();
     }
     cerr << "using BERT graph " << BERT_GRAPH_PATH << " with dimension " << BERT_DIM << endl;
     cerr << "BERT_FEATURE_DOWNSCALE: " << BERT_FEATURE_DOWNSCALE << endl;
