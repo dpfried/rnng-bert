@@ -1,3 +1,4 @@
 *.clean
 *.dictionary
 english_small/
+*.oracle

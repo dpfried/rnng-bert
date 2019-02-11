@@ -212,7 +212,7 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
     }
   }
   cerr << endl;
-  cerr << "Loaded " << sents.size() << " sentences\n";
+  cerr << "Loaded " << sent_count << " sentences\n";
   cerr << "    cumulative      action vocab size: " << ad->size() << endl;
   cerr << "    cumulative    terminal vocab size: " << d->size() << endl;
   cerr << "    cumulative nonterminal vocab size: " << nd->size() << endl;

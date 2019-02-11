@@ -147,8 +147,6 @@ if __name__ == "__main__":
     parser.add_argument('files', metavar='FILE', nargs='*', help='files to read, if empty, stdin is used')
     args = parser.parse_args()
 
-    remove_symbols = set(args.remove_symbols)
-
     for line in fileinput.input(files=args.files if len(args.files) > 0 else ('-', )):
         line = line.strip()
         if line.startswith("( "):
@@ -185,5 +183,5 @@ if __name__ == "__main__":
         # print(linearized)
         tree = PhraseTree.parse(line)
         if args.remove_symbols:
-            tree = tree.remove_nodes(remove_symbols)
+            tree = tree.remove_nodes(set(args.remove_symbols))
         print(tree)
