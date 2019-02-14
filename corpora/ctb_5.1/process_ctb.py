@@ -9,6 +9,7 @@ from os import listdir
 from os.path import isfile, join, isdir
 
 import nltk
+import glob
 
 import errno
 from os import makedirs
@@ -42,37 +43,53 @@ def combine_files(fids, out, tb):
     print('%d sentences.' % total_sentence)
     print()
 
-def convert(ctb_root, out_root):
+
+def convert(ctb_root,
+            out_root,
+            encoding='GB2312',
+            filter_fn=lambda f: f.endswith('.fid')):
     ctb_root = join(ctb_root, 'bracketed')
-    fids = [f for f in listdir(ctb_root) if isfile(join(ctb_root, f)) and f.endswith('.fid')]
+    fids = [f for f in listdir(ctb_root) if isfile(join(ctb_root, f)) and filter_fn(f)]
     make_sure_path_exists(out_root)
     for f in fids:
-        with open(join(ctb_root, f), encoding='GB2312') as src, open(join(out_root, f), 'w') as out:
-            in_s_tag = False
+        fname = join(ctb_root, f)
+        with open(fname, encoding=encoding) as src, open(join(out_root, f), 'w') as out:
             try:
                 for line in src:
-                    if line.startswith('<S ID='):
-                        in_s_tag = True
-                    elif line.startswith('</S>'):
-                        in_s_tag = False
-                    elif in_s_tag:
+                    if not (line.strip().startswith('<') and line.strip().endswith('>')):
                         out.write(line)
-            except:
+                        # if any(tok == 'CP' for tok in line.split()):
+                        #     raise Exception("{}: {}".format(f, line))
+                # in_s_tag = False
+                # for line in src:
+                #     if line.startswith('<S ID='):
+                #         in_s_tag = True
+                #     elif line.startswith('</S>'):
+                #         in_s_tag = False
+                #     elif in_s_tag:
+                #         out.write(line)
+            except Exception as e:
+                print("error for file {}".format(fname))
+                print(e)
                 pass
 
 
-def combine_fids(fids, out_path):
+def combine_fids(treebank, root_path, fids, out_path, suffix_glob='fid', pad_hundreds=False):
     print('Generating ' + out_path)
     files = []
     for fid in fids:
-        f = 'chtb_%03d.fid' % fid
-        if fid >= 1000:
-            f = 'chtb_%04d.fid' % fid
-        if isfile(join(ctb_in_nltk, f)):
-            files.append(f)
+        if not pad_hundreds and fid < 1000:
+            f = 'chtb_%03d.%s' % (fid, suffix_glob)
+        else:
+            f = 'chtb_%04d.%s' % (fid, suffix_glob)
+        matching_files = glob.glob(join(root_path, f))
+        assert len(matching_files) <= 1
+        if len(matching_files) == 0:
+            print("no file found for id %s" % fid)
+            continue
+        files.append(matching_files[0])
     with open(out_path, 'w') as out:
-        combine_files(files, out, ctb)
-
+        combine_files(files, out, treebank)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Combine Chinese Treebank 5.1 fid files into train/dev/test set')
@@ -121,6 +138,6 @@ if __name__ == '__main__':
 
     print("total num files: %d" % len(training + development + test))
 
-    combine_fids(training, 'train.gold.original')
-    combine_fids(development, 'dev.gold.original')
-    combine_fids(test, 'test.gold.original')
+    combine_fids(ctb, ctb_in_nltk, training, 'train.gold.original')
+    combine_fids(ctb, ctb_in_nltk, development, 'dev.gold.original')
+    combine_fids(ctb, ctb_in_nltk, test, 'test.gold.original')

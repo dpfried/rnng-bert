@@ -50,7 +50,9 @@ class Tokenizer(object):
 
         cleaned_words = []
         for word in sentence:
-            word = BERT_TOKEN_MAPPING.get(word, word).replace('\\/', '/').replace('\\*', '*')
+            word = BERT_TOKEN_MAPPING.get(word, word)
+            word = word.replace('\\/', '/').replace('\\*', '*')
+            word = word.replace('-LSB-', '[').replace('-RSB-', ']').replace('-LRB-', '(').replace('-RRB-', ')') # added for Genia
             if word == "n't" and cleaned_words:
                 cleaned_words[-1] = cleaned_words[-1] + "n"
                 word = "'t"

@@ -2382,7 +2382,8 @@ int main(int argc, char** argv) {
      // problems with UNKifying the lowercased data which needs to be loaded
   adict.Freeze();
   ntermdict.Freeze();
-  posdict.Freeze();
+  if (USE_POS)
+          posdict.Freeze();
 
   morphology_classes.Freeze();
   assert(morphology_dicts.size() == morphology_classes.size());

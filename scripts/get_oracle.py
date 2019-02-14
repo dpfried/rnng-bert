@@ -257,6 +257,7 @@ def main():
     parser.add_argument("--bert_model_dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uncased_L-12_H-768_A-12"))
     parser.add_argument("--collapse_unary", action='store_true', help='collapse unary chains, with nonterminals separated by "+"')
     parser.add_argument("--reverse_trees", action='store_true', help='treat trees as horizontally mirrored for the sake of traversal orders')
+    parser.add_argument("--is_candidate_file", action='store_true')
     args = parser.parse_args()
     # train_file = open(sys.argv[1], 'r')
     # words_list = set(get_dictionary.get_dict(train_file))
@@ -277,7 +278,10 @@ def main():
     bert_tokenizer = bert_tokenize.Tokenizer(args.bert_model_dir)
     # use fileinput so that we can pass '-' to read from stdin
     for line in fileinput.input(files=[args.corpus_file]):
-        line = line.split("|||")[-1].strip()
+        if args.is_candidate_file:
+            line = line.split("|||")[-1].strip()
+        else:
+            line = line.strip()
         line_ctr += 1
         if line_ctr % 1000 == 0:
             sys.stderr.write("\rget oracle %d" % line_ctr)
