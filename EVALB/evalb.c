@@ -59,17 +59,17 @@
 /******************/
 
 #define MAX_SENT_LEN           5000
-#define MAX_WORD_IN_SENT        200
-#define MAX_BRACKET_IN_SENT     200
+#define MAX_WORD_IN_SENT        2000
+#define MAX_BRACKET_IN_SENT     2000
 #define MAX_WORD_LEN            100
-#define MAX_LABEL_LEN            30
+#define MAX_LABEL_LEN            300
 #define MAX_QUOTE_TERM           20
 
 #define MAX_DELETE_LABEL        100
 #define MAX_EQ_LABEL            100
 #define MAX_EQ_WORD             100
 
-#define MAX_LINE_LEN            500
+#define MAX_LINE_LEN           5000
 
 #define DEFAULT_MAX_ERROR        10
 #define DEFAULT_CUT_LEN          40
@@ -252,6 +252,13 @@ int EQ_label_n = 0;
 s_equiv EQ_word[MAX_EQ_WORD];
 int EQ_word_n = 0;
 
+/*------------------------------------------*/
+/* Treat word mismatches as error?          */
+/*    0: no                                 */
+/*    1: yes                                */
+/*------------------------------------------*/
+int Ignore_word_mismatch = 0;
+
 
 
 /************************/
@@ -311,8 +318,8 @@ char *argv[];
 {
     char *filename1, *filename2;
     FILE *fd1, *fd2;
-    unsigned char buff[5000];
-    unsigned char buff1[5000];
+    unsigned char buff[MAX_LINE_LEN];
+    unsigned char buff1[MAX_LINE_LEN];
 
     filename1=NULL;
     filename2=NULL;
@@ -349,6 +356,11 @@ char *argv[];
 		    read_parameter_file(*argv);
 		    goto nextarg;
 
+                  case 'w':
+                    Ignore_word_mismatch = 1;
+                    goto nextarg;
+
+
 		  default:
 		    Usage();
 		    exit(0);
@@ -376,7 +388,7 @@ char *argv[];
 
     print_head();
 
-    for(Line=1;fgets(buff,5000,fd1)!=NULL;Line++){
+    for(Line=1;fgets(buff,MAX_LINE_LEN,fd1)!=NULL;Line++){
     
 	init();
 
@@ -386,7 +398,7 @@ char *argv[];
 	strcpy(buff1,buff);
 
       /* READ 2 */
-	if(fgets(buff,5000,fd2)==NULL){
+	if(fgets(buff,MAX_LINE_LEN,fd2)==NULL){
 	    Error("Number of lines unmatch (too many lines in gold file)\n");
 	    break;
 	}
@@ -401,7 +413,7 @@ char *argv[];
 	}
     }
 
-    if(fgets(buff,5000,fd2)!=NULL){
+    if(fgets(buff,MAX_LINE_LEN,fd2)!=NULL){
 	Error("Number of lines unmatch (too many lines in test file)\n");
     }
 
@@ -569,6 +581,7 @@ char *param, *value;
     }else if(STRNCMP("DELETE_LABEL")){
 
 	Delete_label[Delete_label_n] = (char *)malloc(strlen(value)+1);
+  printf("%s\n", value);
 	strcpy(Delete_label[Delete_label_n],value);
 	Delete_label_n++;
 
@@ -840,7 +853,7 @@ calc_result(unsigned char *buf1,unsigned char *buf)
     }
 
     for(i=0;i<wn1;i++){
-	if(word_comp(terminal1[i].word,terminal2[i].word)==0){
+	if(word_comp(terminal1[i].word,terminal2[i].word)==0 && (!Ignore_word_mismatch)) {
 	    Error("Words unmatch (%s|%s)\n",terminal1[i].word,
                                             terminal2[i].word);
 	    individual_result(0,0,0,0,0,0);
