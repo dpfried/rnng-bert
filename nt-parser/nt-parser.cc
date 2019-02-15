@@ -261,6 +261,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 
           ("block_count", po::value<int>()->default_value(0), "divide the dev set up into this many blocks and only decode one of them (indexed by block_num)")
           ("block_num", po::value<int>()->default_value(0), "decode only this block (0-indexed), must be used with block_count")
+          ("decode_start_index", po::value<int>()->default_value(0), "start here")
 
           ("interactive", "Run in interactive mode")
 
@@ -357,11 +358,13 @@ static bool IsActionForbidden_Discriminative(
       }
       // TODO(dfried): doesn't this need to check if the last action was an NT
       //  to know whether we're increasing the length of the unary chain?
-      if(unary > MAX_UNARY) return true;
+      if(prev_a == 'N' && unary > MAX_UNARY) return true;
       if(nopen_parens == 0) return true;
       return false;
     }
-    assert(false); // should never reach here
+    //assert(false); // should never reach here
+    cerr << "Logic error for in-order action check" << endl;
+    abort();
 
   } else { // standard top-down RNNG
     assert(is_shift || is_reduce || is_nt) ;
@@ -543,6 +546,20 @@ struct AbstractParser {
     while(!state->is_finished()) {
       vector<unsigned> actions_in_support;
       vector<unsigned> actions_can_take;
+      /*
+      if (state->get_valid_actions().empty()) {
+        cerr << "no valid actions:" << endl;
+        cerr << "unary: " << state->get_unary() << endl;
+        for (unsigned raw: sent.non_unked_raw) {
+          cerr << non_unked_termdict.Convert(raw) << " ";
+        }
+        cerr << endl;
+        for (unsigned ix: results) {
+          cerr << adict.Convert(ix) << " ";
+        }
+        cerr << endl;
+      }
+      */
       std::tie(actions_in_support, actions_can_take) = get_support_and_can_take(
               state->get_valid_actions(), action_count, bracket_constraint_actions
       );
@@ -3935,6 +3952,9 @@ int main(int argc, char** argv) {
        */
 
       int sii = 0;
+      if (conf.count("decode_start_index")) {
+        sii = conf["decode_start_index"].as<int>();
+      }
       while (sii < test_indices.size()) {
         int this_batch_size = min(eval_batch_size, stop_index - sii);
         //const vector<parser::Sentence> batch_sentences(test_corpus.sents.begin() + sii, test_corpus.sents.begin() + sii + this_batch_size);
