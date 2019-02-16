@@ -117,7 +117,14 @@ def get_tags_tokens_lowercase_morphfeats(line):
     output_lowercase = []
     output_morphfeats = []
     for terminal in output:
-        tag_and_feats, token = terminal.split()
+        splits = terminal.split()
+        tag_and_feats = splits[0]
+        token_splits = splits[1:]
+        if len(token_splits) > 1:
+            sys.stderr.write("warning: whitespace found in token {} on line {}\n".format(' '.join(token_splits), line.rstrip()))
+        #tag_and_feats, token = terminal.split()
+        token = ' '.join(token_splits)
+
         if '##' in tag_and_feats:
             tag, morph_feats, rest = tag_and_feats.split('##')
             assert not rest
@@ -273,6 +280,8 @@ def main():
     max_cons_nts_ix = None
     max_same_cons_nts = 0
     max_same_cons_nts_ix = None
+    max_unary_count = 0
+    max_unary_count_ix = None
     # get the oracle for the train file
     print("loading BERT tokenizer from %s" % (args.bert_model_dir), file=sys.stderr)
     bert_tokenizer = bert_tokenize.Tokenizer(args.bert_model_dir)
@@ -329,14 +338,30 @@ def main():
         if args.in_order:
             _, trees = construct(output_actions, [])
             output_actions = get_in_order_actions(trees[0], [])
-        for action in output_actions:
+        unary_count = 0
+        for action_ix, action in enumerate(output_actions):
             print(action)
+            if args.in_order:
+                if action.startswith("SHIFT"):
+                    unary_count = 0
+                elif action.startswith("REDUCE"):
+                    if action_ix > 0:
+                        if output_actions[action_ix-1].startswith("NT"):
+                            unary_count += 1
+                            if unary_count > max_unary_count:
+                                max_unary_count = unary_count 
+                                max_unary_count_ix = line_ctr
+                        elif output_actions[action_ix-1].startswith("REDUCE"):
+                            unary_count = 0
         if args.in_order:
             print('TERM')
         print('')
+    print("", file=sys.stderr)
     print("max open nts: %d, line %d" % (max_open_nts, max_open_nts_ix), file=sys.stderr)
     print("max cons nts: %d, line %d" % (max_cons_nts, max_cons_nts_ix), file=sys.stderr)
     print("max same cons nts: %d, line %d" % (max_same_cons_nts, max_same_cons_nts_ix), file=sys.stderr)
+    if args.in_order:
+        print("max unary count: %d, line %d" % (max_unary_count, max_unary_count_ix), file=sys.stderr)
 
 if __name__ == "__main__":
     main()
