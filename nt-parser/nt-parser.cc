@@ -101,6 +101,8 @@ bool BRACKET_CONSTRAINED_TRAINING = false;
 
 bool IN_ORDER = false;
 
+unsigned MAX_UNARY = 3;
+
 bool COLLAPSE_UNARY = false;
 bool REVERSE_TREES = false;
 
@@ -159,6 +161,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("inorder", "super experimental implementation of Liu and Zhang 2017, breaks many of the other flags")
 
           ("collapse_unary", "assume that oracle files represent parses with collapsed unary chains. Don't allow producing unary chains, and uncollapse unaries when decoding (split on +)")
+          ("max_unary", po::value<unsigned>()->default_value(MAX_UNARY), "maximum size (-1) of a unary chain")
           ("reverse_trees", "assume that oracle files represent travels of mirrored trees (i.e. right-to-left). Mirror the trees when decoding")
 
           // data
@@ -321,7 +324,6 @@ static bool IsActionForbidden_Discriminative(
     assert(is_shift || is_reduce || is_nt || is_term) ;
     // TODO(dfried): use this
     static const unsigned MAX_OPEN_NTS = 100;
-    static const unsigned MAX_UNARY = 3;
 //  if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
     if (is_term){
       if(ssize == 2 && bsize == 1 && prev_a == 'R') return false;
@@ -356,8 +358,6 @@ static bool IsActionForbidden_Discriminative(
         }
         if (unary == 1 && prev_a == 'N' && bsize != 1) return true;
       }
-      // TODO(dfried): doesn't this need to check if the last action was an NT
-      //  to know whether we're increasing the length of the unary chain?
       if(prev_a == 'N' && unary > MAX_UNARY) return true;
       if(nopen_parens == 0) return true;
       return false;
@@ -546,7 +546,6 @@ struct AbstractParser {
     while(!state->is_finished()) {
       vector<unsigned> actions_in_support;
       vector<unsigned> actions_can_take;
-      /*
       if (state->get_valid_actions().empty()) {
         cerr << "no valid actions:" << endl;
         cerr << "unary: " << state->get_unary() << endl;
@@ -559,7 +558,6 @@ struct AbstractParser {
         }
         cerr << endl;
       }
-      */
       std::tie(actions_in_support, actions_can_take) = get_support_and_can_take(
               state->get_valid_actions(), action_count, bracket_constraint_actions
       );
@@ -2213,6 +2211,10 @@ int main(int argc, char** argv) {
   BRACKET_CONSTRAINED_TRAINING = conf.count("bracket_constrained");
 
   IN_ORDER = conf.count("inorder");
+
+  if (conf.count("max_unary")) {
+    MAX_UNARY = conf["max_unary"].as<unsigned>();
+  }
 
   COLLAPSE_UNARY = conf.count("collapse_unary");
   REVERSE_TREES = conf.count("reverse_trees");
