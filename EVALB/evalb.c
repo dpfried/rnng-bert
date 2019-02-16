@@ -581,7 +581,6 @@ char *param, *value;
     }else if(STRNCMP("DELETE_LABEL")){
 
 	Delete_label[Delete_label_n] = (char *)malloc(strlen(value)+1);
-  printf("%s\n", value);
 	strcpy(Delete_label[Delete_label_n],value);
 	Delete_label_n++;
 
