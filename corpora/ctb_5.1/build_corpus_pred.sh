@@ -1,9 +1,5 @@
 #!/bin/bash
 
-TRAIN="train.gold.original"
-DEV="dev.gold.original"
-TEST="test.gold.original"
-
 SCRIPT_DIR="../../scripts"
 
 REMOVE_TRACES=${SCRIPT_DIR}/remove_traces.py
@@ -14,25 +10,15 @@ NORMALIZE_UNICODE=${SCRIPT_DIR}/normalize_unicode.py
 
 BERT_PATH="../../bert_models/chinese_L-12_H-768_A-12/"
 
-python ${REMOVE_TRACES} < $TRAIN > train.gold.stripped
-python ${REMOVE_TRACES} < $DEV > dev.gold.stripped
-python ${REMOVE_TRACES} < $TEST > test.gold.stripped
-
-# python ${REMOVE_TRACES} < $TRAIN | python $NORMALIZE_UNICODE > train.gold.normed.stripped
-# python ${REMOVE_TRACES} < $DEV | python $NORMALIZE_UNICODE > dev.gold.normed.stripped
-# python ${REMOVE_TRACES} < $TEST | python $NORMALIZE_UNICODE > test.gold.normed.stripped
-
-DICTIONARY="train.dictionary"
+DICTIONARY="train.pred.dictionary"
 # DICTIONARY="train.normed.dictionary"
 
-python $GET_DICTIONARY train.gold.stripped > $DICTIONARY
-# python $GET_DICTIONARY train.gold.normed.stripped > $DICTIONARY
+python $GET_DICTIONARY train.pred.stripped > $DICTIONARY
 
 mkdir top_down 2> /dev/null
 mkdir in_order 2> /dev/null
 
-for SPLIT in train.gold dev.gold test.gold
-#for SPLIT in train.gold.normed dev.gold.normed test.gold.normed
+for SPLIT in train.pred dev.pred test.pred
 do
   # top_down discriminative
   python $GET_ORACLE $DICTIONARY ${SPLIT}.stripped --no_morph_aware_unking --bert_model_dir $BERT_PATH > top_down/${SPLIT}.oracle

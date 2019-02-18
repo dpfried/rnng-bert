@@ -37,15 +37,11 @@ class PhraseTree(object):
     def remove_nodes(self, symbol_list):
         children = []
         for child in self.children:
-            if child.symbol in symbol_list:
-                children.extend(child.children)
-            else:
-                children.append(child)
-        assert self.symbol not in symbol_list
-        return PhraseTree(self.symbol, 
-                          [child.remove_nodes(symbol_list) for child in children],
-                          self.sentence,
-                          leaf=self.leaf)
+            children.extend(child.remove_nodes(symbol_list))
+        if self.symbol in symbol_list:
+            return children
+        else:
+            return [PhraseTree(self.symbol, children, self.sentence, leaf=self.leaf)]
 
     def __str__(self):
         if self._str is None:
@@ -183,5 +179,7 @@ if __name__ == "__main__":
         # print(linearized)
         tree = PhraseTree.parse(line)
         if args.remove_symbols:
-            tree = tree.remove_nodes(set(args.remove_symbols))
+            trees = tree.remove_nodes(set(args.remove_symbols))
+            assert len(trees) == 1, "can't remove a root symbol!"
+            tree = trees[0]
         print(tree)
