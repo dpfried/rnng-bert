@@ -285,8 +285,6 @@ if not args.disable_bert:
     else:
         bert_saver = tf.train.Saver(bert_tvars)
 
-    bert_saver.restore(sess, os.path.join(args.bert_model_dir, "bert_model.ckpt"))
-
 # %%
 
 def conditional_print(do_print, tensor, message):
@@ -471,8 +469,11 @@ print("Saved tensorflow graph to", args.bert_output_file)
 
 # %%
 
+sess.run(init_op)
+if not args.disable_bert:
+    bert_saver.restore(sess, os.path.join(args.bert_model_dir, "bert_model.ckpt"))
+
 if args.output_checkpoint:
-    sess.run(init_op)
     saver.save(sess, args.output_checkpoint)
     print("Saved initial checkpoint to", args.output_checkpoint)
 
