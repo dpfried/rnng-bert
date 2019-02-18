@@ -19,6 +19,7 @@ parser.add_argument("--output_checkpoint")
 parser.add_argument("--feature_downscale", type=float, default=1.0)
 parser.add_argument("--num_nonbert_layers", type=int, default=0)
 parser.add_argument("--disable_bert", action="store_true")
+parser.add_argument("--extra_grad_clip", type=float, default=200.0)
 parser.add_argument("--nonbert_vocabulary_size", type=int, default=0)
 args = parser.parse_args()
 
@@ -300,7 +301,7 @@ def conditional_print_norm(do_print, tensor, message):
         lambda: tensor
         )
 
-def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
+def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160, extra_grad_clip=200.0):
     """Sets up backward pass and optimizer, with support for subbatching"""
     global_step = tf.train.get_or_create_global_step()
 
@@ -406,7 +407,7 @@ def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
             tf.global_norm(extra_grads),
             "Gradient norm for non-BERT encoder parameters: "
             )
-        extra_grads, _ = tf.clip_by_global_norm(extra_grads, clip_norm=200.0, use_norm=extra_grads_norm)
+        extra_grads, _ = tf.clip_by_global_norm(extra_grads, clip_norm=extra_grad_clip, use_norm=extra_grads_norm)
 
     grads = list(bert_grads) + list(extra_grads)
     tvars = list(bert_tvars) + list(extra_tvars)
@@ -424,7 +425,7 @@ def create_optimizer(ys, grad_ys, init_lr=5e-5, num_warmup_steps=160):
 
 # %%
 
-accumulate_op, train_op, zero_grad_op, learning_rate_var, warmup_steps_var = create_optimizer([word_features], [word_features_grad])
+accumulate_op, train_op, zero_grad_op, learning_rate_var, warmup_steps_var = create_optimizer([word_features], [word_features_grad], extra_grad_clip=args.extra_grad_clip)
 
 # %%
 

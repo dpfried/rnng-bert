@@ -107,6 +107,7 @@ bool COLLAPSE_UNARY = false;
 bool REVERSE_TREES = false;
 
 bool BERT = false;
+bool SELF_ATTEND_WORDS = false;
 
 bool BERT_BUFFER_LSTM = false;
 bool BERT_BUFFER_USE_CLS = false;
@@ -184,6 +185,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("bert", "use BERT to represent inputs")
           ("bert_large", "use BERT-Large (otherwise use BERT-Base)")
           ("bert_feature_downscale", po::value<float>(), "scale down BERT features by this much")
+
+          ("self_attend_words", "use self-attention over words, using a BERT graph")
 
           ("bert_model_dir", po::value<string>(), "path to directory containing the BERT model (overrides defaults: bert_models/uncased_L-12_H-768_A-12 or bert_models/uncased_L-24_H-1024_A-16 for BERT-large")
           ("bert_graph_path", po::value<string>(), "path to *_graph.pb file containing the BERT graph (overrides defaults: bert_models/uncased_L-12_H-768_A-12_graph.pb or bert_models/uncased_L-24_H-1024_A-16_graph.pb for BERT-large")
@@ -2082,12 +2085,32 @@ void bert_fw(WordFeaturizer* word_featurizer,
              vector<vector<shared_ptr<Parameters>>>& batch_bert_embeddings,
              TF_Tensor** feats_tensor,
              TF_Tensor** grads_tensor) {
+  bool is_training = grads_tensor != nullptr;
   int batch_size = batch_sentences.size();
   vector<vector<int32_t>> batch_input_ids;
   vector<vector<int32_t>> batch_word_end_mask;
-  for (auto &sent : batch_sentences) {
-    batch_input_ids.emplace_back(sent.word_piece_ids_flat);
-    batch_word_end_mask.emplace_back(sent.word_end_mask);
+  if (SELF_ATTEND_WORDS) {
+    cerr << "self_attend_words" << endl;
+    for (auto &sent : batch_sentences) {
+      vector<int32_t> this_end_mask(sent.size() + 2, 1);
+      vector<int32_t> this_input_ids;
+      this_input_ids.push_back(0); // CLS
+      for (int i = 0; i < sent.size(); i++) {
+        int wordid = sent.raw[i]; // this will be equal to unk at dev/test
+        if (is_training && singletons.size() > wordid && singletons[wordid] && rand01() > 0.5)
+          wordid = sent.unk[i];
+        this_input_ids.push_back(wordid+2);
+      }
+      this_input_ids.push_back(1); // SEP
+      batch_input_ids.emplace_back(this_input_ids);
+      batch_word_end_mask.emplace_back(this_end_mask);
+      assert(this_end_mask.size() == this_input_ids.size());
+    }
+  } else {
+    for (auto &sent : batch_sentences) {
+      batch_input_ids.emplace_back(sent.word_piece_ids_flat);
+      batch_word_end_mask.emplace_back(sent.word_end_mask);
+    }
   }
   assert(batch_input_ids.size() == batch_size);
   assert(batch_bert_embeddings.empty());
@@ -2228,6 +2251,15 @@ int main(int argc, char** argv) {
   BERT_LR = conf["bert_lr"].as<float>();
   BERT_WARMUP_STEPS = conf["bert_warmup_steps"].as<int>();
 
+  SELF_ATTEND_WORDS = conf.count("self_attend_words");
+
+  if (SELF_ATTEND_WORDS) {
+    if (!BERT) {
+      cerr << "must set --bert with --self_attend_words" << endl;
+      abort();
+    }
+  }
+
   bool spmrl = conf.count("spmrl");
 
   if (BERT) {
@@ -2256,6 +2288,10 @@ int main(int argc, char** argv) {
     }
     cerr << "using BERT graph " << BERT_GRAPH_PATH << " with dimension " << BERT_DIM << endl;
     cerr << "BERT_FEATURE_DOWNSCALE: " << BERT_FEATURE_DOWNSCALE << endl;
+  }
+
+  while (BERT_MODEL_PATH.back() == '/') {
+    BERT_MODEL_PATH.pop_back();
   }
 
   BERT_BUFFER_LSTM = conf.count("bert_buffer_lstm");
@@ -2793,7 +2829,7 @@ int main(int argc, char** argv) {
 
     int dev_check_frequency = conf["dev_check_frequency"].as<int>();
 
-    string bert_model_path = BERT_MODEL_PATH + "/bert_model.ckpt";
+    string bert_model_path = bert_param_path(BERT_MODEL_PATH);
 
     if (conf.count("model_dir")) {
       string model_dir = conf["model_dir"].as<string>();
