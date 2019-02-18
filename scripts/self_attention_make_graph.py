@@ -15,6 +15,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--bert_model_dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uncased_L-12_H-768_A-12"))
 parser.add_argument("--bert_output_file")
+parser.add_argument("--output_checkpoint")
 parser.add_argument("--feature_downscale", type=float, default=1.0)
 parser.add_argument("--num_nonbert_layers", type=int, default=0)
 parser.add_argument("--disable_bert", action="store_true")
@@ -28,6 +29,16 @@ if not args.bert_output_file:
         model_name += "_FDS-{}".format(args.feature_downscale)
     model_name = "{}_graph.pb".format(model_name)
     args.bert_output_file = os.path.join("bert_models", os.path.basename(model_name))
+
+if args.disable_bert and args.num_nonbert_layers == 0:
+    raise ValueError("Must use BERT or nonzero number of non-BERT layers")
+if args.disable_bert and args.nonbert_vocabulary_size == 0:
+    raise ValueError("Must pass --nonbert_vocabulary_size when not using BERT")
+
+if args.num_nonbert_layers > 1 and not args.output_checkpoint:
+    raise Exception("When num_nonbert_layers > 0, --output_checkpoint is required")
+elif args.num_nonbert_layers == 0 and args.output_checkpoint:
+    raise Exception("When num_nonbert_layers == 0, --output_checkpoint must not be specified")
 
 # %%
 
@@ -183,6 +194,20 @@ def make_stacks(input, nonpad_ids, dim_flat, dim_padded, valid_mask, num_stacks)
         res = make_ff(res, f'encoder.ff_{i}', name=f'ff_{i}')
     return res
 
+def make_word_embeddings(input_ids):
+    assert args.nonbert_vocabulary_size > 0
+    word_embedding_table = tf.get_variable(
+        'word_embedding_table',
+        shape=[args.nonbert_vocabulary_size, 512],
+        initializer=tf.initializers.random_normal())
+
+    flat_input_ids = tf.reshape(input_ids, [-1])
+    subword_features = tf.gather(word_embedding_table, flat_input_ids)
+    word_features_packed = tf.gather(
+        tf.reshape(subword_features, [-1, int(subword_features.shape[-1])]),
+        tf.to_int32(tf.where(tf.reshape(word_end_mask, (-1,))))[:,0])
+    return word_features_packed
+
 def make_bert_projection(word_features_packed):
     stdv = 1 / np.sqrt(config.hidden_size)
     initializer = tf.initializers.random_uniform(-stdv, stdv)
@@ -218,7 +243,8 @@ def get_word_features():
 
     if args.num_nonbert_layers > 0:
         if args.disable_bert:
-            raise NotImplementedError("Using only factored self-attention without BERT is not implemented yet")
+            print("Applying factored self-attention on top of learned word embeddings")
+            input_dat = make_word_embeddings(input_ids)
         else:
             print("Applying factored self-attention on top of BERT")
             input_dat = make_bert_projection(word_features_packed)
@@ -250,9 +276,15 @@ word_features_grad = tf.placeholder(shape=(None, None, word_features.shape[-1]),
 
 # %%
 
+saver = tf.train.Saver()
+
 if not args.disable_bert:
-    saver = tf.train.Saver(bert_tvars)
-    saver.restore(sess, os.path.join(args.bert_model_dir, "bert_model.ckpt"))
+    if args.num_nonbert_layers == 0:
+        bert_saver = saver
+    else:
+        bert_saver = tf.train.Saver(bert_tvars)
+
+    bert_saver.restore(sess, os.path.join(args.bert_model_dir, "bert_model.ckpt"))
 
 # %%
 
@@ -434,6 +466,13 @@ checkpoint_name: {saver.saver_def.filename_tensor_name}
 with open(args.bert_output_file, 'wb') as f:
     f.write(sess.graph_def.SerializeToString())
 
-print("Saved tensorflow graph to to", args.bert_output_file)
+print("Saved tensorflow graph to", args.bert_output_file)
+
+# %%
+
+if args.output_checkpoint:
+    sess.run(init_op)
+    saver.save(sess, args.output_checkpoint)
+    print("Saved initial checkpoint to", args.output_checkpoint)
 
 # %%
