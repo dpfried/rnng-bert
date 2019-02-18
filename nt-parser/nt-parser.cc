@@ -2090,7 +2090,6 @@ void bert_fw(WordFeaturizer* word_featurizer,
   vector<vector<int32_t>> batch_input_ids;
   vector<vector<int32_t>> batch_word_end_mask;
   if (SELF_ATTEND_WORDS) {
-    cerr << "self_attend_words" << endl;
     for (auto &sent : batch_sentences) {
       vector<int32_t> this_end_mask(sent.size() + 2, 1);
       vector<int32_t> this_input_ids;

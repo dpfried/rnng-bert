@@ -17,7 +17,7 @@ prefix="inorder_self-att_bs=${batch_size}_lr=${bert_lr}_adam_patience=${lr_decay
 
 build/nt-parser/nt-parser \
     --cnn-seed $dynet_seed \
-    --cnn-mem 1000,1000,500 \
+    --cnn-mem 3000,3000,500 \
     --git_state \
     -T corpora/english/in_order/train.oracle \
     -d corpora/english/in_order/dev.oracle \
