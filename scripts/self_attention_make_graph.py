@@ -103,6 +103,8 @@ HPARAMS = {
     'attention_dropout': 0.2,
     'relu_dropout': 0.1,
     'residual_dropout': 0.2,
+    'word_emb_dropout': 0.4,
+    'morpho_emb_dropout': 0.2,
 }
 
 def make_layer_norm(input, torch_name, name):
@@ -204,15 +206,17 @@ def make_word_embeddings(input_ids):
 
     flat_input_ids = tf.reshape(input_ids, [-1])
     subword_features = tf.gather(word_embedding_table, flat_input_ids)
-    word_features_packed = tf.gather(
+    input_dat = tf.gather(
         tf.reshape(subword_features, [-1, int(subword_features.shape[-1])]),
         tf.to_int32(tf.where(tf.reshape(word_end_mask, (-1,))))[:,0])
-    return word_features_packed
+    input_dat = dropout_only_if_training(input_dat, HPARAMS['word_emb_dropout'])
+    return input_dat
 
 def make_bert_projection(word_features_packed):
     stdv = 1 / np.sqrt(config.hidden_size)
     initializer = tf.initializers.random_uniform(-stdv, stdv)
     input_dat = tf.layers.dense(word_features_packed, 512, kernel_initializer=initializer, use_bias=False)
+    input_dat = dropout_only_if_training(input_dat, HPARAMS['morpho_emb_dropout'])
     return input_dat
 
 def make_encoder(input_dat, nonpad_ids, dim_flat, dim_padded, valid_mask, num_stacks):
