@@ -26,7 +26,7 @@ do
   python $STRIP_ROOT --symbol "TOP" --must_have < $STRIPPED > $PROCESSED
 done
 
-DICTIONARY="train.out-domain.dictionary"
+DICTIONARY="train.dictionary"
 rm $DICTIONARY
 ln -s ../ctb_5.1/train.dictionary $DICTIONARY
 

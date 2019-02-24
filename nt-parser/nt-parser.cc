@@ -103,6 +103,8 @@ bool IN_ORDER = false;
 
 unsigned MAX_UNARY = 3;
 
+unsigned MAX_CONS_NT = 8;
+
 bool COLLAPSE_UNARY = false;
 bool REVERSE_TREES = false;
 
@@ -163,6 +165,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 
           ("collapse_unary", "assume that oracle files represent parses with collapsed unary chains. Don't allow producing unary chains, and uncollapse unaries when decoding (split on +)")
           ("max_unary", po::value<unsigned>()->default_value(MAX_UNARY), "maximum size (-1) of a unary chain")
+          ("max_cons_nts", po::value<unsigned>(), "maximum number of NTs that can be opened consecutively")
           ("reverse_trees", "assume that oracle files represent travels of mirrored trees (i.e. right-to-left). Mirror the trees when decoding")
 
           // data
@@ -374,7 +377,6 @@ static bool IsActionForbidden_Discriminative(
     static const unsigned MAX_OPEN_NTS = 100;
 
     // TODO: check that these are sufficient for other languages
-    unsigned MAX_CONS_NT = REVERSE_TREES ? 38 : 8;
 
     if (is_nt && nopen_parens > MAX_OPEN_NTS) return true;
     if (is_nt && ncons_nt >= MAX_CONS_NT) return true;
@@ -2234,12 +2236,23 @@ int main(int argc, char** argv) {
 
   IN_ORDER = conf.count("inorder");
 
+  COLLAPSE_UNARY = conf.count("collapse_unary");
+  REVERSE_TREES = conf.count("reverse_trees");
+
   if (conf.count("max_unary")) {
     MAX_UNARY = conf["max_unary"].as<unsigned>();
   }
 
-  COLLAPSE_UNARY = conf.count("collapse_unary");
-  REVERSE_TREES = conf.count("reverse_trees");
+  if (conf.count("max_cons_nt")) {
+    MAX_CONS_NT = conf["max_cons_nt"].as<unsigned>();
+  } else {
+    if (REVERSE_TREES) {
+      MAX_CONS_NT = 38;
+    } else {
+      MAX_CONS_NT = 8;
+    }
+  }
+
 
   if (BRACKET_CONSTRAINED_TRAINING && !COLLAPSE_UNARY) {
     cerr << "must set --collapse_unary with --bracket_constrained" << endl;

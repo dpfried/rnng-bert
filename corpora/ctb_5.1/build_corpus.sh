@@ -14,6 +14,10 @@ NORMALIZE_UNICODE=${SCRIPT_DIR}/normalize_unicode.py
 BERT_PATH="../../bert_models/chinese_L-12_H-768_A-12/"
 
 DICTIONARY="train.dictionary"
+
+ln -s $ANALYSIS_DIR/corpora/ctb_5.1/train.gold.stripped train.gold.stripped
+ln -s $ANALYSIS_DIR/corpora/ctb_5.1/train.pred.stripped train.pred.stripped
+
 python $GET_DICTIONARY train.gold.stripped > $DICTIONARY
 python $GET_DICTIONARY train.pred.stripped | diff $DICTIONARY -
 
