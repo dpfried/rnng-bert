@@ -4,7 +4,7 @@ source ../analysis_path.sh
 
 SCRIPT_DIR="../../scripts"
 
-STRIP_TOP=${SCRIPT_DIR}/strip_top.py
+STRIP_FUNCTIONAL=${SCRIPT_DIR}/strip_functional.py
 GET_DICTIONARY=${SCRIPT_DIR}/get_dictionary.py
 GET_ORACLE=${SCRIPT_DIR}/get_oracle.py
 GET_ORACLE_GEN=${SCRIPT_DIR}/get_oracle_gen.py
@@ -21,7 +21,7 @@ do
   ln -s ${ANALYSIS_DIR}/corpora/wsj_ch/$STRIPPED $STRIPPED
   PROCESSED=${SPLIT}.processed
 
-  python $STRIP_TOP < $STRIPPED > $PROCESSED
+  python $STRIP_FUNCTIONAL --remove_root TOP < $STRIPPED > $PROCESSED
 done
 
 python $GET_DICTIONARY train.processed > $DICTIONARY

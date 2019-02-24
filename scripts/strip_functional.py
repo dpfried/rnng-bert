@@ -43,6 +43,16 @@ class PhraseTree(object):
         else:
             return [PhraseTree(self.symbol, children, self.sentence, leaf=self.leaf)]
 
+    def remove_tag_tokens(self, tok_tag_pred):
+        # this doesn't remove tokens from sentence; just drops them from the tree. but so long as sentence is refered to by indices stored in PhraseTree.leaf, should be ok
+        children = []
+        for child in self.children:
+            if child.leaf is not None and tok_tag_pred(self.sentence[child.leaf]):
+                continue
+            else:
+                children.append(child.remove_tag_tokens(tok_tag_pred))
+        return PhraseTree(self.symbol, children, self.sentence, leaf=self.leaf)
+
     def __str__(self):
         if self._str is None:
             if len(self.children) != 0:
@@ -80,11 +90,9 @@ class PhraseTree(object):
         """
         line += " "
         sentence = []
-        _, t = PhraseTree._parse(line, 0, sentence)
+        ix, t = PhraseTree._parse(line, 0, sentence)
+        assert not line[ix:].strip(), "suffix remaining: {}".format(line[ix:].strip())
 
-        if t.symbol == 'TOP' and len(t.children) == 1:
-            t = t.children[0]
-        
         return t
 
 
@@ -139,15 +147,18 @@ class PhraseTree(object):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--remove_symbols', nargs='*')
+    parser.add_argument('--remove_symbols', nargs='*', help="remove these NT symbols from anywhere in the tree")
+    parser.add_argument("--remove_root", help="remove this symbol from the root of the tree, if it's there")
+    parser.add_argument("--remove_root_must_have", help="remove this symbol from the root of the tree, and throw an error if it's not present")
+    parser.add_argument('--root_removed_replacement')
+    parser.add_argument('--dedup_punct_symbols', nargs='*')
     parser.add_argument('files', metavar='FILE', nargs='*', help='files to read, if empty, stdin is used')
     args = parser.parse_args()
 
+    dedup_punct_symbols = set(args.dedup_punct_symbols) if args.dedup_punct_symbols else set()
+
     for line in fileinput.input(files=args.files if len(args.files) > 0 else ('-', )):
         line = line.strip()
-        if line.startswith("( "):
-            assert line[-1] == ')'
-            line = line[2:-1]
         # line = re.sub('\)', ') ', line)
 
         # #line = re.sub(r'-[^\s^\)]* |##[^\s^\)]*## ', ' ', line)
@@ -178,8 +189,41 @@ if __name__ == "__main__":
         # linearized = re.sub('\) ', ')', linearized)
         # print(linearized)
         tree = PhraseTree.parse(line)
+        if args.remove_root is not None or args.remove_root_must_have is not None:
+            assert not (args.remove_root is not None and args.remove_root_must_have is not None)
+            if args.remove_root_must_have is not None:
+                assert tree.symbol == args.remove_root_must_have
+            symbol_to_remove = args.remove_root_must_have if args.remove_root_must_have is not None else args.remove_root
+            if tree.symbol == symbol_to_remove:
+                trees = tree.children
+            else:
+                trees = [tree]
+        else:
+            trees = [tree]
+
         if args.remove_symbols:
-            trees = tree.remove_nodes(set(args.remove_symbols))
-            assert len(trees) == 1, "can't remove a root symbol!"
+            trees = [
+                t for tree in trees
+                for t in tree.remove_nodes(set(args.remove_symbols))
+            ]
+
+        if len(trees) == 1:
             tree = trees[0]
+        else:
+            if args.root_removed_replacement:
+                assert all(t.sentence == trees[0].sentence for t in trees[1:])
+                tree = PhraseTree(symbol=args.root_removed_replacement, 
+                                    children=trees, 
+                                    sentence=trees[0].sentence,
+                                    leaf=None)
+            else:
+                assert len(trees) == 1, "can't remove a root symbol with multiple children without passing --root_removed_replacement!"
+
+        if dedup_punct_symbols:
+            for ix in range(len(tree.sentence)):
+                tok, tag = tree.sentence[ix]
+                if tag in dedup_punct_symbols:
+                    if all(x == tok[0] for x in tok[1:]):
+                        tok = tok[0]
+                        tree.sentence[ix] = tok, tag
         print(tree)

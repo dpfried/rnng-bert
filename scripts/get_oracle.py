@@ -266,6 +266,8 @@ def main():
     parser.add_argument("--reverse_trees", action='store_true', help='treat trees as horizontally mirrored for the sake of traversal orders')
     parser.add_argument("--is_candidate_file", action='store_true')
     args = parser.parse_args()
+
+    print(' '.join(sys.argv), file=sys.stderr)
     # train_file = open(sys.argv[1], 'r')
     # words_list = set(get_dictionary.get_dict(train_file))
     # train_file.close()

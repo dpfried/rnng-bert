@@ -4,7 +4,7 @@ source ../analysis_path.sh
 
 SCRIPT_DIR="../../scripts"
 
-STRIP_TOP=${SCRIPT_DIR}/strip_top.py
+STRIP_ROOT=${SCRIPT_DIR}/strip_root.py
 STRIP_FUNCTIONAL=${SCRIPT_DIR}/strip_functional.py
 GET_DICTIONARY=${SCRIPT_DIR}/get_dictionary.py
 GET_ORACLE=${SCRIPT_DIR}/get_oracle.py
@@ -22,13 +22,17 @@ mkdir in_order 2> /dev/null
 
 for SPLIT in cf cg ck cl cm cn cp cr 
 do
-  STRIPPED=${SPLIT}.gold.stripped
-  PROCESSED=${SPLIT}.gold.processed
+  STRIPPED=${SPLIT}.pred.stripped
+  PROCESSED=${SPLIT}.pred.processed
 
   rm $STRIPPED
   ln -s $ANALYSIS_DIR/corpora/brown/$STRIPPED $STRIPPED
 
-  python ${STRIP_TOP} < $STRIPPED | python $STRIP_FUNCTIONAL --remove_symbols ADV AUX EDITED NEG TYPO > $PROCESSED
+  python $STRIP_FUNCTIONAL < $STRIPPED \
+    --remove_symbols ADV AUX EDITED NEG TYPO \
+    --remove_root_must_have TOP \
+    --root_removed_replacement X \
+    > $PROCESSED
 
   # in_order discriminative
   python $GET_ORACLE --in_order $DICTIONARY $PROCESSED --bert_model_dir $BERT_BASE_PATH > in_order/${RAW}.oracle
