@@ -1,5 +1,8 @@
 *.clean
+*.stripped
 *.processed
 *.dictionary
 english_small/
 *.oracle
+in_order/
+top_down/

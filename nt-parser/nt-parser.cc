@@ -2449,8 +2449,9 @@ int main(int argc, char** argv) {
      // problems with UNKifying the lowercased data which needs to be loaded
   adict.Freeze();
   ntermdict.Freeze();
-  if (USE_POS)
-          posdict.Freeze();
+  if (USE_POS) {
+    posdict.Freeze();
+  }
 
   morphology_classes.Freeze();
   assert(morphology_dicts.size() == morphology_classes.size());
@@ -2479,6 +2480,15 @@ int main(int argc, char** argv) {
     for (auto wc : corpus.raw_term_counts)
       if (wc.second == 1) singletons[wc.first] = true;
   }
+
+  /*
+  cerr << "POS: ";
+  for (int i = 0; i < posdict.size(); ++i) {
+    const string& a = posdict.Convert(i);
+    cerr << a << " ";
+  }
+  cerr << endl;
+  */
 
   if (conf.count("dev_data")) {
     cerr << "Loading validation set\n";
@@ -2640,7 +2650,7 @@ int main(int argc, char** argv) {
         cerr << "WARNING: evaluating " << pred_parses.size() << " sentences, fewer than full corpus size " << corpus_gold_parses->size() << " (max_sentence_length_eval=" << MAX_SENTENCE_LENGTH_EVAL << ")" << endl;
       }
 
-      const string pred_fname = make_name("pred");
+      string pred_fname = make_name("pred");
       ofstream pred_out(pred_fname.c_str());
 
       if (!corpus_gold_parses && reference_gold_fname == "") {
@@ -2687,10 +2697,30 @@ int main(int argc, char** argv) {
         gold_out.close();
       }
       cerr << name << " parses in " << pred_fname << endl;
+
+      pair <Metrics, vector<MatchCounts>> results;
+
+      if (reference_gold_fname != "") {
+        string pred_tag_replaced = make_name("pred-tag-replaced");
+        system(("python scripts/remove_dev_unk.py " + reference_gold_fname + " " + pred_fname + " > " + pred_tag_replaced).c_str());
+        cerr << name << " tag-replaced parses in " << pred_tag_replaced << endl;
+        results = metrics_from_evalb(reference_gold_fname, pred_tag_replaced, evalb_fname, spmrl);
+      } else {
+        results = metrics_from_evalb(gold_fname, pred_fname, evalb_fname, spmrl);
+      }
+
       cerr << name << " output in " << evalb_fname << endl;
 
-      pair < Metrics, vector<MatchCounts>> results = metrics_from_evalb(gold_fname, pred_fname, evalb_fname, spmrl);
 
+      if (results.first.error_sentence != 0) {
+        cerr << "WARNING! " << results.first.error_sentence << " error sentences" << endl;
+      }
+
+      if (results.first.skip_sentence != 0) {
+        cerr << "WARNING! " << results.first.skip_sentence << " skip sentences" << endl;
+      }
+
+      /*
       if (corpus_gold_parses) {
         // ensure that match_counts match the status
         //pair<Metrics, vector<MatchCounts>> corpus_results = metrics_from_evalb(corpus.bracketed_fname, pred_fname, evalb_fname + "_corpus", spmrl);
@@ -2729,6 +2759,13 @@ int main(int argc, char** argv) {
           cerr << "checking against " << reference_gold_fname << endl;
           pair < Metrics, vector<MatchCounts>>
           reference_results = metrics_from_evalb(reference_gold_fname, pred_fname, evalb_fname, spmrl);
+          if (reference_results.first.error_sentence != 0) {
+            cerr << "WARNING! " << reference_results.first.error_sentence << " error sentences" << endl;
+          }
+
+          if (reference_results.first.skip_sentence != 0) {
+            cerr << "WARNING! " << reference_results.first.skip_sentence << " skip sentences" << endl;
+          }
           if (abs(match_counts.metrics().f1 - reference_results.first.f1) > 1e-2) {
             cerr << "warning: score mismatch" << endl;
             cerr << "computed\trecall=" << match_counts.metrics().recall << ", precision="
@@ -2740,6 +2777,7 @@ int main(int argc, char** argv) {
         }
 
       }
+      */
       return results.first;
   };
 

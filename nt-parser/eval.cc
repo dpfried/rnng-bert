@@ -25,6 +25,8 @@ pair<Metrics, vector<MatchCounts>> metrics_from_evalb(const string& ref_fname, c
     std::ifstream evalfile(evalbout_fname);
 
     // adapted from https://github.com/mitchellstern/neural-parser/blob/master/src/common/evaluation.cpp
+    boost::regex error_regex{R"(Number of Error sentence\s+=\s+(\d+))"};
+    boost::regex skip_regex{R"(Number of Skip sentence\s+=\s+(\d+))"};
     boost::regex recall_regex{R"(Bracketing Recall\s+=\s+(\d+\.\d+))"};
     boost::regex precision_regex{R"(Bracketing Precision\s+=\s+(\d+\.\d+))"};
     boost::regex fmeasure_regex{R"(Bracketing FMeasure\s+=\s+(\d+\.\d+))"};
@@ -101,15 +103,19 @@ pair<Metrics, vector<MatchCounts>> metrics_from_evalb(const string& ref_fname, c
 
     while (std::getline(evalfile, line)) {
         boost::smatch match;
-        if (boost::regex_match(line, match, recall_regex))
-            results.recall = std::stod(match[1].str());
+        if (boost::regex_match(line, match, error_regex))
+          results.error_sentence = std::stoi(match[1].str());
+        else if (boost::regex_match(line, match, skip_regex))
+          results.skip_sentence = std::stoi(match[1].str());
+        else if (boost::regex_match(line, match, recall_regex))
+          results.recall = std::stod(match[1].str());
         else if (boost::regex_match(line, match, precision_regex))
-            results.precision = std::stod(match[1].str());
-        else if (boost::regex_match(line, match, fmeasure_regex)) {
-            results.f1 = std::stod(match[1].str());
-        } else if (boost::regex_match(line, match, complete_match_regex)) {
-            results.complete_match = std::stod(match[1].str());
-            break;
+          results.precision = std::stod(match[1].str());
+        else if (boost::regex_match(line, match, fmeasure_regex)) 
+          results.f1 = std::stod(match[1].str());
+        else if (boost::regex_match(line, match, complete_match_regex)) {
+          results.complete_match = std::stod(match[1].str());
+          break;
         }
     }
 

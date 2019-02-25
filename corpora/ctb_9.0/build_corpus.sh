@@ -38,6 +38,7 @@ do
   echo "split: " $SPLIT
   STRIPPED=${SPLIT}.pred.stripped
   ln -s $ANALYSIS_DIR/corpora/ctb_9.0/$STRIPPED $STRIPPED
+  ln -s $ANALYSIS_DIR/corpora/ctb_9.0/${SPLIT}.gold.stripped ${SPLIT}.gold.stripped
 
   PROCESSED=${SPLIT}.pred.processed
   python $REPLACE_SYMBOLS --map_from DFL EMO FLR IMG INC META OTH SKIP TYPO WHPP --map_to FRAG < $STRIPPED \

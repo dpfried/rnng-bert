@@ -15,7 +15,11 @@ public:
   Metrics(double precision, double recall, double f1):
       Metrics(precision, recall, f1, 0) {}
 
+  Metrics(): Metrics(0, 0, 0) {}
+
   double precision,recall,f1,complete_match;
+  int error_sentence = 0;
+  int skip_sentence = 0;
 };
 
 struct MatchCounts {

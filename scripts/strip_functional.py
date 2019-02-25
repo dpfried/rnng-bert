@@ -35,6 +35,9 @@ class PhraseTree(object):
         self._str = None
 
     def remove_nodes(self, symbol_list):
+        # this method won't remove terminals with a tag in symbol_list; use remove_tag_tokens for that
+        if not self.children:
+            return [self]
         children = []
         for child in self.children:
             children.extend(child.remove_nodes(symbol_list))
