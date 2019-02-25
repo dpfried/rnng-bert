@@ -3,6 +3,7 @@ import glob
 import os
 import re
 import subprocess
+import sys
 
 CORPORA = {
     "ptb": ["dev", "test"],
@@ -19,7 +20,7 @@ CORPORA = {
 
 LEX_REP = {
     # bert, pos, emb
-    (True, False, False): "bert_large_bs=32_lr=2e-5_adam_patience=2",
+    (True, False, False): "BERT_bs=32_lr=2e-5_adam_patience=2",
     (False, False, False): "no-emb_no-pos_input-dim=INPUTDIM_bs=32",
     (False, True, False): "no-emb_input-dim=INPUTDIM_bs=32",
     (False, True, True): "emb-nofilt_bs=32",
@@ -41,7 +42,9 @@ def model_root(args):
         return "models"
 
 def model_base_name(args):
-    lex_rep = LEX_REP[(args.bert, args.pos, args.emb)].replace("INPUTDIM", "112" if is_chinese(args) else "132")
+    lex_rep = LEX_REP[(args.bert, args.pos, args.emb)]
+    lex_rep = lex_rep.replace("INPUTDIM", "112" if is_chinese(args) else "132")
+    lex_rep = lex_rep.replace("BERT", "bert" if is_chinese(args) else "bert_large")
     return "{}_{}_seed={}".format(
         "inorder" if args.inorder else "topdown",
         lex_rep,
@@ -159,8 +162,14 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, required=True)
 
     parser.add_argument("--print_only", action='store_true')
+    parser.add_argument("--print_best_model", action='store_true')
 
     args = parser.parse_args()
+
+    if args.print_best_model:
+        print(get_best_model(args))
+        sys.exit()
+
 
     print(get_run_string(args))
     if not args.print_only:
