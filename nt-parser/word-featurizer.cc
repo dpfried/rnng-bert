@@ -177,6 +177,11 @@ void WordFeaturizer::load_checkpoint(std::string checkpoint_path) {
                 nullptr, // Run metadata.
                 status // Output status.
                 );
+    if (TF_GetCode(status) != TF_OK) {
+      std::cerr << "ERROR: Could not load checkpoint " << checkpoint_path << std::endl;
+      std::cerr << TF_Message(status) << std::endl;
+      abort();
+    }
     assert (TF_GetCode(status) == TF_OK);
     TF_DeleteTensor(checkpoint_tensor);
     std::cout << "WordFeaturizer: loaded checkpoint " << checkpoint_path << std::endl;

@@ -105,7 +105,7 @@ def get_run_string(args):
     base = [
         "build/nt-parser/nt-parser",
         "--cnn-seed 1",
-        "--cnn-mem 1000,1000,500",
+        "--cnn-mem 1500,0,500",
         "--model_dir {}".format(model_dir),
         "-T {}".format(train_oracle),
         "-p {}".format(pred_oracle),
@@ -124,9 +124,11 @@ def get_run_string(args):
     if args.inorder:
         base.append("--inorder")
     if args.bert:
-        base.append("--bert --bert_large")
         if chinese:
+            base.append("--bert")
             base.append("--bert_graph_path bert_models/chinese_L-12_H-768_A-12_graph.pb")
+        else:
+            base.append("--bert --bert_large")
     else:
         if args.pos:
             base.append("-P")
@@ -141,10 +143,17 @@ def get_run_string(args):
 def run(args):
     command = get_run_string(args)
     proc = subprocess.Popen(command, stderr=subprocess.PIPE, shell=True)
-    for line in proc.stderr:
-        dec = line.decode("utf-8")
-        if dec.startswith("recall=") or dec.startswith("WARNING"):
-            print(dec)
+    error = False
+    lines = [line.decode("utf-8") for line in proc.stderr]
+    found_results = False
+    for line in lines:
+        if line.startswith("recall="):
+            found_results = True
+            print(line)
+        if line.startswith("WARNING") or line.startswith("ERROR"):
+            error = True
+    if error or (not found_results):
+        print('\n'.join(lines))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

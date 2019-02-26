@@ -2290,13 +2290,17 @@ int main(int argc, char** argv) {
     } else {
       BERT_FEATURE_DOWNSCALE = BERT_LARGE ? 6.0 : 4.0;
     }
+
+    if (conf.count("bert_graph_path")) {
+      BERT_GRAPH_PATH = conf["bert_graph_path"].as<string>();
+    }
+
     if (conf.count("bert_model_dir")) {
       BERT_MODEL_PATH = conf["bert_model_dir"].as<string>();
       if (!conf.count("bert_graph_path")) {
         cerr << "must set --bert_graph_path if --bert_model_dir is set" << endl;
         abort();
       }
-      BERT_GRAPH_PATH = conf["bert_graph_path"].as<string>();
     }
     cerr << "using BERT graph " << BERT_GRAPH_PATH << " with dimension " << BERT_DIM << endl;
     cerr << "BERT_FEATURE_DOWNSCALE: " << BERT_FEATURE_DOWNSCALE << endl;
