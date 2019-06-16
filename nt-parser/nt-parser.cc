@@ -275,7 +275,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("interactive", "Run in interactive mode")
 
           // ensemble inference
-          ("models", po::value<vector<string>>()->multitoken(), "Load ensemble of saved models from these files")
+          ("models", po::value<vector<string>>()->multitoken(), "Load saved models from these files for ensemble decoding. Currently unsupported for BERT models")
           ("combine_type", po::value<string>(), "Decision-level combination type for ensemble (sum or product)")
 
         ("help,h", "Help");
@@ -286,10 +286,13 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     cerr << dcmdline_options << endl;
     exit(1);
   }
+  /*
   if (conf->count("training_data") == 0) {
-    cerr << "Please specify --traing_data (-T): this is required to determine the vocabulary mapping, even if the parser is used in prediction mode.\n";
+    // TODO(dfried): move later
+    cerr << "Please specify --training_data (-T): this is required to determine the vocabulary mapping, even if the parser is used in prediction mode.\n";
     exit(1);
   }
+   */
 }
 
 vector<unsigned>& actions_of_same_structural_type(unsigned action) {
@@ -2171,8 +2174,18 @@ void bert_fw(WordFeaturizer* word_featurizer,
   }
 }
 
-std::string dynet_param_path(std::string directory) {
-  return directory + "/dynet_model.bin";
+std::string dynet_param_path(std::string directory, bool text_format) {
+  if (text_format)
+    return directory + "/dynet_model.txt";
+  else
+    return directory + "/dynet_model.bin";
+}
+
+std::string dictionary_path(std::string directory, bool text_format) {
+  if (text_format)
+    return directory + "/dictionaries.txt";
+  else
+    return directory + "/dictionaries.bin";
 }
 
 std::string bert_param_path(std::string directory) {
@@ -2335,6 +2348,17 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  bool no_training_data = false;
+
+  if (!conf.count("training_data")) {
+    no_training_data = true;
+    if (!(conf.count("model_dir") || conf.count("models"))) {
+      cerr << "if --training_data or -T is not specified, must specify --model_dir or --models" << endl;
+      return 1;
+    }
+    cerr << "no training oracles specified; will load feature dictionaries from model files" << endl;
+  }
+
   if (conf.count("train") && conf.count("dev_data") == 0) {
     cerr << "You specified --train but did not specify --dev_data FILE\n";
     return 1;
@@ -2422,23 +2446,52 @@ int main(int argc, char** argv) {
   parser::TopDownOracle test_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict, &morphology_classes, &morphology_dicts, &morphology_singletons);
   parser::TopDownOracle gold_corpus(&termdict, &adict, &posdict, &non_unked_termdict, &ntermdict, &morphology_classes, &morphology_dicts, &morphology_singletons);
 
-  check_spmrl(conf["training_data"].as<string>(), spmrl);
-  corpus.load_oracle(conf["training_data"].as<string>(), true, discard_train_sents, IN_ORDER, USE_MORPH_FEATURES);
 
-  if (conf.count("bracketing_dev_data")) {
-    check_spmrl(conf["bracketing_dev_data"].as<string>(), spmrl);
-    corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
-  }
+  auto load_dictionaries_from_model_file = [&](const std::string model_dir) {
+      bool text_format = conf.count("text_format");
+      ifstream in(dictionary_path(model_dir, text_format).c_str());
+
+      if (text_format) {
+        boost::archive::text_iarchive ia(in);
+        ia >> termdict >> adict >> ntermdict >> posdict;
+      } else {
+        boost::archive::binary_iarchive ia(in);
+        ia >> termdict >> adict >> ntermdict >> posdict;
+      }
+  };
 
   bool has_gold_training_data = false;
 
-  if (conf.count("gold_training_data")) {
-    check_spmrl(conf["gold_training_data"].as<string>(), spmrl);
-    gold_corpus.load_oracle(conf["gold_training_data"].as<string>(), true, discard_train_sents, IN_ORDER, USE_MORPH_FEATURES);
-    if (conf.count("bracketing_dev_data")) {
-      gold_corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+  if (no_training_data) {
+    if (conf.count("model_dir")) {
+      string model_dir = conf["model_dir"].as<string>();
+      load_dictionaries_from_model_file(model_dir);
+    } else {
+      vector<string> model_paths = conf["models"].as<vector<string>>();
+      load_dictionaries_from_model_file(model_paths[0]);
     }
-    has_gold_training_data = true;
+    if (USE_MORPH_FEATURES) {
+      cerr << "morphology feature dictionary deserialization not supported; must run with --training_data" << endl;
+      exit(1);
+    }
+  } else {
+    check_spmrl(conf["training_data"].as<string>(), spmrl);
+    corpus.load_oracle(conf["training_data"].as<string>(), true, discard_train_sents, IN_ORDER, USE_MORPH_FEATURES);
+
+    if (conf.count("bracketing_dev_data")) {
+      check_spmrl(conf["bracketing_dev_data"].as<string>(), spmrl);
+      corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+    }
+
+    if (conf.count("gold_training_data")) {
+      check_spmrl(conf["gold_training_data"].as<string>(), spmrl);
+      gold_corpus.load_oracle(conf["gold_training_data"].as<string>(), true, discard_train_sents, IN_ORDER,
+                              USE_MORPH_FEATURES);
+      if (conf.count("bracketing_dev_data")) {
+        gold_corpus.load_bdata(conf["bracketing_dev_data"].as<string>());
+      }
+      has_gold_training_data = true;
+    }
   }
 
   if (conf.count("words"))
@@ -2446,22 +2499,25 @@ int main(int argc, char** argv) {
 
   bool compute_distribution_stats = conf.count("compute_distribution_stats");
 
-  // freeze dictionaries so we don't accidentaly load OOVs
-  termdict.Freeze();
-  termdict.SetUnk(UNK); // we don't actually expect to use this often
-     // since the Oracles are required to be "pre-UNKified", but this prevents
-     // problems with UNKifying the lowercased data which needs to be loaded
-  adict.Freeze();
-  ntermdict.Freeze();
-  if (USE_POS) {
-    posdict.Freeze();
-  }
+  if (!no_training_data) {
 
-  morphology_classes.Freeze();
-  assert(morphology_dicts.size() == morphology_classes.size());
-  for (auto& pair: morphology_dicts) {
-    pair.second.Freeze();
-    pair.second.SetUnk(UNK);
+    // freeze dictionaries so we don't accidentaly load OOVs
+    termdict.Freeze();
+    termdict.SetUnk(UNK); // we don't actually expect to use this often
+    // since the Oracles are required to be "pre-UNKified", but this prevents
+    // problems with UNKifying the lowercased data which needs to be loaded
+    adict.Freeze();
+    ntermdict.Freeze();
+    if (USE_POS) {
+      posdict.Freeze();
+    }
+
+    morphology_classes.Freeze();
+    assert(morphology_dicts.size() == morphology_classes.size());
+    for (auto &pair: morphology_dicts) {
+      pair.second.Freeze();
+      pair.second.SetUnk(UNK);
+    }
   }
 
   SHIFT_ACTION = adict.Convert("SHIFT");
@@ -2484,15 +2540,6 @@ int main(int argc, char** argv) {
     for (auto wc : corpus.raw_term_counts)
       if (wc.second == 1) singletons[wc.first] = true;
   }
-
-  /*
-  cerr << "POS: ";
-  for (int i = 0; i < posdict.size(); ++i) {
-    const string& a = posdict.Convert(i);
-    cerr << a << " ";
-  }
-  cerr << endl;
-  */
 
   if (conf.count("dev_data")) {
     cerr << "Loading validation set\n";
@@ -2530,21 +2577,7 @@ int main(int argc, char** argv) {
   for (int i = 0; i < adict.size(); ++i)
     possible_actions[i] = i;
 
-  /*
-  // TODO(dfried): take this out
-  const string dev_output = "/tmp/dev-output.txt";
-  cerr << "writing transformed dev corpus to " + dev_output;
-  ofstream dev_out(dev_output.c_str());
-  for (int i = 0; i < dev_corpus.size(); i++) {
-    Tree tree = to_tree(dev_corpus.actions[i], dev_corpus.sents[i]);
-    print_tree(tree, dev_corpus.sents[i], true, dev_out);
-  }
-  dev_out.close();
-  abort();
-   */
-
   bool factored_ensemble_beam = conf.count("factored_ensemble_beam") > 0;
-
 
   bool sample = conf.count("samples") > 0;
   bool output_beam_as_samples = conf.count("output_beam_as_samples") > 0;
@@ -2887,17 +2920,17 @@ int main(int argc, char** argv) {
 
     if (conf.count("model_dir")) {
       string model_dir = conf["model_dir"].as<string>();
+      bool text_format = conf.count("text_format");
       //cerr << "before load model" << endl;
-      ifstream in(dynet_param_path(model_dir).c_str());
-      if (conf.count("text_format")) {
+      ifstream in(dynet_param_path(model_dir, text_format).c_str());
+      if (text_format) {
         boost::archive::text_iarchive ia(in);
         ia >> model >> *optimizer >> training_position >> streaming_f1;
-        //ia >> model;
       } else {
         boost::archive::binary_iarchive ia(in);
         ia >> model >> *optimizer >> training_position >> streaming_f1;
-        //ia >> model;
       }
+      load_dictionaries_from_model_file(model_dir);
       cerr << "streaming f1 mean: " << streaming_f1.mean_value();
       cerr << " streaming f1 std mean: " << streaming_f1.total_standardized / streaming_f1.num_samples;
       cerr << endl;
@@ -2955,40 +2988,9 @@ int main(int argc, char** argv) {
       assert(!UNNORMALIZED);
     }
 
-    //double tot_lad_score = 0.0;
-    //double tot_gold_score = 0.0;
-    //unsigned violations = 0;
-
     int sents_since_last_status = 0;
 
-    //assert(!conf.count("set_iter"));
-
-    /*
-    if (conf.count("set_iter")) {
-      assert(!has_gold_training_data);
-      // todo: if support this for backward compat, also set the epoch and sentence
-      training_position.iter = conf["set_iter"].as<int>();
-      training_position.tot_seen = (unsigned) (training_position.iter + 1) * status_every_i_iterations;
-      training_position.epoch = training_position.tot_seen / corpus.size();
-      training_position.sentence = training_position.tot_seen % corpus.size();
-      DecodeStats dev_decode_stats = dev_decode(parser, nullptr, nullptr);
-      training_position.best_dev_f1 = dev_decode_stats.metrics.f1;
-      training_position.best_dev_error = dev_decode_stats.err;
-      cerr << "resuming parser at ";
-      cerr << " iter: " << training_position.iter;
-      cerr << " tot_seen: " << training_position.tot_seen;
-      cerr << " epoch: " << training_position.epoch;
-      cerr << " sentence: " << training_position.sentence;
-      cerr << " dev f1: " << training_position.best_dev_f1;
-      cerr << " dev err: " << training_position.best_dev_error;
-    }
-     */
-
     int save_frequency_minutes = conf["save_frequency_minutes"].as<int>();
-
-//    double best_dev_err = 9e99;
-//    double bestf1=0.0;
-
 
     auto train_sentence = [&](
             ComputationGraph& hg,
@@ -3011,226 +3013,75 @@ int main(int argc, char** argv) {
 
         Tree gold_tree = to_tree(actions, sentence);
         if (conf.count("min_risk_training")) {
-          if (min_risk_method == "reinforce") {
-            /*
-            cerr << "gold ";
-            print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cerr);
-            cerr << endl;
-            */
-            vector<Expression>* entropy_accumulator = nullptr;
-            if (entropy_regularization_weight != 0.0) {
-              entropy_accumulator = new vector<Expression>();
-            }
-            for (int i = 0; i < min_risk_candidates; i++) {
-              double blank;
-              pair<vector<unsigned>, Expression> sample_and_nlp;
-              if (min_risk_include_gold && i == 0) {
-                sample_and_nlp = parser.abstract_log_prob_parser(
-                        &hg,
-                        sentence,
-                        bert_embeddings,
-                        actions,
-                        &blank,
-                        false, // is_evaluation
-                        false, // sample
-                        false, // label_smoothing
-                        0.0, // label_smoothing_epsilon
-                        nullptr, // dynamic_oracle
-                        false, // loss_augmented
-                        false, // softmax_margin
-                        nullptr, // streaming_entropy
-                        nullptr, // streaming_gold_prob
-                        entropy_accumulator,
-                        BRACKET_CONSTRAINED_TRAINING ? &actions : nullptr
-                );
-              } else {
-                sample_and_nlp = parser.abstract_log_prob_parser(
-                        &hg,
-                        sentence,
-                        bert_embeddings,
-                        vector<int>(),
-                        &blank,
-                        false, // is_evaluation
-                        true, // sample
-                        false, // label_smoothing
-                        0.0, // label_smoothing_epsilon
-                        nullptr, // dynamic_oracle
-                        false, // loss_augmented
-                        false, // softmax_margin
-                        nullptr, // streaming_entropy
-                        nullptr, // streaming_gold_prob
-                        entropy_accumulator,
-                        BRACKET_CONSTRAINED_TRAINING ? &actions : nullptr
-                );
-              }
-              /*
-              cerr << " " << i;
-              print_parse(sample_and_nlp.first, sentence, true, cerr);
-              cerr << endl;
-              */
-              float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, sample_and_nlp.first);
-              double standardized_f1 = streaming_f1.standardize_and_update(scaled_f1);
-              llh = llh - sample_and_nlp.second;
-              loss = loss + (sample_and_nlp.second * input(hg, standardized_f1));
-            }
-            if (entropy_accumulator) {
-              // TODO(dfried): consider incorporating this into the reward instead
-              loss = loss - entropy_regularization_weight * sum(*entropy_accumulator);
-              delete entropy_accumulator;
-            }
-            llh = llh * input(hg, 1.0 / min_risk_candidates);
-            loss = loss * input(hg, 1.0 / min_risk_candidates);
-          } else if (min_risk_method == "beam" || min_risk_method == "beam_noprobs" ||
-                     min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log") {
-            if (entropy_regularization_weight != 0) {
-              cerr << "entropy regularization not implemented for beam min_risk" << endl;
-              abort();
-            }
-
-            if (BRACKET_CONSTRAINED_TRAINING) {
-              cerr << "bracket constrained training not implemented for beam min_risk" << endl;
-              abort();
-            }
-
-            auto candidates = parser.abstract_log_prob_parser_beam(
-                    &hg,
-                    sentence,
-                    bert_embeddings,
-                    (min_risk_include_gold ? min_risk_candidates - 1 : min_risk_candidates),
-                    false // is_evaluation
-            );
-
-            if (min_risk_include_gold) {
-              double blank;
-              candidates.push_back(parser.abstract_log_prob_parser(
+          /*
+          cerr << "gold ";
+          print_parse(vector<unsigned>(actions.begin(), actions.end()), sentence, true, cerr);
+          cerr << endl;
+          */
+          vector<Expression>* entropy_accumulator = nullptr;
+          if (entropy_regularization_weight != 0.0) {
+            entropy_accumulator = new vector<Expression>();
+          }
+          for (int i = 0; i < min_risk_candidates; i++) {
+            double blank;
+            pair<vector<unsigned>, Expression> sample_and_nlp;
+            if (min_risk_include_gold && i == 0) {
+              sample_and_nlp = parser.abstract_log_prob_parser(
                       &hg,
                       sentence,
                       bert_embeddings,
                       actions,
                       &blank,
                       false, // is_evaluation
-                      false // sample
-              ));
-            }
-
-            if (min_risk_method == "beam") {
-              // L_risk objective (Eq 4) from Edunov et al 2017: https://arxiv.org/pdf/1711.04956.pdf
-                /*
-              vector<Expression> log_probs_plus_log_losses;
-              vector<Expression> log_probs;
-              for (auto &parse_and_loss: candidates) {
-                //Expression normed_log_prob = -parse_and_loss.second;
-                //Expression normed_log_prob = -parse_and_loss.second - log(input(hg, parse_and_loss.first.size()));
-                Expression normed_log_prob = -parse_and_loss.second * input(hg, 1.0 / parse_and_loss.first.size());
-                float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, parse_and_loss.first);
-                standardize_and_update_f1(scaled_f1);
-                if (scaled_f1 < 1.0) {
-                  log_probs_plus_log_losses.push_back(normed_log_prob + log(input(hg, 1.0f - scaled_f1)));
-                }
-                log_probs.push_back(normed_log_prob);
-              }
-              if (log_probs_plus_log_losses.size() > 0) {
-                Expression loss = logsumexp(log_probs_plus_log_losses) - logsumexp(log_probs);
-                loss_v = as_scalar(hg.incremental_forward());
-              } else {
-                Expression loss = input(hg, 0.0f);
-                loss_v = as_scalar(hg.incremental_forward());
-              }
-                 */
-              vector<Expression> normed_log_probs;
-              for (auto &parse_and_loss: candidates) {
-                llh = llh - parse_and_loss.second;
-                Expression normed_log_prob = -parse_and_loss.second * input(hg, 1.0 / parse_and_loss.first.size());
-                normed_log_probs.push_back(normed_log_prob);
-              }
-              Expression log_normalizer = logsumexp(normed_log_probs);
-              assert(normed_log_probs.size() ==  candidates.size());
-              for (int i = 0; i < normed_log_probs.size(); i++) {
-                float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, candidates[i].first);
-                scaled_f1 = streaming_f1.standardize_and_update(scaled_f1);
-                loss = loss + input(hg, -scaled_f1) * exp(normed_log_probs[i] - log_normalizer);
-              }
-            } else if (min_risk_method == "beam_noprobs") {
-              // TODO(dfried): this is hiding outer loss
-              Expression loss = input(hg, 0.0f);
-              float normalizer = 0.0;
-              for (auto &parse_and_loss: candidates) {
-                llh = llh - parse_and_loss.second;
-                float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, parse_and_loss.first);
-                //scaled_f1 = standardize_and_update_f1(scaled_f1);
-                loss = loss + (parse_and_loss.second * input(hg, scaled_f1));
-              }
-              loss = loss * input(hg, 1.0 / candidates.size());
+                      false, // sample
+                      false, // label_smoothing
+                      0.0, // label_smoothing_epsilon
+                      nullptr, // dynamic_oracle
+                      false, // loss_augmented
+                      false, // softmax_margin
+                      nullptr, // streaming_entropy
+                      nullptr, // streaming_gold_prob
+                      entropy_accumulator,
+                      BRACKET_CONSTRAINED_TRAINING ? &actions : nullptr
+              );
             } else {
-              assert(min_risk_method == "beam_unnormalized" || min_risk_method == "beam_unnormalized_log");
-              // TODO(dfried): this is hiding outer loss
-              Expression loss = input(hg, 0.0f);
-              float normalizer = 0.0;
-              for (auto &parse_and_loss: candidates) {
-                Expression log_prob = -parse_and_loss.second;
-                llh = llh - parse_and_loss.second;
-                Expression prob = exp(log_prob);
-                float prob_v = as_scalar(hg.incremental_forward());
-                float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, parse_and_loss.first);
-                //scaled_f1 = standardize_and_update_f1(scaled_f1);
-                normalizer += scaled_f1 * prob_v;
-                loss = loss - log_prob * input(hg, (scaled_f1) * prob_v);
-                //loss = loss - log_prob * input(hg, (scaled_f1));
-              }
-              if (min_risk_method == "beam_unnormalized_log") {
-                if (normalizer != 0.0)
-                  loss = loss * input(hg, 1.0f / normalizer);
-              }
+              sample_and_nlp = parser.abstract_log_prob_parser(
+                      &hg,
+                      sentence,
+                      bert_embeddings,
+                      vector<int>(),
+                      &blank,
+                      false, // is_evaluation
+                      true, // sample
+                      false, // label_smoothing
+                      0.0, // label_smoothing_epsilon
+                      nullptr, // dynamic_oracle
+                      false, // loss_augmented
+                      false, // softmax_margin
+                      nullptr, // streaming_entropy
+                      nullptr, // streaming_gold_prob
+                      entropy_accumulator,
+                      BRACKET_CONSTRAINED_TRAINING ? &actions : nullptr
+              );
             }
-          }  else {
-            cerr << "invalid min_risk_method: " << min_risk_method << endl;
-            exit(1);
+            /*
+            cerr << " " << i;
+            print_parse(sample_and_nlp.first, sentence, true, cerr);
+            cerr << endl;
+            */
+            float scaled_f1 = get_f1_and_update_mc(gold_tree, sentence, sample_and_nlp.first);
+            double standardized_f1 = streaming_f1.standardize_and_update(scaled_f1);
+            llh = llh - sample_and_nlp.second;
+            loss = loss + (sample_and_nlp.second * input(hg, standardized_f1));
           }
-        }
-        /* doesn't work; search errors
-         else if (max_margin_training) {
-          assert(UNNORMALIZED);
-          double blank;
-
-          DynamicOracle dynamic_oracle(sentence, actions);
-          auto lad_and_neg_score = parser.abstract_log_prob_parser(&hg,
-                                                                sentence,
-                                                                vector<int>(),
-                                                                right,
-                                                                false, // is_evaluation
-                                                                false, //sample
-                                                                label_smoothing,
-                                                                label_smoothing_epsilon,
-                                                                &dynamic_oracle,
-                                                                true // loss augmented
-          );
-          get_f1_and_update_mc(gold_tree, sentence, lad_and_neg_score.first);
-          double lad_score = -as_scalar(lad_and_neg_score.second.value());
-          tot_lad_score += lad_score;
-
-
-          cerr << "lad: " << lad_score;
-          print_parse(lad_and_neg_score.first, sentence, false, cerr);
-
-          auto gold_and_neg_score = parser.abstract_log_prob_parser(&hg, sentence, actions, &blank, false, false);
-          double gold_score = -as_scalar(gold_and_neg_score.second.value());
-          tot_gold_score += gold_score;
-
-          cerr << "gold: " << gold_score;
-          print_parse(gold_and_neg_score.first, sentence, false, cerr);
-
-          if (lad_score > gold_score) {
-            Expression loss = gold_and_neg_score.second - lad_and_neg_score.second;
-            loss_v = as_scalar(hg.incremental_forward());
-            cerr << "violation: " << loss_v << endl;
-            violations++;
-          } else {
-            loss_v = 0;
+          if (entropy_accumulator) {
+            // TODO(dfried): consider incorporating this into the reward instead
+            loss = loss - entropy_regularization_weight * sum(*entropy_accumulator);
+            delete entropy_accumulator;
           }
-          cerr << endl;
-        }
-          */
-        else { // not min_risk
+          llh = llh * input(hg, 1.0 / min_risk_candidates);
+          loss = loss * input(hg, 1.0 / min_risk_candidates);
+        } else { // not min_risk
           bool run_gold = exploration_type == DynamicOracle::ExplorationType::none || exploration_include_gold;
           bool run_explore = exploration_type != DynamicOracle::ExplorationType::none;
           if (!run_explore) {
@@ -3323,14 +3174,23 @@ int main(int argc, char** argv) {
           boost::filesystem::create_directory(save_dir);
         }
 
-        ofstream out(dynet_param_path(save_dir));
-        if (conf.count("text_format")) {
+        bool text_format = conf.count("text_format");
+
+        ofstream out(dynet_param_path(save_dir, text_format));
+        if (text_format) {
           boost::archive::text_oarchive oa(out);
           oa << model << *optimizer << training_position << streaming_f1;
-          oa << termdict << adict << ntermdict << posdict;
         } else {
           boost::archive::binary_oarchive oa(out);
           oa << model << *optimizer << training_position << streaming_f1;
+        }
+
+        ofstream out_dict(dictionary_path(save_dir, text_format));
+        if (text_format) {
+          boost::archive::text_oarchive oa(out_dict);
+          oa << termdict << adict << ntermdict << posdict;
+        } else {
+          boost::archive::binary_oarchive oa(out_dict);
           oa << termdict << adict << ntermdict << posdict;
         }
 
@@ -3734,7 +3594,8 @@ int main(int argc, char** argv) {
       models.push_back(std::make_shared<Model>());
       parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), pretrained));
       cerr << "Loading single parser from " << model_dir << "..." << endl;
-      ifstream in(dynet_param_path(model_dir));
+      ifstream in(dynet_param_path(model_dir, conf.count("text_format")));
+
       if (conf.count("text_format")) {
         boost::archive::text_iarchive ia(in);
         ia >> *models.back();
