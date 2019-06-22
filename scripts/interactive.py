@@ -3,8 +3,9 @@ import subprocess
 import json
 import os
 from get_oracle import unkify
+import sys
 
-bert_model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bert_models", "uncased_L-12_H-768_A-12")
+bert_model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bert_models")
 bert_tokenizer = bert_tokenize.Tokenizer(bert_model_dir)
 
 dictionary_file = "corpora/english/train.dictionary"
@@ -13,22 +14,20 @@ with open(dictionary_file, 'r') as f:
 
 morph_aware_unking = True
 
-model = "models/inorder_bert_large_bs=32_lr=2e-5_adam_patience=2_best-epoch-14_it-6121-f1-95.71_model"
-
 command = "build/nt-parser/nt-parser \
         --cnn-mem 1000,0,500 \
         --model_dir {}\
-        -T corpora/english/in_order/train.oracle \
         --interactive \
+	--text_format \
         --inorder \
         --bert \
         --bert_large \
         --lstm_input_dim 128 \
-        --hidden_dim 128 ".format(model)
+        --hidden_dim 128 "
 
 def to_json(tokens):
     lc = [token.lower() for token in tokens]
-    pos = ["DT" for token in tokens]
+    pos = ["XX" for token in tokens]
     bert_input_ids, bert_word_end_mask = bert_tokenizer.tokenize(tokens)
     unks = unkify(tokens, dictionary, morph_aware_unking)
     data = {
@@ -41,33 +40,50 @@ def to_json(tokens):
     }
     return json.dumps(data)
 
+def send_json_data(proc, json_data_out):
+    #print("writing {}".format(json_data_out), file=sys.stderr)
+    proc.stdin.write("{}\n".format(json_data_out).encode("utf-8"))
+    proc.stdin.flush()
+
 def parse(proc, tokens):
     try:
-        json_data_out = to_json(tokens)
-        #print("writing {}".format(json_data_out))
-        proc.stdin.write("{}\n".format(json_data_out).encode("utf-8"))
-        proc.stdin.flush()
-    except:
-        print("wrote: {}".format(json_data_out))
+        send_json_data(proc, to_json(tokens))
+    except Exception as e:
+        print("exception, wrote: {}".format(json_data_out), file=sys.stderr)
+        print(e, file=sys.stderr)
         return {'parse': None}
         #print("about to read")
     try:
         line = proc.stdout.readline()
-        #print("read {}".format(line))
-        json_data_in = json.loads(line)
+        json_data_in = json.loads(line.decode('utf-8'))
+        #print("read {}".format(line), file=sys.stderr)
         return json_data_in['parse']
-    except:
-        print("read: {}".format(line))
+    except Exception as e:
+        print("exception, read: {}".format(line), file=sys.stderr)
+        print(e, file=sys.stderr)
 
 if __name__ == "__main__":
-    proc = subprocess.Popen(command.split(), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    import sys
+    model_path = sys.argv[1]
+    while model_path.endswith("/"):
+        model_path = model_path[:-1]
+
+    files_to_parse = sys.argv[2:]
+    if not files_to_parse:
+        files_to_parse = ["-"]
+    import fileinput
+
+    proc = subprocess.Popen(command.format(model_path).split(), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     while True:
         line = proc.stdout.readline().decode("utf-8")
         #print(line)
         if line.startswith("READY"):
             break
+    
+    for line in fileinput.input(files=files_to_parse):
+        if line.strip():
+            tokens = line.split()
+            print(parse(proc, tokens))
 
-    while True:
-        tokens = input("> ").split()
-        print(parse(proc, tokens))
+    send_json_data(proc, json.dumps({"action": "exit"}))

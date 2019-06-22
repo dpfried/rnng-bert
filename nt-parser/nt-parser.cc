@@ -273,6 +273,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("decode_start_index", po::value<int>()->default_value(0), "start here")
 
           ("interactive", "Run in interactive mode")
+          ("interactive_max_failures", po::value<int>()->default_value(10), "Maximum number of failures in interactive mode")
 
           // ensemble inference
           ("models", po::value<vector<string>>()->multitoken(), "Load saved models from these files for ensemble decoding. Currently unsupported for BERT models")
@@ -3591,6 +3592,9 @@ int main(int argc, char** argv) {
 
     if (conf.count("model_dir")) {
       string model_dir = conf["model_dir"].as<string>();
+      while (model_dir.back() == '/') {
+        model_dir.pop_back();
+      }
       models.push_back(std::make_shared<Model>());
       parsers.push_back(std::make_shared<ParserBuilder>(models.back().get(), pretrained));
       cerr << "Loading single parser from " << model_dir << "..." << endl;
@@ -3651,33 +3655,35 @@ int main(int argc, char** argv) {
     }
 
     if (conf.count("interactive")) {
-      boost::asio::io_service io_service;
 
-      boost::asio::posix::stream_descriptor in(io_service, ::dup(STDIN_FILENO));
-      //boost::asio::posix::stream_descriptor out(io_service, ::dup(STDOUT_FILENO));
+      int max_failures = conf["interactive_max_failures"].as<int>();
+
+      cerr << "Finished loading parser; beginning to parse..." << endl;
 
       cout << "READY" << endl;
 
       int num_failures = 0;
-      while (num_failures < 10) {
+      while (cin && num_failures < max_failures) {
         TF_Tensor *bert_feats = nullptr;
         try {
-          boost::asio::streambuf input_buffer;
-          boost::asio::read_until(in, input_buffer, '\n');
-          std::istream buffer(&input_buffer);
           std::string line;
-          std::getline(buffer, line);
+          getline(cin, line);
+
           std::stringstream stream(line);
+
+
           boost::property_tree::ptree json_data_in;
           boost::property_tree::read_json(stream, json_data_in);
 
           if (json_data_in.get<string>("action", "") == "exit") {
-            abort();
+            break;
           }
 
+          /*
           for (auto &property: json_data_in) {
             cerr << property.first << " " << json_data_in.get<string>(property.first) << endl;
           }
+           */
 
           parser::Sentence sentence = corpus.sentence_from_json(
                   json_data_in,
@@ -3710,7 +3716,7 @@ int main(int argc, char** argv) {
           json_data_out.put("llh", log_likelihood);
 
           boost::property_tree::write_json(cout, json_data_out, false);
-          cout << endl;
+          //cout << endl;
 
         } catch (const std::exception& e) {
           cerr << e.what() << endl;
@@ -3721,7 +3727,13 @@ int main(int argc, char** argv) {
         }
 
       }
-
+      if (num_failures >= max_failures) {
+        cerr << "Aborted parsing after " << num_failures << " failures" << endl;
+        exit(1);
+      } else {
+        cerr << "Parsing completed" << endl;
+        exit(0);
+      }
     }
 
 
