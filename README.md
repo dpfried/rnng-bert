@@ -1,6 +1,8 @@
 # Shift-Reduce Constituency Parsing with Contextual Representations
 
-This repository contains an implementation of the [Recurrent Neural Network Grammars (Dyer et al. 2016)](https://arxiv.org/abs/1602.07776) and [In-Order (Liu and Zhang 2017)](https://aclweb.org/anthology/Q17-1029) constituency parsers, both integrated with a [BERT (Devlin et al. 2019)](https://aclweb.org/anthology/papers/N/N19/N19-1423/) sentence encoder. The In-Order system with BERT obtains state-of-the-art results for constituency parsing in-domain (on the Penn Treebank and Chinese Treebank v5.1), and in cross-domain transfer (to the Brown, Genia, and English Web Treebanks). Full results are described in [Cross-Domain Generalization of Neural Constituency Parsers (Fried*, Kitaev*, and Klein, 2019)](TODO).
+This repository contains an implementation of the [Recurrent Neural Network Grammars (Dyer et al. 2016)](https://arxiv.org/abs/1602.07776) and [In-Order (Liu and Zhang 2017)](https://aclweb.org/anthology/Q17-1029) constituency parsers, both integrated with a [BERT (Devlin et al. 2019)](https://aclweb.org/anthology/papers/N/N19/N19-1423/) sentence encoder. 
+
+Our best current models for the In-Order system with BERT obtain 96.0 F1 on the English PTB test set and 92.0 F1 on the Chinese Treebank v5.1 test set. More results (including out-of-domain transfer) are described in [Cross-Domain Generalization of Neural Constituency Parsers (Fried*, Kitaev*, and Klein, 2019)](TODO).
 
 Modifications to the RNNG and In-Order parsers implemented here include:
 
