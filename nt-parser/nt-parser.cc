@@ -3197,6 +3197,7 @@ int main(int argc, char** argv) {
 
         if (BERT) {
           word_featurizer->save_checkpoint(bert_param_path(save_dir));
+          system(("cp " + BERT_MODEL_PATH + "/vocab.txt " + save_dir).c_str());
         }
 
         cerr << "streaming f1 mean: " << streaming_f1.mean_value();

@@ -32,9 +32,12 @@ BERT_TOKEN_MAPPING = {
 
 
 class Tokenizer(object):
-    def __init__(self, bert_model_dir):
+    def __init__(self, bert_model_dir, do_lower_case=None):
         self.model_dir = bert_model_dir
-        self.do_lower_case = ("uncased" in bert_model_dir)
+        if do_lower_case is None:
+            self.do_lower_case = ("uncased" in bert_model_dir)
+        else:
+            self.do_lower_case = do_lower_case
         self.tokenizer = bert.tokenization.FullTokenizer(
             os.path.join(bert_model_dir, "vocab.txt"),
             do_lower_case=self.do_lower_case

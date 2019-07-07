@@ -16,19 +16,22 @@ fi
 
 batch_size=8
 
+mkdir decodes_ctb 2> /dev/null
+
 build/nt-parser/nt-parser \
     --cnn-seed 1 \
-    --cnn-mem 1500,1500,500 \
+    --cnn-mem 3000,3000,500 \
     --model_dir $model_dir \
-    -T corpora/english/top_down/train.collapse-unary.oracle \
-    -p corpora/english/top_down/${dev_or_test}.collapse-unary.oracle \
-    --bracketing_test_data corpora/english/${dev_or_test}.stripped \
+    -p corpora/ctb_5.1/in_order/${dev_or_test}.gold.oracle \
+    --bracketing_test_data corpora/ctb_5.1/${dev_or_test}.gold.stripped
+    --max_unary 5 \
+    --inorder \
     --bert \
-    --bert_large \
+    --bert_model_dir bert_models/chinese_L-12_H-768_A-12 \
+    --bert_graph_path bert_models/chinese_L-12_H-768_A-12_graph.pb \
     --lstm_input_dim 128 \
     --hidden_dim 128 \
     --beam_size $beam_size \
     --batch_size $batch_size \
-    --eval_files_prefix decodes/`basename $model_dir`-${dev_or_test}-${beam_size} \
-    --collapse_unary \
+    --text_format \
     $@
