@@ -44,6 +44,16 @@ Note: for most practical parsing purposes, we'd recommend using the [BERT-equipp
 Optional:
 * [MKL](https://software.intel.com/en-us/mkl) allows faster processing for the non-BERT CPU operations
 
+We use a submodule for the BERT code. To get this when cloning our repository:
+```
+git clone --recursive https://github.com/dpfried/rnng-bert.git
+```
+
+If you didn't clone with `--recursive`, you'll need to manually get the `bert` submodule. Run the following inside the top-level `rnng-bert` directory:
+```
+git submodule update --init --recursive
+```
+
 ## Build Instructions
 
 Assuming the latest development version of Eigen is stored at: `/opt/tools/eigen-dev`, and you've extracted or built the TensorFlow C files (see prerequisites above) at `$HOME/lib/libtensorflow-gpu-linux-x86_64-1.12.0`: 
@@ -70,6 +80,8 @@ Optional: If training the parser, you'll also need the evalb executable. Build i
 
 ## Usage
 
+First, download and extract one of the [models](#available-models). For the rest of this section, we'll assume that you've downloaded and extracted `english-wwm` into the `bert_models` folder.
+
 ### Parsing Raw Text
 Input should be a file with one sentence per line, consisting of space-separated tokens. For best performance, you should use tokenization in the style of the Penn Treebank.
 
@@ -79,13 +91,13 @@ For English, you can tokenize sentences using a tokenizer such as [nltk.word_tok
 
 (note that "wasn't" is split into "was" and "n't").
 
-For Chinese, use a tokenizer such as [jieba](https://github.com/fxsjy/jieba) or [unofficial tokenizers for SpaCy](https://github.com/howl-anderson/Chinese_models_for_SpaCy). Here is an example tokenized sentence for Chinese (from the Penn Chinese Treebank and using its tokenization; automatic tokenizers may return different tokeizations).:
+For Chinese, use a tokenizer such as [jieba](https://github.com/fxsjy/jieba) or [unofficial tokenizers for SpaCy](https://github.com/howl-anderson/Chinese_models_for_SpaCy). Here is an example tokenized sentence (from the Penn Chinese Treebank and using its tokenization; automatic tokenizers may return different tokeizations):
 
 `“ 中 美 合作 高 科技 项目 签字 仪式 ” 今天 在 上海 举行 。`
 
-Once the token input file is constructed, run `python3 scripts/parse_bert.py <model_dir> <token_file> --beam_size 10` to parse the token file and print parse trees to standard out. For example,
+Once the token input file is constructed, run `python3 scripts/bert_parse.py $model_dir $token_file --beam_size 10` to parse the token file and print parse trees to standard out. For example,
 
-`python3 scripts/parse_bert.py bert_models/english-wwm tokens.txt --beam_size 10`
+`python3 scripts/bert_parse.py bert_models/english-wwm tokens.txt --beam_size 10`
 
 Note: These parsers are not currently designed to predict part-of-speech (POS) tags, and will output trees that use XX for all POS tags.
 
@@ -95,16 +107,15 @@ Given a treebank file in `$treebank_file` with one tree per line (for example, a
 
 ```
 python3 scripts/dump_tokens.py $treebank_file > treebank.tokens
-python3 scripts/parse_bert.py bert_models/english-wwm treebank.tokens --beam_size 10 > treebank.parsed
+python3 scripts/bert_parse.py bert_models/english-wwm treebank.tokens --beam_size 10 > treebank.parsed
 python3 scripts/retag.py $treebank_file treebank.parsed > treebank.parsed.retagged
 EVALB/evalb -p EVALB/COLLINS_ch.prm $treebank_file treebank.parsed.retagged
 ```
-
 (`COLLINS_ch.prm` is a parameter file that can be used to evaluate on either the English or Chinese Penn Treebanks; it is modified from COLLINS.prm to drop the PU punctuation tag which is found in the CTB corpora.)
 
 ## Training
 
-Instructions should be coming soon. Please contact `dfried AT cs DOT berkeley DOT edu` if you'd like help training the models that use BERT in the meantime.
+Instructions should (hopefully) be coming soon. Please contact `dfried AT cs DOT berkeley DOT edu` if you'd like help training the models that use BERT in the meantime. The oracle generation scripts we used are in `corpora/*/build_corpus.sh` and training scripts are in `train_*.sh`, but there are currently some missing dependencies and hard-coded paths. 
 
 # Citations
 
