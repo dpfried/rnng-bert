@@ -2,7 +2,7 @@
 
 This repository contains an implementation of the [Recurrent Neural Network Grammars (Dyer et al. 2016)](https://arxiv.org/abs/1602.07776) and [In-Order (Liu and Zhang 2017)](https://aclweb.org/anthology/Q17-1029) constituency parsers, both integrated with a [BERT (Devlin et al. 2019)](https://aclweb.org/anthology/papers/N/N19/N19-1423/) sentence encoder. 
 
-Our best current models for the In-Order system with BERT obtain 96.0 F1 on the English PTB test set and 92.0 F1 on the Chinese Treebank v5.1 test set. More results (including out-of-domain transfer) are described in [Cross-Domain Generalization of Neural Constituency Parsers (Fried*, Kitaev*, and Klein, 2019)](TODO).
+Our best current models for the In-Order system with BERT obtain 96.0 F1 on the English PTB test set and 92.0 F1 on the Chinese Treebank v5.1 test set. More results (including out-of-domain transfer) are described in [Cross-Domain Generalization of Neural Constituency Parsers (Fried*, Kitaev*, and Klein, 2019)](http://nlp.cs.berkeley.edu/pubs/Fried-Kitaev-Klein_2019_ParserGeneralization_paper.pdf).
 
 Modifications to the RNNG and In-Order parsers implemented here include:
 
@@ -28,7 +28,7 @@ Note: for most practical parsing purposes, we'd recommend using the [BERT-equipp
 
 | Model | Language | Info |
 | ----- | -------- | ---- |
-| [english](https://berkeleynlp.s3.amazonaws.com/inorder-bert-models/english.tgz)| English | 95.65 F1 / 57.28 EM on the PTB test set (with beam size 10). 1.2GB. This is the model that is the best-scoring on the development set out of the five runs of In-Order+BERT English models described in our [ACL 2019 paper](TODO).|
+| [english](https://berkeleynlp.s3.amazonaws.com/inorder-bert-models/english.tgz)| English | 95.65 F1 / 57.28 EM on the PTB test set (with beam size 10). 1.2GB. This is the model that is the best-scoring on the development set out of the five runs of In-Order+BERT English models described in our [ACL 2019 paper](http://nlp.cs.berkeley.edu/pubs/Fried-Kitaev-Klein_2019_ParserGeneralization_paper.pdf).|
 | [english-wwm](https://berkeleynlp.s3.amazonaws.com/inorder-bert-models/english-wwm.tgz) | English | 95.99 F1 / 57.99 EM on the PTB test set (with beam size 10). 1.2GB. This model is identical to `english` above, but uses a BERT model pre-trained with [whole-word masking](https://github.com/google-research/bert/commit/0fce551b55caabcfba52c61e18f34b541aef186a).
 | [chinese](https://berkeleynlp.s3.amazonaws.com/inorder-bert-models/chinese.tgz) | Chinese | 91.96 F1 / 44.54 EM on the CTB v5.1 test set (with beam size 10). 370MB. This is the model that is best-scoring on the development set out of the five runs of In-Order+BERT Chinese models.
 
