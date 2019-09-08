@@ -103,7 +103,8 @@ void TopDownOracle::load_bdata(const string& file) {
    bracketed_fname=file;
 }
 
-void TopDownOracle::load_oracle(const string& file, bool is_training, bool discard_sentences, bool in_order, bool read_morphology_features) {
+void TopDownOracle::load_oracle(const string& file, bool is_training, bool discard_sentences, bool in_order, bool read_morphology_features, bool has_trees) {
+  has_actions = has_trees;
   cerr << "Loading top-down oracle from " << file << " [" << (is_training ? "training" : "non-training") << "] ...\n";
   cnn::compressed_ifstream in(file.c_str());
   assert(in);
@@ -175,40 +176,50 @@ void TopDownOracle::load_oracle(const string& file, bool is_training, bool disca
     // re: commit changing line below from 3->6, it should have been 4 previously (but it's ok b/c it's only used for error reporting)
     lc += 6;
     if (!cur_sent.SizesMatch()) {
-      cerr << "Mismatched lengths of input strings in oracle before line " << lc << endl;
+      // TODO: fix the line numbers
+      // cerr << "Mismatched lengths of input strings in oracle before line " << lc << ": " << line << endl;
+      cerr << "Mismatched lengths of input strings in oracle before line " << line << endl;
+      cerr << "raw: " << cur_sent.raw.size() << endl;
+      cerr << "unk: " << cur_sent.unk.size() << endl;
       abort();
     }
-    int termc = 0;
-    while(getline(in, line)) {
-      ++lc;
-      //cerr << "line number = " << lc << endl;
-      if (line.size() == 0) break;
-      assert(line.find(' ') == string::npos);
-      if (line == kREDUCE) {
-        cur_acts.push_back(kREDUCE_INT);
-      } else if (line.find("NT(") == 0) {
-        // Convert NT
-        nd->Convert(line.substr(3, line.size() - 4));
-        // NT(X) is put into the actions list as NT(X)
-        cur_acts.push_back(ad->Convert(line));
-      } else if (line == kSHIFT) {
-        cur_acts.push_back(kSHIFT_INT);
-        termc++;
-      } else if (line == kTERM) {
-        assert(in_order);
-        cur_acts.push_back(kTERM_INT);
-      } else {
-        cerr << "Malformed input in line " << lc << endl;
+    if (has_trees) {
+      int termc = 0;
+      while (getline(in, line)) {
+        ++lc;
+        //cerr << "line number = " << lc << endl;
+        if (line.size() == 0) break;
+        assert(line.find(' ') == string::npos);
+        if (line == kREDUCE) {
+          cur_acts.push_back(kREDUCE_INT);
+        } else if (line.find("NT(") == 0) {
+          // Convert NT
+          nd->Convert(line.substr(3, line.size() - 4));
+          // NT(X) is put into the actions list as NT(X)
+          cur_acts.push_back(ad->Convert(line));
+        } else if (line == kSHIFT) {
+          cur_acts.push_back(kSHIFT_INT);
+          termc++;
+        } else if (line == kTERM) {
+          assert(in_order);
+          cur_acts.push_back(kTERM_INT);
+        } else {
+          cerr << "Malformed input in line " << lc << endl;
+          abort();
+        }
+      }
+      if (!discard_sentences)
+        actions.push_back(cur_acts);
+      if (termc != cur_sent.size()) {
+        // TODO: fix the line numbers
+        cerr << "Mismatched number of tokens and SHIFTs in oracle before line " << line << endl; // << lc << endl;
+        cerr << "num tokens: " << cur_sent.size() << endl;
+        cerr << "num shifts: " << termc << endl;
         abort();
       }
-    }
-    if (!discard_sentences)
-      actions.push_back(cur_acts);
-    if (termc != cur_sent.size()) {
-      cerr << "Mismatched number of tokens and SHIFTs in oracle before line " << lc << endl;
-      cerr << "num tokens: " << cur_sent.size() << endl;
-      cerr << "num shifts: " << termc << endl;
-      abort();
+    } else {
+      // TODO: update lc?
+      getline(in, line);
     }
   }
   cerr << endl;

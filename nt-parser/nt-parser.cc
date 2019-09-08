@@ -171,9 +171,11 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           // data
           ("training_data,T", po::value<string>(), "List of Transitions - Training corpus")
           ("dev_data,d", po::value<string>(), "Development corpus")
+          ("dev_data_no_trees", "no trees in dev oracle file")
           ("bracketing_dev_data,C", po::value<string>(), "Development bracketed corpus")
           ("gold_training_data", po::value<string>(), "List of Transitions - smaller corpus (e.g. wsj in a wsj+silver experiment)")
           ("test_data,p", po::value<string>(), "Test corpus")
+          ("test_data_no_trees", "no trees in test oracle file")
           ("bracketing_test_data", po::value<string>(), "Test bracketed corpus")
           ("max_sentence_length_train", po::value<int>()->default_value(MAX_SENTENCE_LENGTH_TRAIN), "Don't train on sentences longer than this length")
           ("max_sentence_length_eval", po::value<int>()->default_value(MAX_SENTENCE_LENGTH_EVAL), "Don'evaluate on sentences longer than this length")
@@ -257,6 +259,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
           ("output_beam_as_samples", "Print the items in the beam in the same format as samples")
           ("samples_include_gold", "Also include the gold parse in the list of samples output")
           ("bracket_constrained_test_decode", "uses gold bracketing structure to constrain possible actions taken in decode (note: this doesn't affect the possible actions for computing probability distribution supports, and can be set even if --bracket_constrained is unset)")
+          ("output_trees_only", "don't print indices or scores")
 
           ("alpha,a", po::value<float>(), "Flatten (0 < alpha < 1) or sharpen (1 < alpha) sampling distribution")
           ("max_cons_nt", po::value<unsigned>()->default_value(8), "maximum number of non-terminals that can be opened consecutively")
@@ -2545,12 +2548,12 @@ int main(int argc, char** argv) {
   if (conf.count("dev_data")) {
     cerr << "Loading validation set\n";
     check_spmrl(conf["dev_data"].as<string>(), spmrl);
-    dev_corpus.load_oracle(conf["dev_data"].as<string>(), false, false, IN_ORDER, USE_MORPH_FEATURES);
+    dev_corpus.load_oracle(conf["dev_data"].as<string>(), false, false, IN_ORDER, USE_MORPH_FEATURES, !conf.count("dev_data_no_trees"));
   }
   if (conf.count("test_data")) {
     cerr << "Loading test set\n";
     check_spmrl(conf["test_data"].as<string>(), spmrl);
-    test_corpus.load_oracle(conf["test_data"].as<string>(), false, false, IN_ORDER, USE_MORPH_FEATURES);
+    test_corpus.load_oracle(conf["test_data"].as<string>(), false, false, IN_ORDER, USE_MORPH_FEATURES, !conf.count("test_data_no_trees"));
     if (conf.count("bracketing_test_data")) {
       test_corpus.load_bdata(conf["bracketing_test_data"].as<string>());
     }
@@ -3760,6 +3763,7 @@ int main(int argc, char** argv) {
     }
 
     if (output_candidate_trees) {
+      bool output_trees_only = conf.count("output_trees_only");
 
       if (sample && output_beam_as_samples) {
         cerr << "warning: outputting samples and the contents of the beam\n";
@@ -3815,10 +3819,12 @@ int main(int argc, char** argv) {
             );
             vector<unsigned> result = result_and_nlp.first;
             double nlp = as_scalar(result_and_nlp.second.value());
-            cout << test_indices[sii] << " ||| " << -nlp << " |||";
+            if (!output_trees_only)
+              cout << test_indices[sii] << " ||| " << -nlp << " |||";
             vector<unsigned> converted_actions(actions.begin(), actions.end());
             print_parse(converted_actions, sentence, false, cout);
-            ptb_out << test_indices[sii] << " ||| " << -nlp << " |||";
+            if (!output_trees_only)
+              ptb_out << test_indices[sii] << " ||| " << -nlp << " |||";
             print_parse(converted_actions, sentence, true, ptb_out);
             samples.insert(converted_actions);
           }
@@ -3842,9 +3848,11 @@ int main(int argc, char** argv) {
                             bracket_constrained_decode ? &actions : nullptr
                     ); // TODO: fix ordering of sample and eval here, produces correct behavior but is confusing
             double lp = as_scalar(result_and_nlp.second.value());
-            cout << test_indices[sii] << " ||| " << -lp << " |||";
+            if (!output_trees_only)
+              cout << test_indices[sii] << " ||| " << -lp << " |||";
             print_parse(result_and_nlp.first, sentence, false, cout);
-            ptb_out << test_indices[sii] << " ||| " << -lp << " |||";
+            if (!output_trees_only)
+              ptb_out << test_indices[sii] << " ||| " << -lp << " |||";
             print_parse(result_and_nlp.first, sentence, true, ptb_out);
             samples.insert(result_and_nlp.first);
           }
@@ -3875,9 +3883,11 @@ int main(int argc, char** argv) {
               int ix = std::min(i, num_results - 1);
               pair < vector<unsigned>, Expression > result_and_nlp = beam_results[ix];
               double nlp = as_scalar(result_and_nlp.second.value());
-              cout << test_indices[sii] << " ||| " << -nlp << " |||";
+              if (!output_trees_only)
+                cout << test_indices[sii] << " ||| " << -nlp << " |||";
               print_parse(result_and_nlp.first, sentence, false, cout);
-              ptb_out << test_indices[sii] << " ||| " << -nlp << " |||";
+              if (!output_trees_only)
+                ptb_out << test_indices[sii] << " ||| " << -nlp << " |||";
               print_parse(result_and_nlp.first, sentence, true, ptb_out);
               samples.insert(result_and_nlp.first);
             }
@@ -3952,11 +3962,13 @@ int main(int argc, char** argv) {
                   bracket_constrained_decode ? &actions : nullptr
           );
           predicted[corpus_index] = result_and_nlp.first;
-          neg_log_likelihood += get_neg_log_likelihood(
-                  *abstract_parser, sentence, bert_embeddings, actions, &actions_correct, &streaming_gold_prob,
-                  bracket_constrained_decode ? &actions : nullptr
-          );
-          num_actions += actions.size();
+          if (test_corpus.has_actions) {
+            neg_log_likelihood += get_neg_log_likelihood(
+                    *abstract_parser, sentence, bert_embeddings, actions, &actions_correct, &streaming_gold_prob,
+                    bracket_constrained_decode ? &actions : nullptr
+            );
+            num_actions += actions.size();
+          }
           sii++;
         }
         if (BERT) {
@@ -3965,6 +3977,7 @@ int main(int argc, char** argv) {
       }
       cerr << endl;
       auto t_end = chrono::high_resolution_clock::now();
+      cerr << "decoded \t[" << test_corpus.size() << " sents in " << chrono::duration<double, milli>(t_end-t_start).count() << " ms]" << "\n";
       Metrics metrics = evaluate(test_corpus.sents, bracket_constrained_decode ? nullptr : &test_corpus.actions, predicted, "test", test_indices, test_corpus.bracketed_fname);
       cerr << "recall=" << metrics.recall << ", precision=" << metrics.precision << ", F1=" << metrics.f1 << ", complete match=" << metrics.complete_match << "\n";
       cerr << "decode: mean entropy: " << streaming_entropy.mean_value() << " stddev entropy: " << streaming_entropy.std << endl; //<< " mean gold prob: " << streaming_gold_prob.mean_value();

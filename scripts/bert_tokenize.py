@@ -44,7 +44,7 @@ class Tokenizer(object):
         )
 
 
-    def tokenize(self, sentence):
+    def tokenize(self, sentence, return_filtered_sentence=False):
         tokens = []
         word_end_mask = []
 
@@ -61,8 +61,12 @@ class Tokenizer(object):
                 word = "'t"
             cleaned_words.append(word)
 
-        for word in cleaned_words:
+        filtered_sentence = []
+        assert len(cleaned_words) == len(sentence)
+        for word, original_word in zip(cleaned_words, sentence):
             word_tokens = self.tokenizer.tokenize(word)
+            if word_tokens:
+                filtered_sentence.append(original_word)
             for _ in range(len(word_tokens)):
                 word_end_mask.append(0)
             word_end_mask[-1] = 1
@@ -72,12 +76,45 @@ class Tokenizer(object):
 
         input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
 
-        return np.array(input_ids), np.array(word_end_mask)
+        if return_filtered_sentence:
+            return np.array(input_ids), np.array(word_end_mask), filtered_sentence
+        else:
+            return np.array(input_ids), np.array(word_end_mask)
 
 
 if __name__ == "__main__":
-    bert_model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uncased_L-12_H-768_A-12")
+    # bert_model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uncased_L-12_H-768_A-12")
+    bert_model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bert_models", "uncased_L-12_H-768_A-12")
     tokenizer = Tokenizer(bert_model_dir)
-    input_ids, word_end_mask = tokenizer.tokenize(["This", "is", "a", "test", "antidisestablishmentarianism", "."])
-    print(input_ids.tolist())
-    print(word_end_mask.tolist())
+    # sentences = [
+    #     ["This", "is", "a", "test", "antidisestablishmentarianism", "."],
+    #     "Don ' t say things like that . Please ? ".split(),
+    #     "Don't say things like that. Please? ".split(),
+    #     "Channels were typically priced between $ 4 and $ 7 , making bundled packages the better deal for all but the most frugal subscribers .".split(),
+    #     "Channels were typically priced between $4 and $7, making bundled packages the better deal for all but the most frugal subscribers.".split(),
+    #     "But you can't dismiss Mr. Stolzman's music".split(),
+    # ]
+    # for sentence in sentences:
+    #     input_ids, word_end_mask = tokenizer.tokenize(sentence)
+    #     print(sentence)
+    #     print(input_ids.tolist())
+    #     print(word_end_mask.tolist())
+    #     with open(os.path.join(bert_model_dir, "vocab.txt")) as f:
+    #         piece_by_id = dict(enumerate(line.strip() for line in f))
+
+    #     toks = []
+    #     for input_id, word_end_mask in zip(input_ids.tolist(), word_end_mask.tolist()):
+    #         toks.append(piece_by_id[input_id])
+    #         if word_end_mask:
+    #             toks.append(' ')
+    #     print(''.join(toks))
+    #     print()
+    sentences = ["But you can't dismiss Mr. Stolzman's music, which he purchased for $4,500."]
+    import nltk
+    for sentence in sentences:
+        punkt = nltk.tokenize.word_tokenize(sentence)
+        input_ids, word_end_mask = tokenizer.tokenize(punkt)
+        print(' '.join(punkt))
+        tokens = tokenizer.tokenizer.convert_ids_to_tokens(input_ids)
+        print(' '.join(tokens))
+        print(' '.join(tokenizer.tokenizer.tokenize(sentence)))

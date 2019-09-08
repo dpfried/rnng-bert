@@ -7,6 +7,60 @@ import bert_tokenize
 import os
 import fileinput
 
+import unicodedata
+
+PAREN_NORM = {
+    '(': '-LRB-',
+    ')': '-RRB-',
+}
+
+PAREN_NORM_LC = {
+    key: val.lower()
+    for key, val in PAREN_NORM.items()
+}
+
+def norm_parens(token, lc=False):
+    lookup = PAREN_NORM_LC if lc else PAREN_NORM
+    for key, value in lookup.items():
+        token = token.replace(key, value)
+    return token
+
+def _is_whitespace(char):
+    """Checks whether `chars` is a whitespace character."""
+    # \t, \n, and \r are technically contorl characters but we treat them
+    # as whitespace since they are generally considered as such.
+    if char == " " or char == "\t" or char == "\n" or char == "\r":
+        return True
+    cat = unicodedata.category(char)
+    if cat == "Zs":
+        return True
+    return False
+
+
+def _is_control(char):
+    """Checks whether `chars` is a control character."""
+    # These are technically control characters but we count them as whitespace
+    # characters.
+    if char == "\t" or char == "\n" or char == "\r":
+        return False
+    cat = unicodedata.category(char)
+    if cat.startswith("C"):
+        return True
+    return False
+
+def _clean_text(text):
+    """Performs invalid character removal and whitespace cleanup on text."""
+    output = []
+    for char in text:
+        cp = ord(char)
+        if cp == 0 or cp == 0xfffd or _is_control(char):
+            continue
+        if _is_whitespace(char):
+            output.append(" ")
+        else:
+            output.append(char)
+    return "".join(output)
+
 def reverse_tree(tree):
     import nltk
     if isinstance(tree, nltk.Tree):
@@ -109,7 +163,7 @@ def get_tag_token_pairs(line):
             output.append(get_between_brackets(line_strip, i))
     return output
 
-def get_tags_tokens_lowercase_morphfeats(line):
+def get_tags_tokens_lowercase_morphfeats(line, try_to_fix_parens=False):
     output = get_tag_token_pairs(line)
     #print 'output:',output
     output_tags = []
@@ -118,8 +172,12 @@ def get_tags_tokens_lowercase_morphfeats(line):
     output_morphfeats = []
     for terminal in output:
         splits = terminal.split()
+        if try_to_fix_parens and not splits:
+            splits = ('', '(')
         tag_and_feats = splits[0]
         token_splits = splits[1:]
+        if try_to_fix_parens and not token_splits:
+            token_splits = [')']
         if len(token_splits) > 1:
             sys.stderr.write("warning: whitespace found in token {} on line {}\n".format(' '.join(token_splits), line.rstrip()))
         #tag_and_feats, token = terminal.split()
@@ -265,6 +323,11 @@ def main():
     parser.add_argument("--collapse_unary", action='store_true', help='collapse unary chains, with nonterminals separated by "+"')
     parser.add_argument("--reverse_trees", action='store_true', help='treat trees as horizontally mirrored for the sake of traversal orders')
     parser.add_argument("--is_candidate_file", action='store_true')
+    parser.add_argument("--is_token_file", action='store_true')
+    parser.add_argument("--block_size", type=int)
+    parser.add_argument("--only_these_blocks", type=int, nargs='*', default=[])
+    parser.add_argument("--base_fname")
+    parser.add_argument("--max_bert_len", type=int, default=512, help="chop off tokens at the end of sentences until the sentence has no more than this many wordpieces (as tokenized by BERT)")
     args = parser.parse_args()
 
     print(' '.join(sys.argv), file=sys.stderr)
@@ -288,82 +351,146 @@ def main():
     print("loading BERT tokenizer from %s" % (args.bert_model_dir), file=sys.stderr)
     bert_tokenizer = bert_tokenize.Tokenizer(args.bert_model_dir)
     # use fileinput so that we can pass '-' to read from stdin
-    for line in fileinput.input(files=[args.corpus_file]):
-        if args.is_candidate_file:
-            line = line.split("|||")[-1].strip()
-        else:
-            line = line.strip()
-        line_ctr += 1
+    fout = sys.stdout
+    for line_ctr, line in enumerate(fileinput.input(files=[args.corpus_file])):
+        #line = line.replace('\ufeff', '')
+        #line = line.encode('utf-8').decode('utf-8', 'ignore')
         if line_ctr % 1000 == 0:
             sys.stderr.write("\rget oracle %d" % line_ctr)
-        # assert that the parenthesis are balanced
-        if line.count('(') != line.count(')'):
-            raise NotImplementedError('Unbalanced number of parenthesis in line ' + str(line_ctr))
-        # first line: the bracketed tree itself itself
-        print('!# ' + line.rstrip())
-        tags, tokens, lowercase, morphfeats = get_tags_tokens_lowercase_morphfeats(line)
-        assert len(tags) == len(tokens)
-        assert len(tokens) == len(lowercase)
-        print(' '.join(tags))
-        print(' '.join(tokens))
-        print(' '.join(lowercase))
-        unkified = unkify(tokens, words_list, not args.no_morph_aware_unking)
-        print(' '.join(unkified))
-        # print morph features, or an empty line
-        print(' '.join(morphfeats))
+        if args.block_size is not None:
+            block = line_ctr // args.block_size
+            if args.only_these_blocks and block not in args.only_these_blocks:
+                continue
+        line = _clean_text(line)
+        if args.base_fname:
+            if args.block_size is not None and line_ctr % args.block_size == 0:
+                if fout != sys.stdout:
+                    fout.close()
+                fout = open(args.base_fname + "-block-{}".format(line_ctr // args.block_size), 'w')
+            else:
+                if fout == sys.stdout:
+                    fout = open(args.base_fname, 'w')
+        if args.is_candidate_file:
+            line = line.split("|||")[-1].strip()
+            lines = [line]
+        else:
+            line = line.strip()
+            lines = [l.strip() for l in line.split('|||')]
+        for segment in lines:
+            if not segment:
+                continue
+            if args.is_token_file:
+                tokens = segment.split()
+                tags = ["DT"] * len(tokens)
+                lowercase = [tok.lower() for tok in tokens]
+                morphfeats = []
+            else:
+                # assert that the parenthesis are balanced
+                if segment.count('(') != segment.count(')'):
+                    raise NotImplementedError('Unbalanced number of parenthesis in line ' + str(line_ctr))
+                tags, tokens, lowercase, morphfeats = get_tags_tokens_lowercase_morphfeats(segment)
+            assert len(tags) == len(tokens)
+            assert len(tokens) == len(lowercase)
 
-        bert_input_ids, bert_word_end_mask = bert_tokenizer.tokenize(tokens)
-        print(' '.join(map(str, bert_word_end_mask)))
-        print(' '.join(map(str, bert_input_ids)))
+            # tokens = [PAREN_NORM.get(token, token) for token in tokens]
+            # lowercase = [PAREN_NORM_LC.get(lc, lc) for lc in lowercase]
+            tokens = [norm_parens(token, lc=False) for token in tokens]
+            lowercase = [norm_parens(lc, lc=True) for lc in lowercase]
 
-        tree_string = line
-        if args.collapse_unary or args.reverse_trees:
-            from nltk import Tree
-            tree = Tree.fromstring(tree_string.rstrip())
-            if args.collapse_unary:
-                tree.collapse_unary(collapseRoot=True, joinChar="+")
-            if args.reverse_trees:
-                tree = reverse_tree(tree)
-            tree_string = tree._pformat_flat(nodesep='', parens='()', quotes=False)
+            bert_input_ids, bert_word_end_mask, filtered_tokens = bert_tokenizer.tokenize(tokens, return_filtered_sentence=True)
 
-        output_actions, mon, mcn, mscn = get_actions(tree_string)
+            if len(filtered_tokens) < len(tokens):
+                print("WARNING: sentence {} has PTB tokens with no wordpieces: {}".format(line_ctr, tokens[:10]))
+                if args.is_token_file:
+                    tokens = filtered_tokens
+                    tags = ["DT"] * len(tokens)
+                    lowercase = [tok.lower() for tok in tokens]
+                    morphfeats = []
 
-        if mon > max_open_nts:
-            max_open_nts = mon
-            max_open_nts_ix = line_ctr
-        if mcn > max_cons_nts:
-            max_cons_nts = mcn
-            max_cons_nts_ix = line_ctr
-        if mscn > max_same_cons_nts:
-            max_same_cons_nts = mscn
-            max_same_cons_nts_ix = line_ctr
-        if args.in_order:
-            _, trees = construct(output_actions, [])
-            output_actions = get_in_order_actions(trees[0], [])
-        unary_count = 0
-        for action_ix, action in enumerate(output_actions):
-            print(action)
-            if args.in_order:
-                if action.startswith("SHIFT"):
-                    unary_count = 0
-                elif action.startswith("REDUCE"):
-                    if action_ix > 0:
-                        if output_actions[action_ix-1].startswith("NT"):
-                            unary_count += 1
-                            if unary_count > max_unary_count:
-                                max_unary_count = unary_count 
-                                max_unary_count_ix = line_ctr
-                        elif output_actions[action_ix-1].startswith("REDUCE"):
+            if len(bert_input_ids) == 2:
+                print("WARNING: removing sentence {} that has no BERT tokens: {}".format(line_ctr, segment.encode()))
+                continue
+
+            new_toks = tokens
+            while len(bert_input_ids) > args.max_bert_len:
+                new_toks = new_toks[:-1]
+                bert_input_ids, bert_word_end_mask = bert_tokenizer.tokenize(new_toks)
+
+            if len(new_toks) < len(tokens):
+                print("WARNING: truncating sentence {} ({} ...) of length {} to length {}".format(line_ctr, tokens[:10], len(tokens), len(new_toks)))
+                tags = tags[:len(new_toks)]
+                tokens = new_toks
+                lowercase = lowercase[:len(new_toks)]
+                morphfeats = morphfeats[:len(new_toks)]
+
+            if args.is_token_file:
+                # for compatibility with oracle reader, wrap in brackets
+                print('!# ( ' + segment.rstrip() + ' )', file=fout)
+            else:
+                # first line: the bracketed tree itself itself
+                print('!# ' + segment.rstrip(), file=fout)
+
+            print(' '.join(tags), file=fout)
+            print(' '.join(tokens), file=fout)
+            print(' '.join(lowercase), file=fout)
+            unkified = unkify(tokens, words_list, not args.no_morph_aware_unking)
+            print(' '.join(unkified), file=fout)
+            # print morph features, or an empty line
+            print(' '.join(morphfeats), file=fout)
+
+            print(' '.join(map(str, bert_word_end_mask)), file=fout)
+            print(' '.join(map(str, bert_input_ids)), file=fout)
+
+            if not args.is_token_file:
+                tree_string = segment
+                if args.collapse_unary or args.reverse_trees:
+                    from nltk import Tree
+                    tree = Tree.fromstring(tree_string.rstrip())
+                    if args.collapse_unary:
+                        tree.collapse_unary(collapseRoot=True, joinChar="+")
+                    if args.reverse_trees:
+                        tree = reverse_tree(tree)
+                    tree_string = tree._pformat_flat(nodesep='', parens='()', quotes=False)
+
+                output_actions, mon, mcn, mscn = get_actions(tree_string)
+
+                if mon > max_open_nts:
+                    max_open_nts = mon
+                    max_open_nts_ix = line_ctr
+                if mcn > max_cons_nts:
+                    max_cons_nts = mcn
+                    max_cons_nts_ix = line_ctr
+                if mscn > max_same_cons_nts:
+                    max_same_cons_nts = mscn
+                    max_same_cons_nts_ix = line_ctr
+                if args.in_order:
+                    _, trees = construct(output_actions, [])
+                    output_actions = get_in_order_actions(trees[0], [])
+                unary_count = 0
+                for action_ix, action in enumerate(output_actions):
+                    print(action, file=fout)
+                    if args.in_order:
+                        if action.startswith("SHIFT"):
                             unary_count = 0
-        if args.in_order:
-            print('TERM')
-        print('')
+                        elif action.startswith("REDUCE"):
+                            if action_ix > 0:
+                                if output_actions[action_ix-1].startswith("NT"):
+                                    unary_count += 1
+                                    if unary_count > max_unary_count:
+                                        max_unary_count = unary_count 
+                                        max_unary_count_ix = line_ctr
+                                elif output_actions[action_ix-1].startswith("REDUCE"):
+                                    unary_count = 0
+                if args.in_order:
+                    print('TERM', file=fout)
+            print('', file=fout)
     print("", file=sys.stderr)
-    print("max open nts: %d, line %d" % (max_open_nts, max_open_nts_ix), file=sys.stderr)
-    print("max cons nts: %d, line %d" % (max_cons_nts, max_cons_nts_ix), file=sys.stderr)
-    print("max same cons nts: %d, line %d" % (max_same_cons_nts, max_same_cons_nts_ix), file=sys.stderr)
-    if args.in_order:
-        print("max unary count: %d, line %d" % (max_unary_count, max_unary_count_ix), file=sys.stderr)
+    if not args.is_token_file:
+        print("max open nts: %d, line %d" % (max_open_nts, max_open_nts_ix), file=sys.stderr)
+        print("max cons nts: %d, line %d" % (max_cons_nts, max_cons_nts_ix), file=sys.stderr)
+        print("max same cons nts: %d, line %d" % (max_same_cons_nts, max_same_cons_nts_ix), file=sys.stderr)
+        if args.in_order:
+            print("max unary count: %d, line %d" % (max_unary_count, max_unary_count_ix), file=sys.stderr)
 
 if __name__ == "__main__":
     main()

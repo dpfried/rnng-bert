@@ -75,6 +75,7 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     if (buffer == nullptr) {
       std::cerr << "WordFeaturizer: failed to read tensorflow graph from path: " << graph_path << std::endl;
       assert (buffer != nullptr);
+      abort();
     }
 
     graph = TF_NewGraph();
@@ -85,7 +86,11 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     TF_DeleteImportGraphDefOptions(opts);
     TF_DeleteBuffer(buffer);
 
-    assert (TF_GetCode(status) == TF_OK);
+    if (TF_GetCode(status) != TF_OK) {
+        std::cerr << "WordFeaturizer: could not load graph from " << graph_path << std::endl;
+        std::cerr << TF_Message(status) << std::endl;
+        abort();
+    }
     std::cout << "WordFeaturizer: loaded graph from " << graph_path << std::endl;
 
     // ------
@@ -127,7 +132,11 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     TF_SessionOptions* options = TF_NewSessionOptions();
     sess = TF_NewSession(graph, options, status);
     TF_DeleteSessionOptions(options);
-    assert (TF_GetCode(status) == TF_OK);
+    if (TF_GetCode(status) != TF_OK) {
+      std::cerr << "WordFeaturizer: could not create session" << std::endl;
+      std::cerr << TF_Message(status) << std::endl;
+      abort();
+    }
 
     TF_SessionRun(sess,
                 nullptr, // Run options.
@@ -137,7 +146,11 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
                 nullptr, // Run metadata.
                 status // Output status.
                 );
-    assert (TF_GetCode(status) == TF_OK);
+    if (TF_GetCode(status) != TF_OK) {
+      std::cerr << "WordFeaturizer: could not initialize session" << std::endl;
+      std::cerr << TF_Message(status) << std::endl;
+      abort();
+    }
     std::cout << "WordFeaturizer: initialized session" << std::endl;
 
     // ------
@@ -158,7 +171,11 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
                 nullptr, // Run metadata.
                 status // Output status.
                 );
-    assert (TF_GetCode(status) == TF_OK);
+    if (TF_GetCode(status) != TF_OK) {
+      std::cerr << "WordFeaturizer: could not initialize warmup" << std::endl;
+      std::cerr << TF_Message(status) << std::endl;
+      abort();
+    }
     TF_DeleteTensor(new_warmup_steps_tensor);
     std::cout << "WordFeaturizer: set warmup steps to " << warmup_steps << std::endl;
   }
@@ -201,7 +218,11 @@ void WordFeaturizer::save_checkpoint(std::string checkpoint_path) {
                 nullptr, // Run metadata.
                 status // Output status.
                 );
-    assert (TF_GetCode(status) == TF_OK);
+    if (TF_GetCode(status) != TF_OK) {
+      std::cerr << "WordFeaturizer: could not save checkpoint" << std::endl;
+      std::cerr << TF_Message(status) << std::endl;
+      abort();
+    }
     TF_DeleteTensor(checkpoint_tensor);
     std::cout << "WordFeaturizer: saved checkpoint " << checkpoint_path << std::endl;
   }
@@ -219,7 +240,11 @@ void WordFeaturizer::set_learning_rate(float learning_rate) {
                 nullptr, // Run metadata.
                 status // Output status.
   );
-  assert (TF_GetCode(status) == TF_OK);
+  if (TF_GetCode(status) != TF_OK) {
+    std::cerr << "WordFeaturizer: could not set learning rate" << std::endl;
+    std::cerr << TF_Message(status) << std::endl;
+    abort();
+  }
   TF_DeleteTensor(new_learning_rate_tensor);
   std::cout << "WordFeaturizer: set learning rate to " << learning_rate << std::endl;
   last_set_learning_rate = learning_rate;
@@ -280,7 +305,12 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
           &accumulate_op, 1,
           &handle,
           status);
-      assert (TF_GetCode(status) == TF_OK);
+
+      if (TF_GetCode(status) != TF_OK) {
+        std::cerr << "WordFeaturizer: error in partial run setup" << std::endl;
+        std::cerr << TF_Message(status) << std::endl;
+        abort();
+      }
 
       TF_SessionPRun(sess, handle,
         feeds_fw, feed_values_fw, num_feeds_fw,
@@ -301,7 +331,12 @@ void WordFeaturizer::run_fw(int batch_size, int num_subwords,
                   status // Output status.
                   );
     }
-    assert (TF_GetCode(status) == TF_OK);
+    if (TF_GetCode(status) != TF_OK) {
+      std::cerr << "WordFeaturizer: error in forward pass" << std::endl;
+      std::cerr << TF_Message(status) << std::endl;
+      abort();
+    }
+    // assert (TF_GetCode(status) == TF_OK);
     assert (fetch_values_fw[0] != nullptr);
     assert (TF_TensorData(fetch_values_fw[0]) != nullptr);
 
@@ -334,7 +369,11 @@ void WordFeaturizer::run_bw(TF_Tensor* features_grad) {
       &accumulate_op, 1,
       status
       );
-    assert (TF_GetCode(status) == TF_OK);
+    if (TF_GetCode(status) != TF_OK) {
+      std::cerr << "WordFeaturizer: error in backward pass" << std::endl;
+      std::cerr << TF_Message(status) << std::endl;
+      abort();
+    }
 
     cleanup();
   }
@@ -348,7 +387,12 @@ void WordFeaturizer::run_step(void) {
                 nullptr, // Run metadata.
                 status // Output status.
                 );
-    assert (TF_GetCode(status) == TF_OK);
+    if (TF_GetCode(status) != TF_OK) {
+      std::cerr << "WordFeaturizer: error in step" << std::endl;
+      std::cerr << TF_Message(status) << std::endl;
+      abort();
+    }
+    // assert (TF_GetCode(status) == TF_OK);
   }
 
 void WordFeaturizer::run_zero_grad(void) {
@@ -360,7 +404,12 @@ void WordFeaturizer::run_zero_grad(void) {
                 nullptr, // Run metadata.
                 status // Output status.
                 );
-    assert (TF_GetCode(status) == TF_OK);
+    if (TF_GetCode(status) != TF_OK) {
+      std::cerr << "WordFeaturizer: error in zero grad" << std::endl;
+      std::cerr << TF_Message(status) << std::endl;
+      abort();
+    }
+    // assert (TF_GetCode(status) == TF_OK);
   }
 
 void WordFeaturizer::cleanup() {

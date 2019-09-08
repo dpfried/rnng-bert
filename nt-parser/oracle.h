@@ -43,6 +43,7 @@ struct Oracle {
   std::string bracketed_fname;
   std::vector<Sentence> sents;
   std::vector<std::vector<int>> actions;
+  bool has_actions = false;
  protected:
   static void ReadSentenceView(const std::string& line, cnn::Dict* dict, std::vector<int>* sent);
   static void ReadWordEndMask(const std::string& line, std::vector<unsigned>& lengths, std::vector<int32_t>& word_end_mask);
@@ -64,7 +65,7 @@ class TopDownOracle : public Oracle {
   // will be read, and both will be available. if false, then only the mapped
   // tokens will be available
   void load_bdata(const std::string& file);
-  void load_oracle(const std::string& file, bool is_training, bool discard_sentences, bool in_order, bool read_morphology_features);
+  void load_oracle(const std::string& file, bool is_training, bool discard_sentences, bool in_order, bool read_morphology_features, bool has_trees = true);
   cnn::Dict* nd; // dictionary of nonterminal types
   cnn::Dict* morphology_classes;
   std::unordered_map<std::string, cnn::Dict>* morphology_dicts;
