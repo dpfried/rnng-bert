@@ -91,7 +91,7 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
         std::cerr << TF_Message(status) << std::endl;
         abort();
     }
-    std::cout << "WordFeaturizer: loaded graph from " << graph_path << std::endl;
+    std::cerr << "WordFeaturizer: loaded graph from " << graph_path << std::endl;
 
     // ------
     input_ids = get_operation(graph, "input_ids");
@@ -126,7 +126,7 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
     fetches_fw[0].oper = word_features;
     feeds_bw[0].oper = word_features_grad;
 
-    std::cout << "WordFeaturizer: found required operations in graph" << std::endl;
+    std::cerr << "WordFeaturizer: found required operations in graph" << std::endl;
 
     // ------
     TF_SessionOptions* options = TF_NewSessionOptions();
@@ -151,7 +151,7 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
       std::cerr << TF_Message(status) << std::endl;
       abort();
     }
-    std::cout << "WordFeaturizer: initialized session" << std::endl;
+    std::cerr << "WordFeaturizer: initialized session" << std::endl;
 
     // ------
     load_checkpoint(init_checkpoint_path);
@@ -177,7 +177,7 @@ WordFeaturizer::WordFeaturizer(const char* graph_path,
       abort();
     }
     TF_DeleteTensor(new_warmup_steps_tensor);
-    std::cout << "WordFeaturizer: set warmup steps to " << warmup_steps << std::endl;
+    std::cerr << "WordFeaturizer: set warmup steps to " << warmup_steps << std::endl;
   }
 
 void WordFeaturizer::load_checkpoint(std::string checkpoint_path) {
@@ -201,7 +201,7 @@ void WordFeaturizer::load_checkpoint(std::string checkpoint_path) {
     }
     assert (TF_GetCode(status) == TF_OK);
     TF_DeleteTensor(checkpoint_tensor);
-    std::cout << "WordFeaturizer: loaded checkpoint " << checkpoint_path << std::endl;
+    std::cerr << "WordFeaturizer: loaded checkpoint " << checkpoint_path << std::endl;
   }
 
 void WordFeaturizer::save_checkpoint(std::string checkpoint_path) {
@@ -224,7 +224,7 @@ void WordFeaturizer::save_checkpoint(std::string checkpoint_path) {
       abort();
     }
     TF_DeleteTensor(checkpoint_tensor);
-    std::cout << "WordFeaturizer: saved checkpoint " << checkpoint_path << std::endl;
+    std::cerr << "WordFeaturizer: saved checkpoint " << checkpoint_path << std::endl;
   }
 
 void WordFeaturizer::set_learning_rate(float learning_rate) {
@@ -246,7 +246,7 @@ void WordFeaturizer::set_learning_rate(float learning_rate) {
     abort();
   }
   TF_DeleteTensor(new_learning_rate_tensor);
-  std::cout << "WordFeaturizer: set learning rate to " << learning_rate << std::endl;
+  std::cerr << "WordFeaturizer: set learning rate to " << learning_rate << std::endl;
   last_set_learning_rate = learning_rate;
 }
 
