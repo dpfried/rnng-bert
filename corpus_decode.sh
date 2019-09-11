@@ -4,7 +4,7 @@ block_number=$2
 build/nt-parser/nt-parser \
         --cnn-seed 1 \
         --cnn-mem 3000,0,500 \
-        --model_dir models/english-wwm \
+        --model_dir models/uncased-english-wwm \
         -T corpora/english/in_order/train.oracle \
         --test_data ../../corpora/oracles/${corpus}_raw_subsampled_tokenized_sentsplit.token-oracle-block-$block_number \
         --test_data_no_trees \
