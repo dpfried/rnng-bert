@@ -327,7 +327,8 @@ def main():
     parser.add_argument("--block_size", type=int)
     parser.add_argument("--only_these_blocks", type=int, nargs='*', default=[])
     parser.add_argument("--base_fname")
-    parser.add_argument("--max_bert_len", type=int, default=512, help="chop off tokens at the end of sentences until the sentence has no more than this many wordpieces (as tokenized by BERT)")
+    parser.add_argument("--max_bert_len", type=int, default=512, help="skip sentences with more than this many wordpieces (as tokenized by BERT)")
+    parser.add_argument("--long_sentences_output_file")
     args = parser.parse_args()
 
     print(' '.join(sys.argv), file=sys.stderr)
@@ -336,6 +337,11 @@ def main():
     # train_file.close()
     with open(args.dictionary_file, 'r') as f:
         words_list = set(line.strip() for line in f)
+
+    if args.long_sentences_output_file:
+        f_long_sentences_output = open(args.long_sentences_output_file, 'w')
+    else:
+        f_long_sentences_output = None
 
     # dev_lines = dev_file.readlines()
     line_ctr = 0
@@ -411,17 +417,22 @@ def main():
                 print("WARNING: removing sentence {} that has no BERT tokens: {}".format(line_ctr, segment.encode()))
                 continue
 
-            new_toks = tokens
-            while len(bert_input_ids) > args.max_bert_len:
-                new_toks = new_toks[:-1]
-                bert_input_ids, bert_word_end_mask = bert_tokenizer.tokenize(new_toks)
+            # new_toks = tokens
+            # while len(bert_input_ids) > args.max_bert_len:
+            #     new_toks = new_toks[:-1]
+            #     bert_input_ids, bert_word_end_mask = bert_tokenizer.tokenize(new_toks)
 
-            if len(new_toks) < len(tokens):
-                print("WARNING: truncating sentence {} ({} ...) of length {} to length {}".format(line_ctr, tokens[:10], len(tokens), len(new_toks)))
-                tags = tags[:len(new_toks)]
-                tokens = new_toks
-                lowercase = lowercase[:len(new_toks)]
-                morphfeats = morphfeats[:len(new_toks)]
+            # if len(new_toks) < len(tokens):
+            #     print("WARNING: truncating sentence {} ({} ...) of length {} to length {}".format(line_ctr, tokens[:10], len(tokens), len(new_toks)))
+            #     tags = tags[:len(new_toks)]
+            #     tokens = new_toks
+            #     lowercase = lowercase[:len(new_toks)]
+            #     morphfeats = morphfeats[:len(new_toks)]
+
+            if len(bert_input_ids) > args.max_bert_len:
+                if f_long_sentences_output is not None:
+                    f_long_sentences_output.write("{}\n".format(segment))
+                continue
 
             if args.is_token_file:
                 # for compatibility with oracle reader, wrap in brackets
@@ -491,6 +502,8 @@ def main():
         print("max same cons nts: %d, line %d" % (max_same_cons_nts, max_same_cons_nts_ix), file=sys.stderr)
         if args.in_order:
             print("max unary count: %d, line %d" % (max_unary_count, max_unary_count_ix), file=sys.stderr)
+    if f_long_sentences_output is not None:
+        f_long_sentences_output.close()
 
 if __name__ == "__main__":
     main()
