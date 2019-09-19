@@ -6,7 +6,7 @@ output_file="${sentsplit_token_file}.parsed"
 
 echo "will write output file to $output_file"
 
-dictionary_file="corpora/english.train.dictionary"
+dictionary_file="corpora/english/train.dictionary"
 model_dir="models/uncased-english-wwm"
 
 train_oracle_file="corpora/english/in_order/train.oracle"
@@ -22,7 +22,7 @@ sentsplit_decode_file="${working_dir}/`basename $sentsplit_token_file`.sentsplit
 long_sentences_file="${working_dir}/`basename $sentsplit_token_file`.long-sents"
 
 python3 scripts/get_oracle.py \
-        corpora/english/train.dictionary \
+        $dictionary_file \
         $sentsplit_token_file  \
         --is_token_file \
         --bert_model_dir $model_dir \
