@@ -115,7 +115,61 @@ EVALB/evalb -p EVALB/COLLINS_ch.prm $treebank_file treebank.parsed.retagged
 
 ## Training
 
-Instructions should (hopefully) be coming soon. Please contact `dfried AT cs DOT berkeley DOT edu` if you'd like help training the models that use BERT in the meantime. The oracle generation scripts we used are in `corpora/*/build_corpus.sh` and training scripts are in `train_*.sh`, but there are currently some missing dependencies and hard-coded paths. 
+Here are rough instructions, more complete ones will (hopefully) be coming soon. Please contact `dfried AT cs DOT berkeley DOT edu` if you'd like help training the models that use BERT in the meantime.
+
+1. Generate a Tensorflow computation graph in protobuf format for your BERT model (if it's not already present in `bert_models/*_graph.pb`; we currently have graphs for bert-{base,large}-{cased,uncased} and BERT-base chinese). Here is an example invocation for bert-base-uncased (after downloading and extracting Google's pretrained model into the `bert_models` directory):
+
+```
+export BERT_MODEL_DIR="bert_models/cased_L-12_H-768_A-12"
+export BERT_GRAPH_PATH="bert_models/cased_L-12_H-768_A-12_graph.pb"
+python3 scripts/bert_make_graph.py --bert_model_dir $BERT_MODEL_DIR --bert_output_file $BERT_GRAPH_PATH
+```
+Computation graph files depend not only on the size of the BERT architecture (base vs large) but also on the number of subwords in the model vocabulary, so you will likely need to generate a new graph if you are using a BERT model for another language (or a multilingual model).
+
+2. Obtain treebank files for your corpus, and put them into files with one parse tree per line (for example, as produced by [our PTB data generation](https://github.com/nikitakit/parser-data-gen) code). Optional: remove functional annotations and extraneous non-terminals, like TOP, which are all discarded in standard evaluation, using `scripts/strip_functional.py`.
+
+3. Produce a dictionary and oracle files for your treebank splits (adapted from `corpora/english/build_corpus.sh`):
+
+```
+export DICTIONARY=<dictionary_file_to_create>
+python3 scripts/get_dictionary.py <train_treebank_file> > $DICTIONARY
+python3 scripts/get_oracle.py $DICTIONARY <train_treebank_file> --bert_model_dir $BERT_MODEL_DIR > corpora/<your_corpus_name>/train.oracle --in_order
+python3 scripts/get_oracle.py $DICTIONARY <dev_treebank_file> --bert_model_dir $BERT_MODEL_DIR > corpora/<your_corpus_name>/dev.oracle --in_order
+```
+By default, the standard RNNG top-down transition system will be used; to use the In-Order system pass `--in_order` to the `scripts/get_oracle.py` commands above. 
+
+Subword token indices will be obtained using the `vocab.txt` file in $BERT_MODEL_DIR. Lowercasing will be performed iff "uncased" is part of the $BERT_MODEL_DIR filepath string, but if your model name doesn't use this convention, you can force lowercasing (or case preservation) by passing `do_lower_case=True` or `do_lower_case=False` as an argument to `bert_tokenize.Tokenizer` in `scripts/get_oracle.py`.
+
+4. Train the parser (adapted from `train_topdown_bert_large_english.sh`):
+
+Here is the command to train a parser with a BERT base model, with the standard RNNG top-down transition system:
+
+```
+build/nt-parser/nt-parser \
+    --cnn-mem 3000,3000,500 \
+    -T corpora/<your_corpus_name>/train.oracle \
+    -d corpora/<your_corpus_name>/dev.oracle \
+    -C <dev_treebank_file> \
+    -t \
+    --bert \
+    --bert_model_dir $BERT_MODEL_DIR \
+    --bert_graph_path $BERT_GRAPH_PATH \
+    --lstm_input_dim 128 \
+    --hidden_dim 128 \
+    -D 0.2 \
+    --batch_size 32 \
+    --subbatch_max_tokens 500 \
+    --eval_batch_size 8 \
+    --bert_lr 2e-5 \
+    --lr_decay_patience 2 \
+    --bert_large \
+    --model_output_dir <path_to_save> \
+    --optimizer adam
+```
+
+This assumes a BERT base model (with embedding size 768); if you are using a BERT large model (with embedding size 1024), also pass `--bert_large`. For a non-standard embedding size, you'll need to modify the [`BERT_DIM` definition](https://github.com/dpfried/rnng-bert/blob/da6f10ff981487b46f4eeaa3ea0950769c598816/nt-parser/nt-parser.cc#L2291).
+
+If you are using the In-Order system, also pass `--inorder`. (Note that the argument name differs from the `--in_order` used for get_oracle.py, apologies!)
 
 # Citations
 
